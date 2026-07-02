@@ -1,0 +1,23 @@
+import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { ensureCourseScaffold, resolveCourseDirForWait } from "./index";
+
+describe("course resolution", () => {
+  test("resolves the only course in OVERLEARN_COURSES_DIR for no-arg wait", async () => {
+    const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-courses-"));
+    const env = { OVERLEARN_COURSES_DIR: coursesDir };
+
+    try {
+      const paths = await ensureCourseScaffold("single", env);
+
+      await expect(resolveCourseDirForWait(undefined, env, tmpdir())).resolves.toBe(
+        paths.courseDir,
+      );
+    } finally {
+      await rm(coursesDir, { force: true, recursive: true });
+    }
+  });
+});
