@@ -1,0 +1,8 @@
+.bun-cache/
+.git/
+.github/
+.tmp/
+coverage/
+dist/
+node_modules/
+*.log
