@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { runCli } from "./run";
+import { parseCli, runCli } from "./run";
 
 describe("runCli", () => {
   test("prints the package version", () => {
@@ -16,5 +16,16 @@ describe("runCli", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("learn --help");
     expect(result.stdout).toContain("learn --version");
+  });
+
+  test("parses start and wait commands", () => {
+    expect(parseCli(["start", "demo"], "1.2.3")).toEqual({
+      kind: "start",
+      name: "demo",
+    });
+
+    expect(parseCli(["wait"], "1.2.3")).toEqual({
+      kind: "wait",
+    });
   });
 });
