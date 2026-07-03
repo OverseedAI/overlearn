@@ -37,6 +37,7 @@ import {
   formatStaticExportResult,
   resolveStaticExportCourseDir,
 } from "../export";
+import { fetchCourse, shareCourse, unpublishCourse } from "../registry";
 import { parseCli, type CliResult } from "./run";
 
 const writeResult = (result: CliResult): void => {
@@ -247,6 +248,37 @@ const main = async (): Promise<CliResult> => {
     return {
       exitCode: 0,
       stdout: formatStaticExportResult(exported, command.json),
+    };
+  }
+
+  if (command.kind === "share") {
+    return {
+      exitCode: 0,
+      stdout: await shareCourse({
+        ...(command.name === undefined ? {} : { name: command.name }),
+        json: command.json,
+      }),
+    };
+  }
+
+  if (command.kind === "unpublish") {
+    return {
+      exitCode: 0,
+      stdout: await unpublishCourse({
+        ...(command.name === undefined ? {} : { name: command.name }),
+        json: command.json,
+      }),
+    };
+  }
+
+  if (command.kind === "fetch") {
+    return {
+      exitCode: 0,
+      stdout: await fetchCourse({
+        input: command.input,
+        force: command.force,
+        json: command.json,
+      }),
     };
   }
 
