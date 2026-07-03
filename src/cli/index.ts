@@ -28,6 +28,11 @@ import {
   type GlossaryMutation,
   type TopicMutation,
 } from "../course";
+import {
+  exportCourse,
+  formatStaticExportResult,
+  resolveStaticExportCourseDir,
+} from "../export";
 import { parseCli, type CliResult } from "./run";
 
 const writeResult = (result: CliResult): void => {
@@ -189,6 +194,21 @@ const main = async (): Promise<CliResult> => {
     return {
       exitCode: 0,
       stdout: JSON.stringify(await getCourseStatus(command.name)),
+    };
+  }
+
+  if (command.kind === "export") {
+    const courseDir = await resolveStaticExportCourseDir(command.name);
+    const exported = await exportCourse({
+      courseDir,
+      ...(command.outDir === undefined ? {} : { outDir: command.outDir }),
+      includeTranscript: command.includeTranscript,
+      force: command.force,
+    });
+
+    return {
+      exitCode: 0,
+      stdout: formatStaticExportResult(exported, command.json),
     };
   }
 

@@ -332,3 +332,57 @@ describe("emit topic CLI parsing", () => {
     });
   });
 });
+
+describe("export CLI parsing", () => {
+  test("parses export options", () => {
+    expect(
+      parseCli(
+        [
+          "export",
+          "./course",
+          "--out",
+          "./site",
+          "--include-transcript",
+          "--force",
+          "--json",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "export",
+      name: "./course",
+      outDir: "./site",
+      includeTranscript: true,
+      force: true,
+      json: true,
+    });
+
+    expect(parseCli(["export"], "1.2.3")).toEqual({
+      kind: "export",
+      includeTranscript: false,
+      force: false,
+      json: false,
+    });
+  });
+
+  test("rejects invalid export arguments", () => {
+    expect(parseCli(["export", "--out"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn export [name]"),
+        stderr:
+          "Usage: learn export [name] [--out <dir>] [--include-transcript] [--force] [--json]",
+      },
+    });
+
+    expect(parseCli(["export", "one", "two"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn export [name]"),
+        stderr: "Too many arguments for export.",
+      },
+    });
+  });
+});
