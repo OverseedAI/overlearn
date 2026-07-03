@@ -418,7 +418,7 @@ svg .draw {
       <a href="/courses">courses</a>
       <span style="color: var(--faint)">MIT</span>
     </div>
-    <div class="turn-hint" id="hint">your turn — tap to continue →</div>
+    <div class="turn-hint" id="hint">your turn — tap or scroll →</div>
   </div>
 </div>
 
@@ -477,9 +477,43 @@ svg .draw {
     advance();
   });
   window.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowRight" || e.key === " " || e.key === "Enter") { e.preventDefault(); advance(); }
-    if (e.key === "ArrowLeft") { e.preventDefault(); show(current - 1); }
+    if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === " " || e.key === "Enter") { e.preventDefault(); advance(); }
+    if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); show(current - 1); }
   });
+
+  let navLockUntil = 0;
+  let wheelAccum = 0;
+  const wheelStep = (direction) => {
+    const now = Date.now();
+    if (now < navLockUntil) return;
+    navLockUntil = now + 900;
+    if (direction > 0) {
+      if (current < beats.length - 1) show(current + 1);
+    } else {
+      show(current - 1);
+    }
+  };
+
+  window.addEventListener("wheel", (e) => {
+    if (Date.now() < navLockUntil) { wheelAccum = 0; return; }
+    wheelAccum += e.deltaY;
+    if (Math.abs(wheelAccum) < 50) return;
+    const direction = wheelAccum > 0 ? 1 : -1;
+    wheelAccum = 0;
+    wheelStep(direction);
+  }, { passive: true });
+
+  let touchStartY = null;
+  board.addEventListener("touchstart", (e) => {
+    touchStartY = e.touches[0].clientY;
+  }, { passive: true });
+  board.addEventListener("touchend", (e) => {
+    if (touchStartY === null) return;
+    const deltaY = e.changedTouches[0].clientY - touchStartY;
+    touchStartY = null;
+    if (Math.abs(deltaY) < 45) return;
+    wheelStep(deltaY < 0 ? 1 : -1);
+  }, { passive: true });
 
   const copyBtn = document.getElementById("copy");
   copyBtn.addEventListener("click", async () => {
