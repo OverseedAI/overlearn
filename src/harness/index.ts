@@ -30,7 +30,7 @@ export type HarnessOptions = Readonly<{
 }>;
 
 export type HarnessAction = Readonly<{
-  kind: "file" | "settings-hook" | "directory";
+  kind: "file" | "settings-hook" | "config" | "directory";
   path: string;
   status:
     | "written"
@@ -74,6 +74,13 @@ type PlannedSettingsHook = Readonly<{
   command: string;
 }>;
 
+type PlannedTomlFlag = Readonly<{
+  path: string;
+  table: string;
+  key: string;
+  value: boolean;
+}>;
+
 type HarnessPlan = Readonly<{
   tool: HarnessTool;
   scope: HarnessScope;
@@ -81,6 +88,7 @@ type HarnessPlan = Readonly<{
   manifestPath: string;
   files: readonly PlannedFile[];
   settingsHooks: readonly PlannedSettingsHook[];
+  tomlFlags: readonly PlannedTomlFlag[];
 }>;
 
 type ManifestFileEntry = Readonly<{
@@ -428,6 +436,81 @@ const prepareSettingsRemoval = async (
   };
 };
 
+type TomlFlagResult = Readonly<{
+  status: "updated" | "unchanged" | "skipped";
+  detail: string;
+  content?: string;
+}>;
+
+// Line-based upsert so user formatting and comments survive. Handles the
+// common `[table]` section form only; an inline `table = { ... }` is left
+// alone and reported for manual editing.
+const upsertTomlFlag = (raw: string, flag: PlannedTomlFlag): TomlFlagResult => {
+  const header = `[${flag.table}]`;
+  const assignment = `${flag.key} = ${flag.value}`;
+  const detail = `${flag.table}.${flag.key} = ${flag.value}`;
+  const keyPattern = new RegExp(`^\\s*${flag.key}\\s*=`);
+  const inlinePattern = new RegExp(`^\\s*${flag.table}\\s*=`);
+
+  const normalized =
+    raw.length === 0 || raw.endsWith("\n") ? raw : `${raw}\n`;
+  const lines = normalized.length === 0 ? [] : normalized.split("\n");
+
+  if (lines.some((line) => inlinePattern.test(line))) {
+    return {
+      status: "skipped",
+      detail: `${flag.table} is an inline table; set ${detail} manually`,
+    };
+  }
+
+  const headerIndex = lines.findIndex((line) => line.trim() === header);
+
+  if (headerIndex === -1) {
+    const prefix = normalized.length === 0 ? "" : `${normalized}\n`;
+    return {
+      status: "updated",
+      detail,
+      content: `${prefix}${header}\n${assignment}\n`,
+    };
+  }
+
+  let tableEnd = lines.length;
+  for (let index = headerIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (line.trim().startsWith("[")) {
+      tableEnd = index;
+      break;
+    }
+  }
+
+  for (let index = headerIndex + 1; index < tableEnd; index += 1) {
+    const line = lines[index] ?? "";
+    if (!keyPattern.test(line)) {
+      continue;
+    }
+
+    if (line.trim() === assignment) {
+      return { status: "unchanged", detail };
+    }
+
+    const next = [...lines];
+    next[index] = assignment;
+    return {
+      status: "updated",
+      detail,
+      content: next.join("\n"),
+    };
+  }
+
+  const next = [...lines];
+  next.splice(headerIndex + 1, 0, assignment);
+  return {
+    status: "updated",
+    detail,
+    content: next.join("\n"),
+  };
+};
+
 const missingDirsFor = async (path: string): Promise<readonly string[]> => {
   const dirs: string[] = [];
   let current = dirname(path);
@@ -642,6 +725,31 @@ const fileReferencedBy = (
     install.files.some((file) => file.path === path),
   );
 
+const manifestRecordsContent = (
+  installs: readonly ManifestInstall[],
+  path: string,
+  sha256: string,
+): boolean =>
+  installs.some((install) =>
+    install.files.some(
+      (file) => file.path === path && file.sha256 === sha256,
+    ),
+  );
+
+const withRefreshedHashes = (
+  install: ManifestInstall,
+  refreshedHashes: ReadonlyMap<string, string>,
+): ManifestInstall =>
+  refreshedHashes.size === 0
+    ? install
+    : {
+        ...install,
+        files: install.files.map((file) => {
+          const sha256 = refreshedHashes.get(file.path);
+          return sha256 === undefined ? file : { ...file, sha256 };
+        }),
+      };
+
 const settingsHookReferencedBy = (
   installs: readonly ManifestInstall[],
   hook: ManifestSettingsHookEntry,
@@ -722,6 +830,16 @@ export const planHarnessInstall = (
           command: codexHookCommand(scriptPath),
         },
       ],
+      // Codex only runs hooks.json when the feature flag is on; uninstall
+      // leaves the flag alone since other hooks may rely on it.
+      tomlFlags: [
+        {
+          path: join(agentHome, ".codex", "config.toml"),
+          table: "features",
+          key: "hooks",
+          value: true,
+        },
+      ],
     };
   }
 
@@ -748,6 +866,7 @@ export const planHarnessInstall = (
         command: claudeHookCommand(scriptPath),
       },
     ],
+    tomlFlags: [],
   };
 };
 
@@ -764,6 +883,7 @@ export const installHarness = async (
     installMatchesPlan(install, plan),
   );
   const actions: HarnessAction[] = [];
+  const refreshedHashes = new Map<string, string>();
 
   let files = existingInstall?.files ?? [];
   let settingsHooks = existingInstall?.settingsHooks ?? [];
@@ -771,6 +891,9 @@ export const installHarness = async (
   for (const file of plan.files) {
     const existing = await readTextIfExists(file.path);
     const exists = existing !== undefined;
+    const ownedUnmodified =
+      exists && manifestRecordsContent(manifest.installs, file.path, hashText(existing));
+
     if (exists && !force) {
       if (existing === file.content) {
         // Same content, likely installed for another tool: reference it in
@@ -795,13 +918,18 @@ export const installHarness = async (
         continue;
       }
 
-      actions.push({
-        kind: "file",
-        path: file.path,
-        status: "skipped",
-        detail: "existing file",
-      });
-      continue;
+      // A file that still matches an installed hash is ours and unmodified,
+      // so a newer bundled version may refresh it. Anything else was changed
+      // by the user and needs --force.
+      if (!ownedUnmodified) {
+        actions.push({
+          kind: "file",
+          path: file.path,
+          status: "skipped",
+          detail: "existing file",
+        });
+        continue;
+      }
     }
 
     const createdDirs = await missingDirsFor(file.path);
@@ -812,16 +940,21 @@ export const installHarness = async (
       await chmod(file.path, file.mode);
     }
 
+    const sha256 = hashText(file.content);
+    refreshedHashes.set(file.path, sha256);
     files = upsertFileEntry(files, {
       path: file.path,
-      sha256: hashText(file.content),
+      sha256,
       ...(file.mode === undefined ? {} : { mode: file.mode }),
       createdDirs,
     });
     actions.push({
       kind: "file",
       path: file.path,
-      status: exists ? "overwritten" : "written",
+      status: exists ? (ownedUnmodified && !force ? "updated" : "overwritten") : "written",
+      ...(ownedUnmodified && !force && exists
+        ? { detail: "bundled content refreshed" }
+        : {}),
     });
   }
 
@@ -873,6 +1006,26 @@ export const installHarness = async (
     });
   }
 
+  for (const flag of plan.tomlFlags) {
+    const raw = (await readTextIfExists(flag.path)) ?? "";
+    const result = upsertTomlFlag(raw, flag);
+
+    if (result.status === "updated" && result.content !== undefined) {
+      await mkdir(dirname(flag.path), { recursive: true });
+      await writeFile(flag.path, result.content, "utf8");
+    }
+
+    actions.push({
+      kind: "config",
+      path: flag.path,
+      status: result.status === "unchanged" ? "skipped" : result.status,
+      detail:
+        result.status === "unchanged"
+          ? `${result.detail} already set`
+          : result.detail,
+    });
+  }
+
   const nextInstall: ManifestInstall = {
     tool: plan.tool,
     scope: plan.scope,
@@ -882,7 +1035,9 @@ export const installHarness = async (
     settingsHooks,
   };
   const nextInstalls = [
-    ...manifest.installs.filter((install) => !installMatchesPlan(install, plan)),
+    ...manifest.installs
+      .filter((install) => !installMatchesPlan(install, plan))
+      .map((install) => withRefreshedHashes(install, refreshedHashes)),
     nextInstall,
   ].filter(
     (install) => install.files.length > 0 || install.settingsHooks.length > 0,

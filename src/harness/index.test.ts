@@ -293,12 +293,21 @@ describe("harness install", () => {
         "stop-backstop.sh",
       );
       const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
+      const configPath = join(fixture.agentHome, ".codex", "config.toml");
 
       expect(result.actions).toEqual([
         expect.objectContaining({ path: skillPath, status: "written" }),
         expect.objectContaining({ path: hookPath, status: "written" }),
         expect.objectContaining({ path: hooksJsonPath, status: "updated" }),
+        expect.objectContaining({
+          kind: "config",
+          path: configPath,
+          status: "updated",
+        }),
       ]);
+      expect(await readFile(configPath, "utf8")).toBe(
+        "[features]\nhooks = true\n",
+      );
       expect(await readFile(skillPath, "utf8")).toBe(
         `${learnSkillCodex.trimEnd()}\n`,
       );
@@ -335,6 +344,200 @@ describe("harness install", () => {
       expect(await exists(join(fixture.projectDir, ".codex"))).toBe(false);
       expect(JSON.stringify(await readJson(hooksJsonPath))).toContain(
         "stop-backstop.sh",
+      );
+    });
+  });
+
+  test("codex install flips features.hooks in an existing config.toml without touching the rest", async () => {
+    await withFixture(async (fixture) => {
+      const configPath = join(fixture.agentHome, ".codex", "config.toml");
+      await writeText(
+        configPath,
+        [
+          'model = "gpt-5.5"',
+          "",
+          "[features]",
+          "plugins = true",
+          "hooks = false",
+          "",
+          "[tui]",
+          'theme = "dark"',
+          "",
+        ].join("\n"),
+      );
+
+      const first = await installHarness(
+        harnessOptions(fixture, { tool: "codex", scope: "global" }),
+      );
+      expect(first.actions).toContainEqual(
+        expect.objectContaining({
+          kind: "config",
+          path: configPath,
+          status: "updated",
+          detail: "features.hooks = true",
+        }),
+      );
+      expect(await readFile(configPath, "utf8")).toBe(
+        [
+          'model = "gpt-5.5"',
+          "",
+          "[features]",
+          "plugins = true",
+          "hooks = true",
+          "",
+          "[tui]",
+          'theme = "dark"',
+          "",
+        ].join("\n"),
+      );
+
+      const second = await installHarness(
+        harnessOptions(fixture, { tool: "codex", scope: "global" }),
+      );
+      expect(second.actions).toContainEqual(
+        expect.objectContaining({
+          kind: "config",
+          path: configPath,
+          status: "skipped",
+          detail: "features.hooks = true already set",
+        }),
+      );
+    });
+  });
+
+  test("codex install leaves an inline features table for manual editing", async () => {
+    await withFixture(async (fixture) => {
+      const configPath = join(fixture.agentHome, ".codex", "config.toml");
+      const original = 'features = { plugins = true }\n';
+      await writeText(configPath, original);
+
+      const result = await installHarness(
+        harnessOptions(fixture, { tool: "codex", scope: "global" }),
+      );
+      expect(result.actions).toContainEqual(
+        expect.objectContaining({
+          kind: "config",
+          path: configPath,
+          status: "skipped",
+          detail: "features is an inline table; set features.hooks = true manually",
+        }),
+      );
+      expect(await readFile(configPath, "utf8")).toBe(original);
+    });
+  });
+
+  test("re-run refreshes files from an older install without --force", async () => {
+    await withFixture(async (fixture) => {
+      const options = harnessOptions(fixture, { tool: "codex", scope: "global" });
+      await installHarness(options);
+
+      const skillPath = join(
+        fixture.agentHome,
+        ".agents",
+        "skills",
+        "learn",
+        "SKILL.md",
+      );
+      const manifestPath = planHarnessInstall(options).manifestPath;
+
+      // Simulate a previous CLI version's install: older bundled content on
+      // disk, with a matching hash recorded in the manifest.
+      const oldContent = "# Old bundled skill\n";
+      const oldSha256 = new Bun.CryptoHasher("sha256")
+        .update(oldContent)
+        .digest("hex");
+      await writeText(skillPath, oldContent);
+      const manifest = await readJson<{
+        installs: Array<{ files: Array<{ path: string; sha256: string }> }>;
+      }>(manifestPath);
+      for (const install of manifest.installs) {
+        for (const file of install.files) {
+          if (file.path === skillPath) {
+            file.sha256 = oldSha256;
+          }
+        }
+      }
+      await writeText(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+      const result = await installHarness(options);
+      expect(result.actions).toContainEqual(
+        expect.objectContaining({
+          path: skillPath,
+          status: "updated",
+          detail: "bundled content refreshed",
+        }),
+      );
+      expect(await readFile(skillPath, "utf8")).toBe(
+        `${learnSkillCodex.trimEnd()}\n`,
+      );
+    });
+  });
+
+  test("refresh updates the shared script hash in other installs' manifests", async () => {
+    await withFixture(async (fixture) => {
+      const claudeOptions = harnessOptions(fixture, {
+        tool: "claude-code",
+        scope: "global",
+      });
+      const codexOptions = harnessOptions(fixture, {
+        tool: "codex",
+        scope: "global",
+      });
+      await installHarness(claudeOptions);
+      await installHarness(codexOptions);
+
+      const hookPath = join(
+        fixture.overlearnHome,
+        "hooks",
+        "stop-backstop.sh",
+      );
+      const manifestPath = planHarnessInstall(claudeOptions).manifestPath;
+
+      const oldContent = "#!/usr/bin/env bash\n# old backstop\n";
+      const oldSha256 = new Bun.CryptoHasher("sha256")
+        .update(oldContent)
+        .digest("hex");
+      await writeText(hookPath, oldContent);
+      const manifest = await readJson<{
+        installs: Array<{ files: Array<{ path: string; sha256: string }> }>;
+      }>(manifestPath);
+      for (const install of manifest.installs) {
+        for (const file of install.files) {
+          if (file.path === hookPath) {
+            file.sha256 = oldSha256;
+          }
+        }
+      }
+      await writeText(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+      // Refresh via the codex install; the claude-code manifest entry must
+      // pick up the new hash so its uninstall still recognizes the file.
+      await installHarness(codexOptions);
+
+      const currentSha256 = new Bun.CryptoHasher("sha256")
+        .update(`${stopBackstop.trimEnd()}\n`)
+        .digest("hex");
+      const after = await readJson<{
+        installs: Array<{
+          tool: string;
+          files: Array<{ path: string; sha256: string }>;
+        }>;
+      }>(manifestPath);
+      for (const install of after.installs) {
+        for (const file of install.files) {
+          if (file.path === hookPath) {
+            expect(file.sha256).toBe(currentSha256);
+          }
+        }
+      }
+
+      const result = await uninstallHarness(claudeOptions);
+      expect(result.actions).toContainEqual(
+        expect.objectContaining({
+          path: hookPath,
+          status: "kept",
+          detail: "still referenced by another harness install",
+        }),
       );
     });
   });
