@@ -2,6 +2,7 @@ import { courseMetadata, validateRegistryBundle } from "./bundle";
 import { verifyGitHubPublisher } from "./github";
 import { renderCoursePage, renderIndex } from "./html";
 import { installScript } from "./install-script";
+import { landingPage } from "./landing";
 import {
   bundleKey,
   chooseSlug,
@@ -161,6 +162,14 @@ const route = async (request: Request, env: Env): Promise<Response> => {
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
   if (path === "/") {
+    if (request.method !== "GET") {
+      return new Response("Method not allowed.", { status: 405 });
+    }
+
+    return html(landingPage);
+  }
+
+  if (path === "/courses") {
     return html(renderIndex(await listMetadata(env)));
   }
 

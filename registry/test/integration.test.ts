@@ -362,6 +362,25 @@ afterEach(async () => {
   tempRoots.clear();
 });
 
+describe("landing page", () => {
+  test("serves the chalkboard landing at / and the registry index at /courses", async () => {
+    const landing = await fetchWorker("/");
+    expect(landing.status).toBe(200);
+    expect(landing.headers.get("Content-Type")).toContain("text/html");
+
+    const body = await landing.text();
+    expect(body).toContain("curl -fsSL https://overlearn.org/install.sh | bash");
+    expect(body).toContain("DO NOT ERASE");
+    expect(body).toContain('href="/courses"');
+
+    const post = await worker.fetch(
+      new Request("https://overlearn.org/", { method: "POST" }),
+      {} as Env,
+    );
+    expect(post.status).toBe(405);
+  });
+});
+
 describe("installer", () => {
   test("serves /install.sh and /install as a shell script", async () => {
     const response = await fetchWorker("/install.sh");
@@ -477,7 +496,12 @@ describe("registry local integration", () => {
     expect(published.slug).toBe("compound-interest");
     expect(published.url).toBe(`${workerUrl}/c/compound-interest`);
 
-    const indexHtml = await fetch(workerUrl).then((response) => response.text());
+    const landingHtml = await fetch(workerUrl).then((response) => response.text());
+    expect(landingHtml).toContain("DO NOT ERASE");
+
+    const indexHtml = await fetch(`${workerUrl}/courses`).then((response) =>
+      response.text(),
+    );
     expect(indexHtml).toContain("Compound Interest");
     expect(indexHtml).toContain("octocat");
 

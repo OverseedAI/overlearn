@@ -256,8 +256,9 @@ export const renderIndex = (courses: readonly CourseMetadata[]): string =>
     "Overlearn Registry",
     `<header class="site-header">
       <div class="brand">
-        <h1>Overlearn Registry</h1>
-        <p class="subtle">Shared course bundles for local learning.</p>
+        <a href="/">overlearn</a>
+        <h1>Shared Courses</h1>
+        <p class="subtle">Course bundles published by learners — fetch one with learn fetch &lt;slug&gt;.</p>
       </div>
       <p class="subtle">${courses.length} courses</p>
     </header>
@@ -273,7 +274,7 @@ export const renderCoursePage = (course: CourseMetadata): string =>
     `${course.title} - Overlearn Registry`,
     `<header class="site-header">
       <div class="brand">
-        <a href="/">Registry</a>
+        <a href="/courses">Courses</a>
         <h1>${escapeHtml(course.title)}</h1>
         <p class="subtle">${escapeHtml(course.slug)} by ${escapeHtml(
           course.publisher.login,
