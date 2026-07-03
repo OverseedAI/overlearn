@@ -10,6 +10,8 @@ import {
   isValidConceptId,
   isValidDemoFileName,
   isValidTopicPath,
+  latestMasteryForTopic,
+  latestMasteryScores,
   parseKeyPointsText,
   readActiveFeynmanCheck,
   readCourseManifest,
@@ -19,6 +21,8 @@ import {
   registerDemo,
   requireCourse,
   resolveCourseDirForWait,
+  selectWeakestTopicConcepts,
+  topicConceptIds,
   upsertGlossaryEntry,
   upsertTopic,
   upsertTopicTree,
@@ -497,9 +501,10 @@ describe("feynman and mastery storage", () => {
   test("validates concept ids and parses key point text", () => {
     expect(isValidConceptId("rule-of-72")).toBe(true);
     expect(isValidConceptId("rule-72")).toBe(true);
+    expect(isValidConceptId("rule/of-72")).toBe(true);
     expect(isValidConceptId("Rule-of-72")).toBe(false);
     expect(isValidConceptId("rule_of_72")).toBe(false);
-    expect(isValidConceptId("rule/of/72")).toBe(false);
+    expect(isValidConceptId("rule//72")).toBe(false);
     expect(isValidConceptId("")).toBe(false);
 
     expect(parseKeyPointsText("mechanism, example; limitation")).toEqual([
@@ -620,8 +625,159 @@ describe("feynman and mastery storage", () => {
   });
 });
 
+describe("mastery heat map helpers", () => {
+  test("reduces mastery history to the latest score per concept", () => {
+    const scores = latestMasteryScores([
+      {
+        concept: "btree-fanout",
+        score: 40,
+        at: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        concept: "hash-index",
+        score: 65,
+        at: "2026-01-02T00:00:00.000Z",
+      },
+      {
+        concept: "btree-fanout",
+        score: 72,
+        gaps: "missed page size tradeoff",
+        at: "2026-01-03T00:00:00.000Z",
+      },
+    ]);
+
+    expect(scores).toEqual([
+      {
+        concept: "btree-fanout",
+        score: 72,
+        gaps: "missed page size tradeoff",
+        at: "2026-01-03T00:00:00.000Z",
+      },
+      {
+        concept: "hash-index",
+        score: 65,
+        at: "2026-01-02T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  test("maps mastery concepts to topics by full path or final slug", () => {
+    const topic = {
+      path: "indexes/btree-fanout",
+      title: "B-tree fanout",
+      current: false,
+      children: [],
+    };
+
+    expect(topicConceptIds(topic.path)).toEqual([
+      "indexes/btree-fanout",
+      "btree-fanout",
+    ]);
+
+    expect(
+      latestMasteryForTopic(
+        topic,
+        latestMasteryScores([
+          {
+            concept: "btree-fanout",
+            score: 55,
+            at: "2026-01-01T00:00:00.000Z",
+          },
+        ]),
+      ),
+    ).toMatchObject({ concept: "btree-fanout", score: 55 });
+
+    expect(
+      latestMasteryForTopic(
+        topic,
+        latestMasteryScores([
+          {
+            concept: "indexes/btree-fanout",
+            score: 81,
+            at: "2026-01-01T00:00:00.000Z",
+          },
+        ]),
+      ),
+    ).toMatchObject({ concept: "indexes/btree-fanout", score: 81 });
+  });
+
+  test("selects weakest topic concepts with older ties first", () => {
+    const topics = [
+      {
+        path: "indexes",
+        title: "Indexes",
+        current: false,
+        children: [
+          {
+            path: "indexes/hash",
+            title: "Hash",
+            current: false,
+            children: [],
+          },
+          {
+            path: "indexes/bitmap",
+            title: "Bitmap",
+            current: false,
+            children: [],
+          },
+          {
+            path: "indexes/fanout",
+            title: "Fanout",
+            current: false,
+            children: [],
+          },
+          {
+            path: "indexes/covering",
+            title: "Covering",
+            current: false,
+            children: [],
+          },
+        ],
+      },
+    ];
+    const scores = latestMasteryScores([
+      {
+        concept: "unmapped",
+        score: 1,
+        at: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        concept: "fanout",
+        score: 45,
+        at: "2026-01-05T00:00:00.000Z",
+      },
+      {
+        concept: "hash",
+        score: 45,
+        at: "2026-01-03T00:00:00.000Z",
+      },
+      {
+        concept: "bitmap",
+        score: 45,
+        at: "2026-01-04T00:00:00.000Z",
+      },
+      {
+        concept: "indexes",
+        score: 30,
+        at: "2026-01-06T00:00:00.000Z",
+      },
+      {
+        concept: "covering",
+        score: 90,
+        at: "2026-01-02T00:00:00.000Z",
+      },
+    ]);
+
+    expect(selectWeakestTopicConcepts(topics, scores, 3)).toEqual([
+      "indexes",
+      "hash",
+      "bitmap",
+    ]);
+  });
+});
+
 describe("turn event storage", () => {
-  test("parses message, nav, and feynman-answer events in stored order", async () => {
+  test("parses message, nav, review-weak, and feynman-answer events in stored order", async () => {
     const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-events-"));
     const env = { OVERLEARN_COURSES_DIR: coursesDir };
 
@@ -630,6 +786,7 @@ describe("turn event storage", () => {
       await writePendingEvents(paths.courseDir, [
         { type: "message", text: "hello" },
         { type: "nav", path: "indexes/btree" },
+        { type: "review-weak", concepts: ["indexes/btree", "hash"] },
         {
           type: "feynman-answer",
           concept: "rule-of-72",
@@ -641,6 +798,7 @@ describe("turn event storage", () => {
       await expect(readPendingEvents(paths.courseDir)).resolves.toEqual([
         { type: "message", text: "hello" },
         { type: "nav", path: "indexes/btree" },
+        { type: "review-weak", concepts: ["indexes/btree", "hash"] },
         {
           type: "feynman-answer",
           concept: "rule-of-72",

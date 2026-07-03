@@ -18,14 +18,17 @@ import {
   getCoursePaths,
   isValidConceptId,
   isValidTopicPath,
+  latestMasteryScores,
   isValidDemoFileName,
   readActiveFeynmanCheck,
   readCourseManifest,
   readDaemonMetadata,
   readGlossary,
+  readMastery,
   readPendingEvents,
   readTranscript,
   resolveCourseDirForWait,
+  selectWeakestTopicConcepts,
   writeDaemonMetadata,
   writePendingEvents,
   writeTurnFile,
@@ -34,12 +37,14 @@ import {
   type CoursePaths,
   type DemoEntry,
   type GlossaryEntry,
+  type MasteryEntry,
   type TopicNode,
   type TranscriptEntry,
   type TurnEvent,
 } from "../course";
 import { watchFeynmanFile } from "./feynman";
 import { watchGlossaryFile } from "./glossary";
+import { watchMasteryFile } from "./mastery";
 import {
   readLessonSnapshot,
   watchLessonDirectory,
@@ -96,6 +101,7 @@ const LOCALHOST_BIND_HOST = "127.0.0.1";
 const LOCALHOST_PRINT_HOST = "localhost";
 const DAEMON_START_TIMEOUT_MS = 5_000;
 const DAEMON_START_POLL_MS = 50;
+export const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
 
 const sleep = async (milliseconds: number): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -560,6 +566,7 @@ const createSseHub = (
   getGlossary: () => readonly GlossaryEntry[],
   getTopics: () => readonly TopicNode[],
   getUnassignedDemos: () => readonly DemoEntry[],
+  getMasteryScores: () => readonly MasteryEntry[],
   getDemoFiles: () => ReadonlySet<string>,
   getActiveFeynmanCheck: () => ActiveFeynmanCheck | undefined,
 ) => {
@@ -632,6 +639,12 @@ const createSseHub = (
     }
   };
 
+  const broadcastMastery = (entries: readonly MasteryEntry[]): void => {
+    for (const subscriber of subscribers) {
+      writeEvent(subscriber, "mastery", { entries });
+    }
+  };
+
   const broadcastFeynman = (
     activeCheck: ActiveFeynmanCheck | undefined,
   ): void => {
@@ -656,6 +669,7 @@ const createSseHub = (
       topics: getTopics(),
       unassignedDemos: getUnassignedDemos(),
     });
+    writeEvent(response, "mastery", { entries: getMasteryScores() });
     writeEvent(response, "feynman", {
       activeCheck: getActiveFeynmanCheck() ?? null,
     });
@@ -669,6 +683,7 @@ const createSseHub = (
     broadcastFeynman,
     broadcastGlossary,
     broadcastLesson,
+    broadcastMastery,
     broadcastMessage,
     broadcastStatus,
     broadcastTranscript,
@@ -705,7 +720,11 @@ const parseSubmitText = (bodyText: string): string => {
   return text;
 };
 
-const parseNavPath = (bodyText: string): string => {
+type NavRequest =
+  | Readonly<{ kind: "nav"; path: string }>
+  | Readonly<{ kind: "review-weak" }>;
+
+const parseNavRequest = (bodyText: string): NavRequest => {
   const body = JSON.parse(bodyText) as unknown;
   if (!isRecord(body) || typeof body["path"] !== "string") {
     throw new Error("Expected JSON body with a path field.");
@@ -716,11 +735,15 @@ const parseNavPath = (bodyText: string): string => {
     throw new Error("Topic path cannot be empty.");
   }
 
+  if (path === REVIEW_WEAK_NAV_PATH) {
+    return { kind: "review-weak" };
+  }
+
   if (!isValidTopicPath(path)) {
     throw new Error(`Invalid topic path: ${body["path"]}.`);
   }
 
-  return path;
+  return { kind: "nav", path };
 };
 
 const parseFeynmanAnswer = (
@@ -742,7 +765,7 @@ const parseFeynmanAnswer = (
 
   if (!isValidConceptId(concept)) {
     throw new Error(
-      `Invalid concept id: ${body["concept"]}. Use lowercase letters, numbers, and hyphens.`,
+      `Invalid concept id: ${body["concept"]}. Use slash-separated lowercase letters, numbers, and hyphens.`,
     );
   }
 
@@ -835,6 +858,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   let glossaryEntries = await readGlossary(coursePath);
   let topicTree = manifest.topics;
   let unassignedDemos = manifest.unassignedDemos;
+  let masteryScores = latestMasteryScores(await readMastery(coursePath));
   let demoFileSet = await readDemoFileSet(coursePaths.demosDir);
   let activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
 
@@ -848,6 +872,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     () => glossaryEntries,
     () => topicTree,
     () => unassignedDemos,
+    () => masteryScores,
     () => demoFileSet,
     () => activeFeynmanCheck,
   );
@@ -877,6 +902,12 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       unassignedDemos = manifest.unassignedDemos;
       demoFileSet = await readDemoFileSet(coursePaths.demosDir);
       sseHub.broadcastTopics(topicTree, unassignedDemos);
+    });
+  };
+  const refreshMastery = async (): Promise<void> => {
+    await serialize(async () => {
+      masteryScores = latestMasteryScores(await readMastery(coursePath));
+      sseHub.broadcastMastery(masteryScores);
     });
   };
   const refreshFeynman = async (): Promise<void> => {
@@ -920,6 +951,17 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         error instanceof Error
           ? `Topic watcher error: ${error.message}`
           : "Topic watcher error.",
+      );
+    },
+  });
+  const masteryWatcher = watchMasteryFile({
+    masteryJson: coursePaths.masteryJson,
+    emit: refreshMastery,
+    onError: (error) => {
+      console.error(
+        error instanceof Error
+          ? `Mastery watcher error: ${error.message}`
+          : "Mastery watcher error.",
       );
     },
   });
@@ -1043,9 +1085,9 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   };
 
   const handleNav = async (bodyText: string): Promise<Response> => {
-    let path: string;
+    let navRequest: NavRequest;
     try {
-      path = parseNavPath(bodyText);
+      navRequest = parseNavRequest(bodyText);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Invalid nav request.";
@@ -1053,10 +1095,24 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     }
 
     await serialize(async () => {
-      const event: TurnEvent = { type: "nav", path };
+      let queuedEvent: TurnEvent;
+      if (navRequest.kind === "review-weak") {
+        manifest = await readCourseManifest(coursePath);
+        topicTree = manifest.topics;
+        unassignedDemos = manifest.unassignedDemos;
+        masteryScores = latestMasteryScores(await readMastery(coursePath));
+        sseHub.broadcastTopics(topicTree, unassignedDemos);
+        sseHub.broadcastMastery(masteryScores);
+        queuedEvent = {
+          type: "review-weak",
+          concepts: selectWeakestTopicConcepts(topicTree, masteryScores, 3),
+        };
+      } else {
+        queuedEvent = { type: "nav", path: navRequest.path };
+      }
       const pendingEvents = await readPendingEvents(coursePath);
 
-      await writePendingEvents(coursePath, [...pendingEvents, event]);
+      await writePendingEvents(coursePath, [...pendingEvents, queuedEvent]);
       await maybeResolveWaiter();
 
       if (waiter === undefined) {
@@ -1155,6 +1211,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         topicTree = manifest.topics;
         unassignedDemos = manifest.unassignedDemos;
         glossaryEntries = await readGlossary(coursePath);
+        masteryScores = latestMasteryScores(await readMastery(coursePath));
         activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
         demoFileSet = await readDemoFileSet(coursePaths.demosDir);
         const [transcript, lessons] = await Promise.all([
@@ -1175,6 +1232,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
               glossaryEntries,
               topicTree,
               unassignedDemos,
+              masteryScores,
               demoFileSet,
               activeFeynmanCheck,
             ),
@@ -1272,6 +1330,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     lessonWatcher.close();
     glossaryWatcher.close();
     topicWatcher.close();
+    masteryWatcher.close();
     feynmanWatcher.close();
     server.close();
     await clearDaemonMetadata(coursePath);

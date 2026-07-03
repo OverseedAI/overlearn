@@ -418,7 +418,7 @@ describe("emit feynman CLI parsing", () => {
         exitCode: 1,
         stdout: expect.stringContaining("learn emit feynman"),
         stderr:
-          "Invalid concept id: Rule of 72. Use lowercase letters, numbers, and hyphens.",
+          "Invalid concept id: Rule of 72. Use slash-separated lowercase letters, numbers, and hyphens.",
       },
     });
 

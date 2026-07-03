@@ -1,9 +1,11 @@
-import type {
-  ActiveFeynmanCheck,
-  DemoEntry,
-  GlossaryEntry,
-  TopicNode,
-  TranscriptEntry,
+import {
+  latestMasteryForTopic,
+  type ActiveFeynmanCheck,
+  type DemoEntry,
+  type GlossaryEntry,
+  type MasteryEntry,
+  type TopicNode,
+  type TranscriptEntry,
 } from "../course";
 import type { LessonSnapshot, RenderedLesson } from "./lessons";
 import { renderDemoEmbed, renderMarkdown } from "./markdown";
@@ -42,7 +44,9 @@ const initialLessons = __LESSONS__;
 const initialGlossary = __GLOSSARY__;
 const initialTopics = __TOPICS__;
 const initialUnassignedDemos = __UNASSIGNED_DEMOS__;
+const initialMastery = __MASTERY__;
 const initialActiveFeynman = __ACTIVE_FEYNMAN__ ?? undefined;
+const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
 
 const form = document.querySelector("#turn-form");
 const textarea = document.querySelector("#message");
@@ -57,6 +61,7 @@ const feynmanPrompt = document.querySelector("#feynman-prompt");
 const feynmanReplacement = document.querySelector("#feynman-replacement");
 const feynmanStatus = document.querySelector("#feynman-status");
 const transcript = document.querySelector("#transcript");
+const masterySummary = document.querySelector("#mastery-summary");
 const lessonList = document.querySelector("#lesson-list");
 const lessonContent = document.querySelector("#lesson-content");
 const lessonView = document.querySelector("#lesson-view");
@@ -69,6 +74,7 @@ let lessons = [...initialLessons.lessons];
 let selectedLessonId = initialLessons.selectedLessonId;
 let topics = [...initialTopics];
 let unassignedDemos = [...initialUnassignedDemos];
+let masteryScores = [...initialMastery];
 let selectedTopicPath = undefined;
 let userPinnedTopic = false;
 let userPinnedLesson = false;
@@ -152,6 +158,109 @@ const referencedLessonIds = () => {
     }
   });
   return ids;
+};
+
+const masteryTimeMs = (entry) => {
+  const parsed = Date.parse(entry.at);
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+};
+
+const compareMasteryRecency = (left, right) => {
+  const timeDelta = masteryTimeMs(left) - masteryTimeMs(right);
+  if (timeDelta !== 0) return timeDelta;
+
+  return left.at.localeCompare(right.at);
+};
+
+const topicConceptIds = (topic) => {
+  const segments = topic.path.split("/");
+  const slug = segments[segments.length - 1] ?? topic.path;
+  return slug === topic.path ? [topic.path] : [topic.path, slug];
+};
+
+const masteryForTopic = (topic) => {
+  const candidates = new Set(topicConceptIds(topic));
+  return masteryScores.reduce((match, entry) => {
+    if (!candidates.has(entry.concept)) return match;
+    if (match === undefined || compareMasteryRecency(entry, match) > 0) {
+      return entry;
+    }
+    return match;
+  }, undefined);
+};
+
+const masteryLevel = (entry) => {
+  if (entry === undefined) return "ungraded";
+  if (entry.score < 50) return "low";
+  if (entry.score < 80) return "medium";
+  return "high";
+};
+
+const topicCount = () => {
+  let count = 0;
+  walkTopics(topics, () => {
+    count += 1;
+  });
+  return count;
+};
+
+const topicMasteryRecords = () => {
+  const records = [];
+  walkTopics(topics, (topic) => {
+    const entry = masteryForTopic(topic);
+    if (entry !== undefined) {
+      records.push({ topic, entry });
+    }
+  });
+  return records;
+};
+
+const compareWeakestRecord = (left, right) => {
+  const scoreDelta = left.entry.score - right.entry.score;
+  if (scoreDelta !== 0) return scoreDelta;
+
+  const timeDelta = masteryTimeMs(left.entry) - masteryTimeMs(right.entry);
+  if (timeDelta !== 0) return timeDelta;
+
+  return left.entry.concept.localeCompare(right.entry.concept);
+};
+
+const weakestTopicMastery = () =>
+  topicMasteryRecords().sort(compareWeakestRecord)[0];
+
+const renderMasterySummary = () => {
+  masterySummary.replaceChildren();
+
+  const total = topicCount();
+  const records = topicMasteryRecords();
+  const weakest = weakestTopicMastery();
+
+  const line = document.createElement("div");
+  line.className = "mastery-summary-line";
+
+  const count = document.createElement("span");
+  count.className = "mastery-count";
+  count.textContent = records.length + "/" + total + " graded";
+
+  const weak = document.createElement("span");
+  weak.className = "mastery-weakest";
+  weak.textContent =
+    weakest === undefined
+      ? "Weakest: none"
+      : "Weakest: " + weakest.entry.concept + " (" + weakest.entry.score + ")";
+
+  line.append(count, weak);
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "mastery-review";
+  button.textContent = "Review weak areas";
+  button.disabled = records.length === 0;
+  button.addEventListener("click", () => {
+    void submitNav(REVIEW_WEAK_NAV_PATH);
+  });
+
+  masterySummary.append(line, button);
 };
 
 const applyCurrentTopicSelection = () => {
@@ -258,6 +367,8 @@ const createTopicList = (nodes, nested = false) => {
   for (const topic of nodes) {
     const item = document.createElement("li");
     item.className = "topic-node";
+    const masteryEntry = masteryForTopic(topic);
+    const level = masteryLevel(masteryEntry);
 
     const button = document.createElement("button");
     button.type = "button";
@@ -265,9 +376,34 @@ const createTopicList = (nodes, nested = false) => {
       "topic-button" +
       (topic.path === selectedTopicPath ? " active" : "") +
       (topic.current === true ? " current" : "") +
-      (topic.lesson === undefined ? " no-lesson" : "");
+      (topic.lesson === undefined ? " no-lesson" : "") +
+      " mastery-" +
+      level;
     button.dataset.topicPath = topic.path;
-    button.textContent = topic.title;
+    button.title =
+      masteryEntry === undefined
+        ? topic.title + " - ungraded"
+        : topic.title + " - mastery " + masteryEntry.score + "/100 (" + masteryEntry.concept + ")";
+
+    const marker = document.createElement("span");
+    marker.className = "mastery-dot";
+    marker.setAttribute("aria-hidden", "true");
+
+    const label = document.createElement("span");
+    label.className = "topic-label";
+    label.textContent = topic.title;
+
+    const chip = document.createElement("span");
+    chip.className = "mastery-chip";
+    chip.textContent = masteryEntry === undefined ? "--" : String(masteryEntry.score);
+    chip.setAttribute(
+      "aria-label",
+      masteryEntry === undefined
+        ? "ungraded"
+        : "mastery score " + masteryEntry.score + " out of 100",
+    );
+
+    button.append(marker, label, chip);
     if (topic.current === true) {
       button.setAttribute("aria-current", "page");
     }
@@ -311,6 +447,7 @@ const renderNavigation = () => {
   lessons.sort((left, right) => left.id.localeCompare(right.id));
   lessonList.replaceChildren();
   applyCurrentTopicSelection();
+  renderMasterySummary();
 
   if (topics.length === 0) {
     const empty = document.createElement("p");
@@ -826,6 +963,10 @@ events.addEventListener("topics", (event) => {
   userPinnedLesson = false;
   renderNavigation();
 });
+events.addEventListener("mastery", (event) => {
+  masteryScores = [...JSON.parse(event.data).entries];
+  renderNavigation();
+});
 events.addEventListener("feynman", (event) => {
   const payload = JSON.parse(event.data);
   const previous = activeFeynman;
@@ -910,6 +1051,102 @@ const topicDemoHtml = (demos: readonly DemoEntry[] | undefined): string => {
     .join("")}</ul>`;
 };
 
+const masteryLevel = (entry: MasteryEntry | undefined): string => {
+  if (entry === undefined) {
+    return "ungraded";
+  }
+
+  if (entry.score < 50) {
+    return "low";
+  }
+
+  return entry.score < 80 ? "medium" : "high";
+};
+
+const masteryTitle = (topic: TopicNode, entry: MasteryEntry | undefined): string =>
+  entry === undefined
+    ? `${topic.title} - ungraded`
+    : `${topic.title} - mastery ${entry.score}/100 (${entry.concept})`;
+
+const masteryChipHtml = (entry: MasteryEntry | undefined): string =>
+  entry === undefined
+    ? '<span class="mastery-chip" aria-label="ungraded">--</span>'
+    : `<span class="mastery-chip" aria-label="mastery score ${entry.score} out of 100">${entry.score}</span>`;
+
+const masteryButtonContent = (
+  topic: TopicNode,
+  scores: readonly MasteryEntry[],
+): string => {
+  const entry = latestMasteryForTopic(topic, scores);
+
+  return `<span class="mastery-dot" aria-hidden="true"></span><span class="topic-label">${escapeHtml(
+    topic.title,
+  )}</span>${masteryChipHtml(entry)}`;
+};
+
+type TopicMasteryRecord = Readonly<{
+  topic: TopicNode;
+  entry: MasteryEntry;
+}>;
+
+const topicCount = (topics: readonly TopicNode[]): number =>
+  topics.reduce(
+    (count, topic) => count + 1 + topicCount(topic.children),
+    0,
+  );
+
+const topicMasteryRecords = (
+  topics: readonly TopicNode[],
+  scores: readonly MasteryEntry[],
+): readonly TopicMasteryRecord[] =>
+  topics.flatMap((topic) => {
+    const entry = latestMasteryForTopic(topic, scores);
+    return [
+      ...(entry === undefined ? [] : [{ topic, entry }]),
+      ...topicMasteryRecords(topic.children, scores),
+    ];
+  });
+
+const masteryTimeMs = (entry: MasteryEntry): number => {
+  const parsed = Date.parse(entry.at);
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+};
+
+const compareWeakestRecord = (
+  left: TopicMasteryRecord,
+  right: TopicMasteryRecord,
+): number => {
+  const scoreDelta = left.entry.score - right.entry.score;
+  if (scoreDelta !== 0) {
+    return scoreDelta;
+  }
+
+  const timeDelta = masteryTimeMs(left.entry) - masteryTimeMs(right.entry);
+  if (timeDelta !== 0) {
+    return timeDelta;
+  }
+
+  return left.entry.concept.localeCompare(right.entry.concept);
+};
+
+const renderMasterySummary = (
+  topics: readonly TopicNode[],
+  scores: readonly MasteryEntry[],
+): string => {
+  const total = topicCount(topics);
+  const records = topicMasteryRecords(topics, scores);
+  const weakest = [...records].sort(compareWeakestRecord)[0];
+  const disabled = records.length === 0 ? " disabled" : "";
+  const weakestText =
+    weakest === undefined
+      ? "Weakest: none"
+      : `Weakest: ${weakest.entry.concept} (${weakest.entry.score})`;
+
+  return `<div class="mastery-summary-line"><span class="mastery-count">${records.length}/${total} graded</span><span class="mastery-weakest">${escapeHtml(
+    weakestText,
+  )}</span></div><button class="mastery-review" type="button"${disabled}>Review weak areas</button>`;
+};
+
 const selectedLesson = (
   snapshot: LessonSnapshot,
   topics: readonly TopicNode[],
@@ -930,6 +1167,7 @@ const selectedLesson = (
 const renderTopicTree = (
   topics: readonly TopicNode[],
   selected: RenderedLesson | undefined,
+  masteryScores: readonly MasteryEntry[],
   nested = false,
 ): string => {
   if (topics.length === 0) {
@@ -943,16 +1181,22 @@ const renderTopicTree = (
       const activeClass = topic.lesson === selected?.id ? " active" : "";
       const currentClass = topic.current ? " current" : "";
       const noLessonClass = topic.lesson === undefined ? " no-lesson" : "";
+      const masteryEntry = latestMasteryForTopic(topic, masteryScores);
+      const masteryClass = ` mastery-${masteryLevel(masteryEntry)}`;
+      const title = masteryTitle(topic, masteryEntry);
       const ariaCurrent = topic.current ? ' aria-current="page"' : "";
       const children =
         topic.children.length === 0
           ? ""
-          : renderTopicTree(topic.children, selected, true);
+          : renderTopicTree(topic.children, selected, masteryScores, true);
       const demos = topicDemoHtml(topic.demos);
 
-      return `<li class="topic-node"><button class="topic-button${activeClass}${currentClass}${noLessonClass}" type="button" data-topic-path="${escapeHtml(
+      return `<li class="topic-node"><button class="topic-button${activeClass}${currentClass}${noLessonClass}${masteryClass}" type="button" data-topic-path="${escapeHtml(
         topic.path,
-      )}"${ariaCurrent}>${escapeHtml(topic.title)}</button>${demos}${children}</li>`;
+      )}" title="${escapeHtml(title)}"${ariaCurrent}>${masteryButtonContent(
+        topic,
+        masteryScores,
+      )}</button>${demos}${children}</li>`;
     })
     .join("")}</ul>`;
 };
@@ -1002,9 +1246,10 @@ const renderNavigation = (
   snapshot: LessonSnapshot,
   topics: readonly TopicNode[],
   unassignedDemos: readonly DemoEntry[],
+  masteryScores: readonly MasteryEntry[],
 ): string => {
   const selected = selectedLesson(snapshot, topics);
-  return `${renderTopicTree(topics, selected)}${renderUnassignedLessons(
+  return `${renderTopicTree(topics, selected, masteryScores)}${renderUnassignedLessons(
     snapshot,
     topics,
     selected,
@@ -1030,6 +1275,7 @@ export const renderPage = (
   glossary: readonly GlossaryEntry[],
   topics: readonly TopicNode[],
   unassignedDemos: readonly DemoEntry[],
+  masteryScores: readonly MasteryEntry[],
   demoFiles: ReadonlySet<string>,
   activeFeynmanCheck: ActiveFeynmanCheck | undefined,
 ): string => {
@@ -1042,6 +1288,7 @@ export const renderPage = (
     .replace("__GLOSSARY__", escapeScriptJson(glossary))
     .replace("__TOPICS__", escapeScriptJson(topics))
     .replace("__UNASSIGNED_DEMOS__", escapeScriptJson(unassignedDemos))
+    .replace("__MASTERY__", escapeScriptJson(masteryScores))
     .replace(
       "__ACTIVE_FEYNMAN__",
       escapeScriptJson(activeFeynmanCheck ?? null),
@@ -1166,6 +1413,59 @@ export const renderPage = (
       margin-top: 0.75rem;
     }
 
+    .mastery-summary {
+      display: grid;
+      gap: 0.55rem;
+      margin-top: 0.75rem;
+      border: 1px solid #33342f;
+      border-radius: 8px;
+      background: #151612;
+      padding: 0.65rem;
+    }
+
+    .mastery-summary-line {
+      display: grid;
+      gap: 0.25rem;
+      min-width: 0;
+    }
+
+    .mastery-count {
+      color: #fafaf8;
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    .mastery-weakest {
+      color: #bdbdb6;
+      font-size: 0.82rem;
+      overflow-wrap: anywhere;
+    }
+
+    .mastery-review {
+      min-height: 2rem;
+      border: 1px solid #4b5a43;
+      border-radius: 6px;
+      background: #20261e;
+      color: #edf7e8;
+      padding: 0 0.65rem;
+      font: inherit;
+      font-size: 0.86rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .mastery-review:hover {
+      border-color: #71965f;
+      background: #273120;
+    }
+
+    .mastery-review:disabled {
+      color: #7e8078;
+      border-color: #33342f;
+      background: #181914;
+      cursor: not-allowed;
+    }
+
     .topic-tree {
       display: grid;
       gap: 0.3rem;
@@ -1187,9 +1487,14 @@ export const renderPage = (
     }
 
     .topic-button {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.45rem;
       width: 100%;
       min-height: 2.25rem;
       border: 1px solid transparent;
+      border-left-width: 3px;
       border-radius: 8px;
       background: transparent;
       color: #d5d5cf;
@@ -1198,6 +1503,82 @@ export const renderPage = (
       text-align: left;
       overflow-wrap: anywhere;
       cursor: pointer;
+    }
+
+    .topic-label {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .mastery-dot {
+      width: 0.68rem;
+      height: 0.68rem;
+      border: 1px solid #686a62;
+      border-radius: 999px;
+      background: transparent;
+    }
+
+    .mastery-chip {
+      min-width: 2.15rem;
+      border: 1px solid #454741;
+      border-radius: 999px;
+      color: #cfcfca;
+      padding: 0.08rem 0.34rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.72rem;
+      font-weight: 700;
+      line-height: 1.4;
+      text-align: center;
+    }
+
+    .topic-button.mastery-low {
+      border-left-color: #d96257;
+    }
+
+    .topic-button.mastery-low .mastery-dot,
+    .topic-button.mastery-low .mastery-chip {
+      border-color: #d96257;
+      color: #ffc4bd;
+    }
+
+    .topic-button.mastery-low .mastery-dot {
+      background: #d96257;
+    }
+
+    .topic-button.mastery-medium {
+      border-left-color: #d0a548;
+    }
+
+    .topic-button.mastery-medium .mastery-dot,
+    .topic-button.mastery-medium .mastery-chip {
+      border-color: #d0a548;
+      color: #ffe0a0;
+    }
+
+    .topic-button.mastery-medium .mastery-dot {
+      background: #d0a548;
+    }
+
+    .topic-button.mastery-high {
+      border-left-color: #73b66d;
+    }
+
+    .topic-button.mastery-high .mastery-dot,
+    .topic-button.mastery-high .mastery-chip {
+      border-color: #73b66d;
+      color: #c8f3bf;
+    }
+
+    .topic-button.mastery-high .mastery-dot {
+      background: #73b66d;
+    }
+
+    .topic-button.mastery-ungraded {
+      border-left-color: #3a3b35;
+    }
+
+    .topic-button.mastery-ungraded .mastery-chip {
+      color: #898b83;
     }
 
     .topic-button.no-lesson {
@@ -1214,6 +1595,30 @@ export const renderPage = (
     .topic-button.current {
       border-color: #8fbf73;
       color: #f4f4f1;
+    }
+
+    .topic-button.mastery-low:hover,
+    .topic-button.mastery-low.active,
+    .topic-button.mastery-low.current {
+      border-left-color: #d96257;
+    }
+
+    .topic-button.mastery-medium:hover,
+    .topic-button.mastery-medium.active,
+    .topic-button.mastery-medium.current {
+      border-left-color: #d0a548;
+    }
+
+    .topic-button.mastery-high:hover,
+    .topic-button.mastery-high.active,
+    .topic-button.mastery-high.current {
+      border-left-color: #73b66d;
+    }
+
+    .topic-button.mastery-ungraded:hover,
+    .topic-button.mastery-ungraded.active,
+    .topic-button.mastery-ungraded.current {
+      border-left-color: #3a3b35;
     }
 
     .demo-leaves {
@@ -1804,7 +2209,9 @@ export const renderPage = (
 
     .send-button {
       justify-self: end;
+      align-self: start;
       min-height: 2.75rem;
+      max-height: 2.75rem;
       border: 0;
       border-radius: 8px;
       background: #9fcf86;
@@ -1906,10 +2313,15 @@ export const renderPage = (
         <section id="lesson-view" class="lesson-pane" aria-labelledby="lesson-heading">
           <nav class="lesson-nav" aria-labelledby="lesson-heading">
             <h2 id="lesson-heading">Topics</h2>
+            <section id="mastery-summary" class="mastery-summary" aria-label="Mastery summary">${renderMasterySummary(
+              topics,
+              masteryScores,
+            )}</section>
             <div id="lesson-list" class="lesson-list">${renderNavigation(
               lessons,
               topics,
               unassignedDemos,
+              masteryScores,
             )}</div>
           </nav>
 

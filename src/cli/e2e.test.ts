@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readDaemonMetadata, type TurnFile } from "../course";
+import { REVIEW_WEAK_NAV_PATH } from "../daemon";
 
 type ProcessResult = Readonly<{
   exitCode: number;
@@ -665,11 +666,45 @@ describe("learn start/wait browser round trip", () => {
         ],
         env,
       );
+      const btreeMastery = await runLearn(
+        [
+          "emit",
+          "mastery",
+          courseName,
+          "--concept",
+          "btree",
+          "--score",
+          "44",
+          "--gaps",
+          "needs clearer branching-factor explanation",
+          "--json",
+        ],
+        env,
+      );
+      const indexesMastery = await runLearn(
+        [
+          "emit",
+          "mastery",
+          courseName,
+          "--concept",
+          "indexes",
+          "--score",
+          "70",
+          "--gaps",
+          "needs more practice choosing index types",
+          "--json",
+        ],
+        env,
+      );
 
       expect(firstMastery.exitCode).toBe(0);
       expect(firstMastery.stderr).toBe("");
       expect(secondMastery.exitCode).toBe(0);
       expect(secondMastery.stderr).toBe("");
+      expect(btreeMastery.exitCode).toBe(0);
+      expect(btreeMastery.stderr).toBe("");
+      expect(indexesMastery.exitCode).toBe(0);
+      expect(indexesMastery.stderr).toBe("");
       expect(JSON.parse(firstMastery.stdout) as unknown).toMatchObject({
         ok: true,
         kind: "mastery",
@@ -692,6 +727,28 @@ describe("learn start/wait browser round trip", () => {
           at: expect.any(String),
         },
       });
+      expect(JSON.parse(btreeMastery.stdout) as unknown).toMatchObject({
+        ok: true,
+        kind: "mastery",
+        coursePath: courseDir,
+        entry: {
+          concept: "btree",
+          score: 44,
+          gaps: "needs clearer branching-factor explanation",
+          at: expect.any(String),
+        },
+      });
+      expect(JSON.parse(indexesMastery.stdout) as unknown).toMatchObject({
+        ok: true,
+        kind: "mastery",
+        coursePath: courseDir,
+        entry: {
+          concept: "indexes",
+          score: 70,
+          gaps: "needs more practice choosing index types",
+          at: expect.any(String),
+        },
+      });
 
       const masteryFile = JSON.parse(
         await readFile(join(courseDir, "mastery.json"), "utf8"),
@@ -709,8 +766,52 @@ describe("learn start/wait browser round trip", () => {
           gaps: "minor precision gap",
           at: expect.any(String),
         },
+        {
+          concept: "btree",
+          score: 44,
+          gaps: "needs clearer branching-factor explanation",
+          at: expect.any(String),
+        },
+        {
+          concept: "indexes",
+          score: 70,
+          gaps: "needs more practice choosing index types",
+          at: expect.any(String),
+        },
       ]);
       expect(masteryFile[0]?.at).not.toBe(masteryFile[1]?.at);
+      await firstProbe.waitForText("event: mastery", "SSE mastery event", 1_000);
+      await firstProbe.waitForText(
+        '"concept":"btree"',
+        "SSE mastery concept",
+        1_000,
+      );
+
+      const reviewWait = spawnLearn(["wait", courseName], env);
+      await firstProbe.waitForStatus("waiting-for-agent");
+
+      await submitNav(url, REVIEW_WEAK_NAV_PATH);
+
+      const reviewWaitResult = await collectProcess(
+        reviewWait,
+        "learn wait review weak",
+      );
+      expect(reviewWaitResult.exitCode).toBe(0);
+      expect(reviewWaitResult.stderr).toBe("");
+
+      const reviewTurnPath = reviewWaitResult.stdout.trim();
+      expect(reviewTurnPath).toBe(
+        join(courseDir, ".overlearn", "turns", "turn-5.json"),
+      );
+
+      const reviewTurn = JSON.parse(
+        await readFile(reviewTurnPath, "utf8"),
+      ) as TurnFile;
+      expect(reviewTurn).toEqual({
+        turn: 5,
+        createdAt: expect.any(String),
+        events: [{ type: "review-weak", concepts: ["btree", "indexes"] }],
+      });
 
       await writeFile(
         join(courseDir, "demos", "growth.html"),
