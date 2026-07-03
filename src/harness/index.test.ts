@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import stopBackstop from "../../plugin/hooks/stop-backstop.sh" with { type: "text" };
+import learnSkillCodex from "../../plugin/skills/learn/SKILL.codex.md" with { type: "text" };
 import learnSkill from "../../plugin/skills/learn/SKILL.md" with { type: "text" };
 import {
   formatInstallHarnessResult,
@@ -147,7 +148,7 @@ describe("harness install", () => {
     });
   });
 
-  test("re-run skips existing files and hook without dropping manifest entries", async () => {
+  test("re-run leaves existing files and hook unchanged without dropping manifest entries", async () => {
     await withFixture(async (fixture) => {
       const options = harnessOptions(fixture, {
         tool: "claude-code",
@@ -158,11 +159,11 @@ describe("harness install", () => {
       const second = await installHarness(options);
       const output = formatInstallHarnessResult(second);
       expect(second.actions).toEqual([
-        expect.objectContaining({ kind: "file", status: "skipped" }),
-        expect.objectContaining({ kind: "file", status: "skipped" }),
+        expect.objectContaining({ kind: "file", status: "unchanged" }),
+        expect.objectContaining({ kind: "file", status: "unchanged" }),
         expect.objectContaining({ kind: "settings-hook", status: "skipped" }),
       ]);
-      expect(output).toContain("skipped file");
+      expect(output).toContain("unchanged file");
 
       const manifest = await readJson<{ installs: unknown[] }>(
         planHarnessInstall(options).manifestPath,
@@ -184,16 +185,18 @@ describe("harness install", () => {
       await writeText(skillPath, "# User skill\n");
 
       const skipped = await installHarness(options);
-      expect(skipped.actions).toEqual([
+      expect(skipped.actions).toContainEqual(
         expect.objectContaining({ path: skillPath, status: "skipped" }),
-      ]);
+      );
       expect(await readFile(skillPath, "utf8")).toBe("# User skill\n");
 
       const forced = await installHarness({ ...options, force: true });
-      expect(forced.actions).toEqual([
+      expect(forced.actions).toContainEqual(
         expect.objectContaining({ path: skillPath, status: "overwritten" }),
-      ]);
-      expect(await readFile(skillPath, "utf8")).toBe(`${learnSkill.trimEnd()}\n`);
+      );
+      expect(await readFile(skillPath, "utf8")).toBe(
+        `${learnSkillCodex.trimEnd()}\n`,
+      );
     });
   });
 
@@ -272,7 +275,7 @@ describe("harness install", () => {
     });
   });
 
-  test("codex install writes only the codex skill path", async () => {
+  test("codex install writes codex skill, backstop hook, and hooks.json", async () => {
     await withFixture(async (fixture) => {
       const result = await installHarness(
         harnessOptions(fixture, { tool: "codex", scope: "global" }),
@@ -284,13 +287,99 @@ describe("harness install", () => {
         "learn",
         "SKILL.md",
       );
+      const hookPath = join(
+        fixture.overlearnHome,
+        "hooks",
+        "stop-backstop.sh",
+      );
+      const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
 
       expect(result.actions).toEqual([
         expect.objectContaining({ path: skillPath, status: "written" }),
+        expect.objectContaining({ path: hookPath, status: "written" }),
+        expect.objectContaining({ path: hooksJsonPath, status: "updated" }),
       ]);
-      expect(await readFile(skillPath, "utf8")).toBe(`${learnSkill.trimEnd()}\n`);
+      expect(await readFile(skillPath, "utf8")).toBe(
+        `${learnSkillCodex.trimEnd()}\n`,
+      );
+      expect((await stat(hookPath)).mode & 0o777).toBe(0o755);
+
+      const hooksJson = await readJson<{
+        hooks: { Stop: Array<{ hooks: Array<{ command: string }> }> };
+      }>(hooksJsonPath);
+      expect(hooksJson.hooks.Stop).toHaveLength(1);
+      expect(hooksJson.hooks.Stop[0]?.hooks[0]?.command).toBe(
+        `bash '${hookPath}' codex`,
+      );
+
       expect(await exists(join(fixture.agentHome, ".claude"))).toBe(false);
-      expect(await exists(join(fixture.overlearnHome, "hooks"))).toBe(false);
+    });
+  });
+
+  test("codex project install merges the hook into agent-home hooks.json", async () => {
+    await withFixture(async (fixture) => {
+      await installHarness(
+        harnessOptions(fixture, { tool: "codex", scope: "project" }),
+      );
+
+      const projectSkill = join(
+        fixture.projectDir,
+        ".agents",
+        "skills",
+        "learn",
+        "SKILL.md",
+      );
+      const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
+
+      expect(await exists(projectSkill)).toBe(true);
+      expect(await exists(join(fixture.projectDir, ".codex"))).toBe(false);
+      expect(JSON.stringify(await readJson(hooksJsonPath))).toContain(
+        "stop-backstop.sh",
+      );
+    });
+  });
+
+  test("codex hooks.json merge preserves unrelated hooks", async () => {
+    await withFixture(async (fixture) => {
+      const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
+      await writeText(
+        hooksJsonPath,
+        `${JSON.stringify(
+          {
+            hooks: {
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      command: "bash '/Users/hal/.codex/herdr-agent-state.sh' session",
+                      timeout: 10,
+                      type: "command",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      await installHarness(
+        harnessOptions(fixture, { tool: "codex", scope: "global" }),
+      );
+
+      const hooksJson = await readJson<{
+        hooks: { SessionStart: unknown[]; Stop: unknown[] };
+      }>(hooksJsonPath);
+      expect(hooksJson.hooks.SessionStart).toHaveLength(1);
+      expect(JSON.stringify(hooksJson.hooks.SessionStart)).toContain(
+        "herdr-agent-state.sh",
+      );
+      expect(hooksJson.hooks.Stop).toHaveLength(1);
+      expect(JSON.stringify(hooksJson.hooks.Stop)).toContain(
+        "stop-backstop.sh",
+      );
     });
   });
 
@@ -436,6 +525,76 @@ describe("harness uninstall", () => {
         expect.objectContaining({ path: skillPath, status: "removed" }),
       );
       expect(await exists(skillPath)).toBe(false);
+    });
+  });
+
+  test("uninstalling claude-code keeps the backstop script the codex install references", async () => {
+    await withFixture(async (fixture) => {
+      const claudeOptions = harnessOptions(fixture, {
+        tool: "claude-code",
+        scope: "global",
+      });
+      const codexOptions = harnessOptions(fixture, {
+        tool: "codex",
+        scope: "global",
+      });
+      await installHarness(claudeOptions);
+      await installHarness(codexOptions);
+
+      const hookPath = join(
+        fixture.overlearnHome,
+        "hooks",
+        "stop-backstop.sh",
+      );
+      const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
+
+      const result = await uninstallHarness(claudeOptions);
+      expect(result.actions).toContainEqual(
+        expect.objectContaining({
+          path: hookPath,
+          status: "kept",
+          detail: "still referenced by another harness install",
+        }),
+      );
+      expect(await exists(hookPath)).toBe(true);
+      expect(JSON.stringify(await readJson(hooksJsonPath))).toContain(hookPath);
+
+      await uninstallHarness(codexOptions);
+      expect(await exists(hookPath)).toBe(false);
+      expect(await exists(hooksJsonPath)).toBe(false);
+    });
+  });
+
+  test("uninstalling one codex scope keeps the hooks.json entry the other references", async () => {
+    await withFixture(async (fixture) => {
+      const globalOptions = harnessOptions(fixture, {
+        tool: "codex",
+        scope: "global",
+      });
+      const projectOptions = harnessOptions(fixture, {
+        tool: "codex",
+        scope: "project",
+      });
+      await installHarness(globalOptions);
+      await installHarness(projectOptions);
+
+      const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
+
+      const result = await uninstallHarness(projectOptions);
+      expect(result.actions).toContainEqual(
+        expect.objectContaining({
+          kind: "settings-hook",
+          path: hooksJsonPath,
+          status: "kept",
+          detail: "still referenced by another harness install",
+        }),
+      );
+      expect(JSON.stringify(await readJson(hooksJsonPath))).toContain(
+        "stop-backstop.sh",
+      );
+
+      await uninstallHarness(globalOptions);
+      expect(await exists(hooksJsonPath)).toBe(false);
     });
   });
 

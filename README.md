@@ -32,6 +32,12 @@ learn install claude-code
 learn install codex
 ```
 
+Both installs write a harness-specific `learn` skill and a Stop-hook backstop
+that keeps the agent in the teaching loop. Claude Code gets the hook in
+`.claude/settings.json`; Codex gets it in `~/.codex/hooks.json` (if hooks are
+disabled in your Codex config, set `features.hooks = true` in
+`~/.codex/config.toml`).
+
 Claude Code plugin marketplace alternative:
 
 ```sh

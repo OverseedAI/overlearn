@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import stopBackstop from "../../plugin/hooks/stop-backstop.sh" with { type: "text" };
+import learnSkillCodex from "../../plugin/skills/learn/SKILL.codex.md" with { type: "text" };
 import learnSkill from "../../plugin/skills/learn/SKILL.md" with { type: "text" };
 import { getOverlearnHome } from "../instructions";
 
@@ -130,6 +131,7 @@ type SettingsRemoval = Readonly<{
 const manifestVersion = 1 as const;
 
 const skillContent = `${learnSkill.trimEnd()}\n`;
+const codexSkillContent = `${learnSkillCodex.trimEnd()}\n`;
 const stopBackstopContent = `${stopBackstop.trimEnd()}\n`;
 
 const hasErrorCode = (error: unknown, code: string): boolean =>
@@ -175,11 +177,14 @@ const shellQuote = (value: string): string =>
 const claudeHookCommand = (scriptPath: string): string =>
   `bash ${shellQuote(scriptPath)}`;
 
-const claudeStopHookEntry = (scriptPath: string): JsonObject => ({
+const codexHookCommand = (scriptPath: string): string =>
+  `bash ${shellQuote(scriptPath)} codex`;
+
+const stopHookEntry = (command: string): JsonObject => ({
   hooks: [
     {
       type: "command",
-      command: claudeHookCommand(scriptPath),
+      command,
       timeout: 10,
     },
   ],
@@ -212,13 +217,13 @@ const parseSettingsObject = (text: string, path: string): JsonObject => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `Cannot merge Claude Code Stop hook into ${path}: invalid JSON (${message}).`,
+      `Cannot merge Stop hook into ${path}: invalid JSON (${message}).`,
       { cause: error },
     );
   }
 
   if (!isJsonObject(parsed)) {
-    throw new Error(`Cannot merge Claude Code Stop hook into ${path}: settings.json must contain a JSON object.`);
+    throw new Error(`Cannot merge Stop hook into ${path}: settings file must contain a JSON object.`);
   }
 
   return parsed;
@@ -237,7 +242,7 @@ const ensureHooksObject = (settings: JsonObject, path: string): JsonObject => {
   }
 
   if (!isJsonObject(current)) {
-    throw new Error(`Cannot merge Claude Code Stop hook into ${path}: hooks must be a JSON object.`);
+    throw new Error(`Cannot merge Stop hook into ${path}: hooks must be a JSON object.`);
   }
 
   return current;
@@ -253,7 +258,7 @@ const ensureStopArray = (hooks: JsonObject, path: string): JsonValue[] => {
   }
 
   if (!Array.isArray(current)) {
-    throw new Error(`Cannot merge Claude Code Stop hook into ${path}: hooks.Stop must be an array.`);
+    throw new Error(`Cannot merge Stop hook into ${path}: hooks.Stop must be an array.`);
   }
 
   return current;
@@ -278,7 +283,7 @@ const prepareSettingsMerge = async (
     };
   }
 
-  stop.push(claudeStopHookEntry(hook.scriptPath));
+  stop.push(stopHookEntry(hook.command));
 
   return {
     path: hook.path,
@@ -301,7 +306,7 @@ const removeStopHook = (
   }
 
   if (!isJsonObject(hooks)) {
-    throw new Error(`Cannot remove Claude Code Stop hook from ${path}: hooks must be a JSON object.`);
+    throw new Error(`Cannot remove Stop hook from ${path}: hooks must be a JSON object.`);
   }
 
   const stop = hooks["Stop"];
@@ -310,7 +315,7 @@ const removeStopHook = (
   }
 
   if (!Array.isArray(stop)) {
-    throw new Error(`Cannot remove Claude Code Stop hook from ${path}: hooks.Stop must be an array.`);
+    throw new Error(`Cannot remove Stop hook from ${path}: hooks.Stop must be an array.`);
   }
 
   let removed = false;
@@ -389,13 +394,13 @@ const prepareSettingsRemoval = async (
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `Cannot remove Claude Code Stop hook from ${entry.path}: invalid JSON (${message}).`,
+      `Cannot remove Stop hook from ${entry.path}: invalid JSON (${message}).`,
       { cause: error },
     );
   }
 
   if (!isJsonObject(parsed)) {
-    throw new Error(`Cannot remove Claude Code Stop hook from ${entry.path}: settings.json must contain a JSON object.`);
+    throw new Error(`Cannot remove Stop hook from ${entry.path}: settings file must contain a JSON object.`);
   }
 
   const removed = removeStopHook(parsed, entry.scriptPath, entry.path);
@@ -637,6 +642,18 @@ const fileReferencedBy = (
     install.files.some((file) => file.path === path),
   );
 
+const settingsHookReferencedBy = (
+  installs: readonly ManifestInstall[],
+  hook: ManifestSettingsHookEntry,
+): boolean =>
+  installs.some((install) =>
+    install.settingsHooks.some(
+      (candidate) =>
+        candidate.path === hook.path &&
+        candidate.scriptPath === hook.scriptPath,
+    ),
+  );
+
 const pruneCreatedDirs = async (
   dirs: readonly string[],
 ): Promise<readonly HarnessAction[]> => {
@@ -677,7 +694,11 @@ export const planHarnessInstall = (
   const root = options.scope === "global" ? agentHome : cwd;
   const manifestPath = join(overlearnHome, "install-manifest.json");
 
+  const scriptPath = join(overlearnHome, "hooks", "stop-backstop.sh");
+
   if (options.tool === "codex") {
+    // Codex reads hooks from ~/.codex/hooks.json regardless of project;
+    // there is no project-level hooks file, so both scopes target agent home.
     return {
       tool: options.tool,
       scope: options.scope,
@@ -686,14 +707,23 @@ export const planHarnessInstall = (
       files: [
         {
           path: join(root, ".agents", "skills", "learn", "SKILL.md"),
-          content: skillContent,
+          content: codexSkillContent,
+        },
+        {
+          path: scriptPath,
+          content: stopBackstopContent,
+          mode: 0o755,
         },
       ],
-      settingsHooks: [],
+      settingsHooks: [
+        {
+          path: join(agentHome, ".codex", "hooks.json"),
+          scriptPath,
+          command: codexHookCommand(scriptPath),
+        },
+      ],
     };
   }
-
-  const scriptPath = join(overlearnHome, "hooks", "stop-backstop.sh");
 
   return {
     tool: options.tool,
@@ -739,8 +769,32 @@ export const installHarness = async (
   let settingsHooks = existingInstall?.settingsHooks ?? [];
 
   for (const file of plan.files) {
-    const exists = await pathExists(file.path);
+    const existing = await readTextIfExists(file.path);
+    const exists = existing !== undefined;
     if (exists && !force) {
+      if (existing === file.content) {
+        // Same content, likely installed for another tool: reference it in
+        // this install too so uninstalling the other tool keeps the file.
+        // A re-run keeps its original entry (and recorded createdDirs).
+        const priorEntry = files.find((entry) => entry.path === file.path);
+        files = upsertFileEntry(
+          files,
+          priorEntry ?? {
+            path: file.path,
+            sha256: hashText(file.content),
+            ...(file.mode === undefined ? {} : { mode: file.mode }),
+            createdDirs: [],
+          },
+        );
+        actions.push({
+          kind: "file",
+          path: file.path,
+          status: "unchanged",
+          detail: "already installed",
+        });
+        continue;
+      }
+
       actions.push({
         kind: "file",
         path: file.path,
@@ -773,6 +827,22 @@ export const installHarness = async (
 
   for (const merge of settingsMerges) {
     if (merge.status === "unchanged") {
+      // Hook already present (possibly merged by another install of ours):
+      // reference it in this install too so uninstalling the other keeps it.
+      // A re-run keeps its original entry (and recorded createdFile/dirs).
+      const priorEntry = settingsHooks.find(
+        (entry) => entry.path === merge.path,
+      );
+      settingsHooks = upsertSettingsHookEntry(
+        settingsHooks,
+        priorEntry ?? {
+          path: merge.path,
+          scriptPath: merge.scriptPath,
+          command: merge.command,
+          createdFile: false,
+          createdDirs: [],
+        },
+      );
       actions.push({
         kind: "settings-hook",
         path: merge.path,
@@ -783,7 +853,7 @@ export const installHarness = async (
     }
 
     if (merge.content === undefined) {
-      throw new Error(`Cannot write Claude Code Stop hook into ${merge.path}: no settings content prepared.`);
+      throw new Error(`Cannot write Stop hook into ${merge.path}: no settings content prepared.`);
     }
 
     const createdDirs = await missingDirsFor(merge.path);
@@ -855,12 +925,27 @@ export const uninstallHarness = async (
   const remainingInstalls = manifest.installs.filter(
     (candidate) => !installMatchesPlan(candidate, plan),
   );
+  const sharedSettingsHooks = install.settingsHooks.filter((hook) =>
+    settingsHookReferencedBy(remainingInstalls, hook),
+  );
+  const removableSettingsHooks = install.settingsHooks.filter(
+    (hook) => !settingsHookReferencedBy(remainingInstalls, hook),
+  );
   const settingsRemovals = await Promise.all(
-    install.settingsHooks.map((hook) => prepareSettingsRemoval(hook)),
+    removableSettingsHooks.map((hook) => prepareSettingsRemoval(hook)),
   );
   const actions: HarnessAction[] = [];
   const dirsToPrune: string[] = [];
   const retainedFiles: ManifestFileEntry[] = [];
+
+  for (const hook of sharedSettingsHooks) {
+    actions.push({
+      kind: "settings-hook",
+      path: hook.path,
+      status: "kept",
+      detail: "still referenced by another harness install",
+    });
+  }
 
   for (const file of install.files) {
     if (fileReferencedBy(remainingInstalls, file.path)) {
@@ -937,7 +1022,7 @@ export const uninstallHarness = async (
     }
 
     if (removal.content === undefined) {
-      throw new Error(`Cannot update Claude Code settings at ${removal.entry.path}: no settings content prepared.`);
+      throw new Error(`Cannot update hook settings at ${removal.entry.path}: no settings content prepared.`);
     }
 
     await writeFile(removal.entry.path, removal.content, "utf8");

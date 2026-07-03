@@ -106,6 +106,11 @@ const runLearn = async (
   env: Record<string, string>,
 ): Promise<ProcessResult> => collectProcess(spawnLearn(args, env), args.join(" "));
 
+const expectWaitGuidance = (stderr: string, course: string): void => {
+  expect(stderr).toContain(`learn wait ${course}`);
+  expect(stderr).toContain("foreground blocking command on Codex");
+};
+
 const isPidAlive = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
@@ -492,7 +497,7 @@ describe("learn start/wait browser round trip", () => {
       const waitResult = await collectProcess(wait, "learn wait");
 
       expect(waitResult.exitCode).toBe(0);
-      expect(waitResult.stderr).toBe("");
+      expectWaitGuidance(waitResult.stderr, courseName);
 
       const turnPath = waitResult.stdout.trim();
       expect(turnPath).toBe(join(courseDir, ".overlearn", "turns", "turn-1.json"));
@@ -518,7 +523,7 @@ describe("learn start/wait browser round trip", () => {
 
       const navWaitResult = await collectProcess(navWait, "learn wait nav");
       expect(navWaitResult.exitCode).toBe(0);
-      expect(navWaitResult.stderr).toBe("");
+      expectWaitGuidance(navWaitResult.stderr, courseName);
 
       const navTurnPath = navWaitResult.stdout.trim();
       expect(navTurnPath).toBe(
@@ -538,7 +543,7 @@ describe("learn start/wait browser round trip", () => {
 
       const queuedNavWait = await runLearn(["wait", courseName], env);
       expect(queuedNavWait.exitCode).toBe(0);
-      expect(queuedNavWait.stderr).toBe("");
+      expectWaitGuidance(queuedNavWait.stderr, courseName);
 
       const queuedNavTurnPath = queuedNavWait.stdout.trim();
       expect(queuedNavTurnPath).toBe(
@@ -613,7 +618,7 @@ describe("learn start/wait browser round trip", () => {
         "learn wait feynman",
       );
       expect(feynmanWaitResult.exitCode).toBe(0);
-      expect(feynmanWaitResult.stderr).toBe("");
+      expectWaitGuidance(feynmanWaitResult.stderr, courseName);
 
       const feynmanTurnPath = feynmanWaitResult.stdout.trim();
       expect(feynmanTurnPath).toBe(
@@ -797,7 +802,7 @@ describe("learn start/wait browser round trip", () => {
         "learn wait review weak",
       );
       expect(reviewWaitResult.exitCode).toBe(0);
-      expect(reviewWaitResult.stderr).toBe("");
+      expectWaitGuidance(reviewWaitResult.stderr, courseName);
 
       const reviewTurnPath = reviewWaitResult.stdout.trim();
       expect(reviewTurnPath).toBe(
