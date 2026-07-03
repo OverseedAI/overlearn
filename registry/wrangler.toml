@@ -1,6 +1,7 @@
 name = "overlearn-registry"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
+account_id = "559de600393bfd9a708f884d012fb64f"
 workers_dev = true
 routes = [
   { pattern = "overlearn.org/*", zone_id = "c2a83a212bedc0d98f6815e4650ba431" }
@@ -17,5 +18,5 @@ preview_bucket_name = "overlearn-courses-preview"
 
 [[kv_namespaces]]
 binding = "META"
-id = "00000000000000000000000000000000"
-preview_id = "00000000000000000000000000000000"
+id = "2e41772fb16a41de9da46bec7ca76e2c"
+preview_id = "a081d4e63278472480f7336b03718e3d"
