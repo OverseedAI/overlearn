@@ -40,7 +40,7 @@ type TranscriptEntry = Readonly<{
   at: string;
 }>;
 
-const MODEL = "claude-haiku-4-5-20251001";
+const MODEL = "claude-sonnet-5";
 const SESSION_TIMEOUT_MS = 8 * 60 * 1_000;
 const POLL_MS = 500;
 const COURSE_NAME = "rule-of-72-partial";
