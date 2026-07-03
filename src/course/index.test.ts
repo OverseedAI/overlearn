@@ -4,11 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  appendMasteryScore,
+  clearActiveFeynmanCheck,
   ensureCourseScaffold,
+  isValidConceptId,
   isValidDemoFileName,
   isValidTopicPath,
+  parseKeyPointsText,
+  readActiveFeynmanCheck,
   readCourseManifest,
+  readMastery,
   readPendingEvents,
+  registerFeynmanCheck,
   registerDemo,
   requireCourse,
   resolveCourseDirForWait,
@@ -486,8 +493,135 @@ describe("demo storage", () => {
   });
 });
 
+describe("feynman and mastery storage", () => {
+  test("validates concept ids and parses key point text", () => {
+    expect(isValidConceptId("rule-of-72")).toBe(true);
+    expect(isValidConceptId("rule-72")).toBe(true);
+    expect(isValidConceptId("Rule-of-72")).toBe(false);
+    expect(isValidConceptId("rule_of_72")).toBe(false);
+    expect(isValidConceptId("rule/of/72")).toBe(false);
+    expect(isValidConceptId("")).toBe(false);
+
+    expect(parseKeyPointsText("mechanism, example; limitation")).toEqual([
+      "mechanism",
+      "example",
+      "limitation",
+    ]);
+    expect(parseKeyPointsText(" , ; ")).toEqual([]);
+  });
+
+  test("persists active Feynman checks and records replacements", async () => {
+    const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-feynman-"));
+    const env = { OVERLEARN_COURSES_DIR: coursesDir };
+
+    try {
+      const paths = await ensureCourseScaffold("feynman", env);
+
+      const first = await registerFeynmanCheck(
+        paths.courseDir,
+        {
+          concept: "rule-of-72",
+          prompt: "Explain why 72 works.",
+          keyPoints: ["growth rate", "doubling"],
+        },
+        new Date("2026-01-01T00:00:00Z"),
+      );
+
+      expect(first).toEqual({
+        concept: "rule-of-72",
+        prompt: "Explain why 72 works.",
+        keyPoints: ["growth rate", "doubling"],
+        issuedAt: "2026-01-01T00:00:00.000Z",
+      });
+      await expect(readActiveFeynmanCheck(paths.courseDir)).resolves.toEqual(
+        first,
+      );
+
+      const second = await registerFeynmanCheck(
+        paths.courseDir,
+        {
+          concept: "compound-growth",
+          prompt: "Explain compounding.",
+        },
+        new Date("2026-01-02T00:00:00Z"),
+      );
+
+      expect(second).toEqual({
+        concept: "compound-growth",
+        prompt: "Explain compounding.",
+        keyPoints: [],
+        issuedAt: "2026-01-02T00:00:00.000Z",
+        replaced: {
+          concept: "rule-of-72",
+          issuedAt: "2026-01-01T00:00:00.000Z",
+          replacedAt: "2026-01-02T00:00:00.000Z",
+        },
+      });
+
+      await clearActiveFeynmanCheck(paths.courseDir);
+      await expect(
+        readActiveFeynmanCheck(paths.courseDir),
+      ).resolves.toBeUndefined();
+    } finally {
+      await rm(coursesDir, { force: true, recursive: true });
+    }
+  });
+
+  test("appends mastery score history without overwriting entries", async () => {
+    const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-mastery-"));
+    const env = { OVERLEARN_COURSES_DIR: coursesDir };
+
+    try {
+      const paths = await ensureCourseScaffold("mastery", env);
+
+      const first = await appendMasteryScore(
+        paths.courseDir,
+        {
+          concept: "rule-of-72",
+          score: 72,
+          gaps: "missed the logarithm approximation",
+        },
+        new Date("2026-01-01T00:00:00Z"),
+      );
+      const second = await appendMasteryScore(
+        paths.courseDir,
+        {
+          concept: "rule-of-72",
+          score: 85,
+        },
+        new Date("2026-01-01T00:00:00Z"),
+      );
+
+      expect(first).toEqual({
+        concept: "rule-of-72",
+        score: 72,
+        gaps: "missed the logarithm approximation",
+        at: "2026-01-01T00:00:00.000Z",
+      });
+      expect(second).toEqual({
+        concept: "rule-of-72",
+        score: 85,
+        at: "2026-01-01T00:00:00.001Z",
+      });
+      await expect(readMastery(paths.courseDir)).resolves.toEqual([
+        first,
+        second,
+      ]);
+
+      await expect(
+        appendMasteryScore(paths.courseDir, {
+          concept: "rule-of-72",
+          score: 101,
+        }),
+      ).rejects.toThrow("Mastery score must be an integer from 0 to 100.");
+    } finally {
+      await rm(coursesDir, { force: true, recursive: true });
+    }
+  });
+});
+
 describe("turn event storage", () => {
-  test("parses message and nav events in stored order", async () => {
+  test("parses message, nav, and feynman-answer events in stored order", async () => {
     const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-events-"));
     const env = { OVERLEARN_COURSES_DIR: coursesDir };
 
@@ -496,11 +630,23 @@ describe("turn event storage", () => {
       await writePendingEvents(paths.courseDir, [
         { type: "message", text: "hello" },
         { type: "nav", path: "indexes/btree" },
+        {
+          type: "feynman-answer",
+          concept: "rule-of-72",
+          text: "It estimates doubling time.",
+          keyPoints: ["rate", "doubling"],
+        },
       ]);
 
       await expect(readPendingEvents(paths.courseDir)).resolves.toEqual([
         { type: "message", text: "hello" },
         { type: "nav", path: "indexes/btree" },
+        {
+          type: "feynman-answer",
+          concept: "rule-of-72",
+          text: "It estimates doubling time.",
+          keyPoints: ["rate", "doubling"],
+        },
       ]);
     } finally {
       await rm(coursesDir, { force: true, recursive: true });

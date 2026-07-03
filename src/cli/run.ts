@@ -1,3 +1,5 @@
+import { isValidConceptId, parseKeyPointsText } from "../course";
+
 export type CliExitCode = 0 | 1 | 2;
 
 export type CliResult = Readonly<{
@@ -45,6 +47,20 @@ export type CliCommand =
             topic?: string;
             title?: string;
             json: boolean;
+          }>
+        | Readonly<{
+            kind: "feynman";
+            concept: string;
+            prompt: string;
+            keyPoints: readonly string[];
+            json: boolean;
+          }>
+        | Readonly<{
+            kind: "mastery";
+            concept: string;
+            score: number;
+            gaps?: string;
+            json: boolean;
           }>;
     }>
   | Readonly<{ kind: "daemon"; courseDir: string }>;
@@ -65,6 +81,8 @@ const formatHelp = (version: string): string =>
     "  learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]",
     "  learn emit topic [name] --enter <topic/path> [--title <title>] [--lesson <lesson-id>] [--json]",
     "  learn emit demo [name] --file <file.html> [--topic <topic/path>] [--title <title>] [--json]",
+    "  learn emit feynman [name] --concept <id> --prompt <prompt> [--key-points <points>] [--json]",
+    "  learn emit mastery [name] --concept <id> --score <0-100> [--gaps <gaps>] [--json]",
     "  learn --help",
     "  learn --version",
   ].join("\n");
@@ -75,6 +93,29 @@ const emitTopicUsage =
   "Usage: learn emit topic [name] --enter <topic/path> [--title <title>] [--lesson <lesson-id>] [--json]";
 const emitDemoUsage =
   "Usage: learn emit demo [name] --file <file.html> [--topic <topic/path>] [--title <title>] [--json]";
+const emitFeynmanUsage =
+  "Usage: learn emit feynman [name] --concept <id> --prompt <prompt> [--key-points <points>] [--json]";
+const emitMasteryUsage =
+  "Usage: learn emit mastery [name] --concept <id> --score <0-100> [--gaps <gaps>] [--json]";
+
+const validateConceptId = (
+  concept: string,
+  version: string,
+): CliCommand | undefined => {
+  if (concept.trim().length === 0) {
+    return result(1, formatHelp(version), "Concept id cannot be empty.");
+  }
+
+  if (!isValidConceptId(concept.trim())) {
+    return result(
+      1,
+      formatHelp(version),
+      `Invalid concept id: ${concept}. Use lowercase letters, numbers, and hyphens.`,
+    );
+  }
+
+  return undefined;
+};
 
 const result = (
   exitCode: CliExitCode,
@@ -505,6 +546,174 @@ const emitDemoCommand = (
   };
 };
 
+const emitFeynmanCommand = (
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let index = 0;
+  const first = args[index];
+  const name = first !== undefined && !first.startsWith("-") ? first : undefined;
+
+  if (name !== undefined) {
+    index += 1;
+  }
+
+  let concept: string | undefined;
+  let prompt: string | undefined;
+  let keyPointsText: string | undefined;
+  let json = false;
+
+  while (index < args.length) {
+    const flag = args[index];
+    index += 1;
+
+    if (flag === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (
+      flag !== "--concept" &&
+      flag !== "--prompt" &&
+      flag !== "--key-points"
+    ) {
+      return result(1, formatHelp(version), emitFeynmanUsage);
+    }
+
+    const value = args[index];
+    index += 1;
+
+    if (value === undefined) {
+      return result(1, formatHelp(version), emitFeynmanUsage);
+    }
+
+    if (flag === "--concept") {
+      concept = value;
+    } else if (flag === "--prompt") {
+      prompt = value;
+    } else {
+      keyPointsText = value;
+    }
+  }
+
+  if (concept === undefined || prompt === undefined) {
+    return result(1, formatHelp(version), emitFeynmanUsage);
+  }
+
+  const conceptError = validateConceptId(concept, version);
+  if (conceptError !== undefined) {
+    return conceptError;
+  }
+
+  if (prompt.trim().length === 0) {
+    return result(1, formatHelp(version), "Feynman prompt cannot be empty.");
+  }
+
+  const keyPoints =
+    keyPointsText === undefined ? [] : parseKeyPointsText(keyPointsText);
+  if (keyPointsText !== undefined && keyPoints.length === 0) {
+    return result(1, formatHelp(version), "Feynman key points cannot be empty.");
+  }
+
+  return {
+    kind: "emit",
+    ...(name === undefined ? {} : { name }),
+    emit: {
+      kind: "feynman",
+      concept: concept.trim(),
+      prompt,
+      keyPoints,
+      json,
+    },
+  };
+};
+
+const emitMasteryCommand = (
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let index = 0;
+  const first = args[index];
+  const name = first !== undefined && !first.startsWith("-") ? first : undefined;
+
+  if (name !== undefined) {
+    index += 1;
+  }
+
+  let concept: string | undefined;
+  let scoreText: string | undefined;
+  let gaps: string | undefined;
+  let json = false;
+
+  while (index < args.length) {
+    const flag = args[index];
+    index += 1;
+
+    if (flag === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (flag !== "--concept" && flag !== "--score" && flag !== "--gaps") {
+      return result(1, formatHelp(version), emitMasteryUsage);
+    }
+
+    const value = args[index];
+    index += 1;
+
+    if (value === undefined) {
+      return result(1, formatHelp(version), emitMasteryUsage);
+    }
+
+    if (flag === "--concept") {
+      concept = value;
+    } else if (flag === "--score") {
+      scoreText = value;
+    } else {
+      gaps = value;
+    }
+  }
+
+  if (concept === undefined || scoreText === undefined) {
+    return result(1, formatHelp(version), emitMasteryUsage);
+  }
+
+  const conceptError = validateConceptId(concept, version);
+  if (conceptError !== undefined) {
+    return conceptError;
+  }
+
+  const score = Number.parseInt(scoreText, 10);
+  if (
+    !/^\d+$/.test(scoreText) ||
+    !Number.isInteger(score) ||
+    score < 0 ||
+    score > 100
+  ) {
+    return result(
+      1,
+      formatHelp(version),
+      "Mastery score must be an integer from 0 to 100.",
+    );
+  }
+
+  if (gaps !== undefined && gaps.trim().length === 0) {
+    return result(1, formatHelp(version), "Mastery gaps cannot be empty.");
+  }
+
+  return {
+    kind: "emit",
+    ...(name === undefined ? {} : { name }),
+    emit: {
+      kind: "mastery",
+      concept: concept.trim(),
+      score,
+      ...(gaps === undefined ? {} : { gaps }),
+      json,
+    },
+  };
+};
+
 const emitCommand = (args: readonly string[], version: string): CliCommand => {
   const [kind, ...rest] = args;
 
@@ -518,6 +727,14 @@ const emitCommand = (args: readonly string[], version: string): CliCommand => {
 
   if (kind === "demo") {
     return emitDemoCommand(rest, version);
+  }
+
+  if (kind === "feynman") {
+    return emitFeynmanCommand(rest, version);
+  }
+
+  if (kind === "mastery") {
+    return emitMasteryCommand(rest, version);
   }
 
   if (kind === undefined) {

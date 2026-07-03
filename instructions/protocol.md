@@ -59,9 +59,25 @@ Turn files:
 
 - `turn.json` contains an `events` array.
 - `{"type":"message","text":"..."}` means the learner sent a chat message.
+- `{"type":"feynman-answer","concept":"...","text":"...","keyPoints":[...]}`
+  means the learner submitted an explain-it-back checkpoint answer. Grade it
+  using `grading.md` and emit mastery before the next teaching turn.
 - Read every event before responding.
 - If several learner messages arrive together, address them in order and still
   keep the teaching turn focused.
+
+Feynman checks:
+
+- Issue a Feynman check only after the concept has had at least one worked
+  example.
+- Issue one before advancing past a major topic or when mastery is uncertain.
+- Use `learn emit feynman <course> --concept <id> --prompt '<prompt>'` and add
+  `--key-points 'point one, point two'` when specific rubric anchors matter.
+- Keep one active check at a time. If you need a better prompt, emit a new check;
+  it replaces the unanswered one.
+- When a `feynman-answer` event arrives, grade per `grading.md`, then run
+  `learn emit mastery <course> --concept <id> --score <n> --gaps '<gaps>'`
+  before sending the next teaching response.
 
 Daemon and wait rules:
 

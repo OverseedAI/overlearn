@@ -10,13 +10,16 @@ import { join, resolve } from "node:path";
 import {
   appendAgentTranscript,
   appendLearnerTranscript,
+  clearActiveFeynmanCheck,
   clearDaemonMetadata,
   DEFAULT_COURSE_NAME,
   ensureCourseScaffold,
   requireCourse,
   getCoursePaths,
+  isValidConceptId,
   isValidTopicPath,
   isValidDemoFileName,
+  readActiveFeynmanCheck,
   readCourseManifest,
   readDaemonMetadata,
   readGlossary,
@@ -26,6 +29,7 @@ import {
   writeDaemonMetadata,
   writePendingEvents,
   writeTurnFile,
+  type ActiveFeynmanCheck,
   type DaemonMetadata,
   type CoursePaths,
   type DemoEntry,
@@ -34,6 +38,7 @@ import {
   type TranscriptEntry,
   type TurnEvent,
 } from "../course";
+import { watchFeynmanFile } from "./feynman";
 import { watchGlossaryFile } from "./glossary";
 import {
   readLessonSnapshot,
@@ -556,6 +561,7 @@ const createSseHub = (
   getTopics: () => readonly TopicNode[],
   getUnassignedDemos: () => readonly DemoEntry[],
   getDemoFiles: () => ReadonlySet<string>,
+  getActiveFeynmanCheck: () => ActiveFeynmanCheck | undefined,
 ) => {
   const subscribers = new Set<ServerResponse>();
 
@@ -626,6 +632,14 @@ const createSseHub = (
     }
   };
 
+  const broadcastFeynman = (
+    activeCheck: ActiveFeynmanCheck | undefined,
+  ): void => {
+    for (const subscriber of subscribers) {
+      writeEvent(subscriber, "feynman", { activeCheck: activeCheck ?? null });
+    }
+  };
+
   const connect = (
     request: IncomingMessage,
     response: ServerResponse,
@@ -642,6 +656,9 @@ const createSseHub = (
       topics: getTopics(),
       unassignedDemos: getUnassignedDemos(),
     });
+    writeEvent(response, "feynman", {
+      activeCheck: getActiveFeynmanCheck() ?? null,
+    });
 
     request.on("close", () => {
       subscribers.delete(response);
@@ -649,6 +666,7 @@ const createSseHub = (
   };
 
   return {
+    broadcastFeynman,
     broadcastGlossary,
     broadcastLesson,
     broadcastMessage,
@@ -703,6 +721,37 @@ const parseNavPath = (bodyText: string): string => {
   }
 
   return path;
+};
+
+const parseFeynmanAnswer = (
+  bodyText: string,
+): Readonly<{ concept: string; text: string }> => {
+  const body = JSON.parse(bodyText) as unknown;
+  if (
+    !isRecord(body) ||
+    typeof body["concept"] !== "string" ||
+    typeof body["text"] !== "string"
+  ) {
+    throw new Error("Expected JSON body with concept and text fields.");
+  }
+
+  const concept = body["concept"].trim();
+  if (concept.length === 0) {
+    throw new Error("Concept id cannot be empty.");
+  }
+
+  if (!isValidConceptId(concept)) {
+    throw new Error(
+      `Invalid concept id: ${body["concept"]}. Use lowercase letters, numbers, and hyphens.`,
+    );
+  }
+
+  const text = body["text"].trim();
+  if (text.length === 0) {
+    throw new Error("Feynman answer cannot be empty.");
+  }
+
+  return { concept, text };
 };
 
 const parseAgentMessage = (bodyText: string): TranscriptEntry => {
@@ -787,6 +836,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   let topicTree = manifest.topics;
   let unassignedDemos = manifest.unassignedDemos;
   let demoFileSet = await readDemoFileSet(coursePaths.demosDir);
+  let activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
 
   let status: UiStatus = "agent-working";
   let waiter: Waiter | undefined;
@@ -799,6 +849,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     () => topicTree,
     () => unassignedDemos,
     () => demoFileSet,
+    () => activeFeynmanCheck,
   );
   const refreshGlossary = async (): Promise<void> => {
     await serialize(async () => {
@@ -826,6 +877,12 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       unassignedDemos = manifest.unassignedDemos;
       demoFileSet = await readDemoFileSet(coursePaths.demosDir);
       sseHub.broadcastTopics(topicTree, unassignedDemos);
+    });
+  };
+  const refreshFeynman = async (): Promise<void> => {
+    await serialize(async () => {
+      activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
+      sseHub.broadcastFeynman(activeFeynmanCheck);
     });
   };
 
@@ -863,6 +920,17 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         error instanceof Error
           ? `Topic watcher error: ${error.message}`
           : "Topic watcher error.",
+      );
+    },
+  });
+  const feynmanWatcher = watchFeynmanFile({
+    activeFeynmanJson: coursePaths.activeFeynmanJson,
+    emit: refreshFeynman,
+    onError: (error) => {
+      console.error(
+        error instanceof Error
+          ? `Feynman watcher error: ${error.message}`
+          : "Feynman watcher error.",
       );
     },
   });
@@ -999,6 +1067,54 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     return jsonResponse({ ok: true });
   };
 
+  const handleFeynmanAnswer = async (bodyText: string): Promise<Response> => {
+    let answer: Readonly<{ concept: string; text: string }>;
+    try {
+      answer = parseFeynmanAnswer(bodyText);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Invalid Feynman answer.";
+      return textResponse(message, 400);
+    }
+
+    let response: Response = jsonResponse({ ok: true });
+
+    await serialize(async () => {
+      const active = await readActiveFeynmanCheck(coursePath);
+      activeFeynmanCheck = active;
+
+      if (active === undefined) {
+        response = textResponse("No active Feynman check.", 409);
+        return;
+      }
+
+      if (active.concept !== answer.concept) {
+        response = textResponse("Active Feynman check changed.", 409);
+        return;
+      }
+
+      const event: TurnEvent = {
+        type: "feynman-answer",
+        concept: active.concept,
+        text: answer.text,
+        keyPoints: active.keyPoints,
+      };
+      const pendingEvents = await readPendingEvents(coursePath);
+
+      await writePendingEvents(coursePath, [...pendingEvents, event]);
+      await clearActiveFeynmanCheck(coursePath);
+      activeFeynmanCheck = undefined;
+      sseHub.broadcastFeynman(activeFeynmanCheck);
+      await maybeResolveWaiter();
+
+      if (waiter === undefined) {
+        setStatus("agent-working");
+      }
+    });
+
+    return response;
+  };
+
   const handleAgentMessage = async (bodyText: string): Promise<Response> => {
     let entry: TranscriptEntry;
     try {
@@ -1039,6 +1155,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         topicTree = manifest.topics;
         unassignedDemos = manifest.unassignedDemos;
         glossaryEntries = await readGlossary(coursePath);
+        activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
         demoFileSet = await readDemoFileSet(coursePaths.demosDir);
         const [transcript, lessons] = await Promise.all([
           readTranscript(coursePath),
@@ -1059,6 +1176,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
               topicTree,
               unassignedDemos,
               demoFileSet,
+              activeFeynmanCheck,
             ),
             {
               headers: { "content-type": "text/html; charset=utf-8" },
@@ -1108,6 +1226,12 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         return;
       }
 
+      if (method === "POST" && requestUrl.pathname === "/api/feynman-answer") {
+        const bodyText = await readRequestBody(request);
+        await sendResponse(response, await handleFeynmanAnswer(bodyText));
+        return;
+      }
+
       if (method === "POST" && requestUrl.pathname === "/api/agent-message") {
         const bodyText = await readRequestBody(request);
         await sendResponse(response, await handleAgentMessage(bodyText));
@@ -1148,6 +1272,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     lessonWatcher.close();
     glossaryWatcher.close();
     topicWatcher.close();
+    feynmanWatcher.close();
     server.close();
     await clearDaemonMetadata(coursePath);
   };
