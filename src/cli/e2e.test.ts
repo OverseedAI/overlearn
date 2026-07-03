@@ -245,6 +245,11 @@ describe("learn start/wait browser round trip", () => {
 
       liveDaemonPids.add(daemon.pid);
 
+      const initialHealth = (await (
+        await fetch(`${url}/api/health`)
+      ).json()) as { waitPending: boolean };
+      expect(initialHealth.waitPending).toBe(false);
+
       const firstSseAbort = new AbortController();
       const firstSse = await fetch(`${url}/api/events`, {
         signal: firstSseAbort.signal,
@@ -296,6 +301,16 @@ describe("learn start/wait browser round trip", () => {
 
       const wait = spawnLearn(["wait"], env);
       await firstProbe.waitForStatus("waiting-for-agent");
+
+      const waitingStatus = await runLearn(["status", courseName, "--json"], env);
+      expect(waitingStatus.exitCode).toBe(0);
+      expect(waitingStatus.stderr).toBe("");
+      expect(JSON.parse(waitingStatus.stdout)).toEqual({
+        daemonAlive: true,
+        waitPending: true,
+        courseDir,
+      });
+
       await submitMessage(url, "hello from the browser");
 
       const waitResult = await collectProcess(wait, "learn wait");
@@ -305,6 +320,13 @@ describe("learn start/wait browser round trip", () => {
 
       const turnPath = waitResult.stdout.trim();
       expect(turnPath).toBe(join(courseDir, ".overlearn", "turns", "turn-1.json"));
+
+      const workingStatus = await runLearn(["status", courseName, "--json"], env);
+      expect(JSON.parse(workingStatus.stdout)).toEqual({
+        daemonAlive: true,
+        waitPending: false,
+        courseDir,
+      });
 
       const turn = JSON.parse(await readFile(turnPath, "utf8")) as TurnFile;
       expect(turn).toEqual({

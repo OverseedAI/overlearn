@@ -2,6 +2,11 @@
 
 import packageJson from "../../package.json";
 import {
+  formatInstructions,
+  formatInstructionsJson,
+} from "../instructions";
+import {
+  getCourseStatus,
   LearnCommandError,
   runDaemon,
   sayAgentMessage,
@@ -54,6 +59,20 @@ const main = async (): Promise<CliResult> => {
     return {
       exitCode: 0,
       stdout: await waitForLearnerTurn(command.name),
+    };
+  }
+
+  if (command.kind === "instructions") {
+    return {
+      exitCode: 0,
+      stdout: command.json ? formatInstructionsJson() : formatInstructions(),
+    };
+  }
+
+  if (command.kind === "status") {
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify(await getCourseStatus(command.name)),
     };
   }
 
