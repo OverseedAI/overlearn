@@ -2,6 +2,9 @@
 
 import packageJson from "../../package.json";
 import {
+  assembleInstructionModules,
+  ejectInstructionModules,
+  formatEjectInstructionModules,
   formatInstructions,
   formatInstructionsJson,
 } from "../instructions";
@@ -65,6 +68,23 @@ const formatGlossaryEmitOutput = (
   return `${mutation.action} glossary term: ${mutation.entry.term}`;
 };
 
+const isNoCourseSelectedError = (error: unknown): boolean =>
+  error instanceof Error && error.message.startsWith("No course selected.");
+
+const resolveInstructionsCourseDir = async (
+  name: string | undefined,
+): Promise<string | undefined> => {
+  try {
+    return await resolveCourseDirForWait(name);
+  } catch (error) {
+    if (name === undefined && isNoCourseSelectedError(error)) {
+      return undefined;
+    }
+
+    throw error;
+  }
+};
+
 const main = async (): Promise<CliResult> => {
   const command = parseCli(process.argv.slice(2), packageJson.version);
 
@@ -94,9 +114,28 @@ const main = async (): Promise<CliResult> => {
   }
 
   if (command.kind === "instructions") {
+    const courseDir = await resolveInstructionsCourseDir(command.name);
+    const modules = assembleInstructionModules(
+      courseDir === undefined ? {} : { courseDir },
+    );
+
     return {
       exitCode: 0,
-      stdout: command.json ? formatInstructionsJson() : formatInstructions(),
+      stdout: command.json
+        ? formatInstructionsJson(modules)
+        : formatInstructions(modules),
+    };
+  }
+
+  if (command.kind === "instructions-eject") {
+    const modules = await ejectInstructionModules({
+      ...(command.toDir === undefined ? {} : { toDir: command.toDir }),
+      force: command.force,
+    });
+
+    return {
+      exitCode: 0,
+      stdout: formatEjectInstructionModules(modules),
     };
   }
 
