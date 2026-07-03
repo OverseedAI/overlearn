@@ -10,3 +10,15 @@ bun test
 bun run build
 ./dist/learn --version
 ```
+
+## Registry
+
+The course registry Worker lives in `registry/` and is local-first while R2 enablement is pending:
+
+```sh
+cd registry
+bun install
+bun run dev
+```
+
+Point the CLI at a local Worker with `OVERLEARN_REGISTRY_URL=http://127.0.0.1:8787`. GitHub device flow uses `OVERLEARN_GITHUB_CLIENT_ID` until the OAuth app client id exists.

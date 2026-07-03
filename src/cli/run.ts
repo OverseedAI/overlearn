@@ -24,6 +24,14 @@ export type CliCommand =
       force: boolean;
       json: boolean;
     }>
+  | Readonly<{ kind: "share"; name?: string; json: boolean }>
+  | Readonly<{ kind: "unpublish"; name?: string; json: boolean }>
+  | Readonly<{
+      kind: "fetch";
+      input: string;
+      force: boolean;
+      json: boolean;
+    }>
   | Readonly<{
       kind: "say";
       name?: string;
@@ -85,6 +93,9 @@ const formatHelp = (version: string): string =>
     "  learn instructions --eject [--to <dir>] [--force]",
     "  learn status [name] --json",
     "  learn export [name] [--out <dir>] [--include-transcript] [--force] [--json]",
+    "  learn share [name] [--json]",
+    "  learn unpublish [name-or-slug] [--json]",
+    "  learn fetch <slug-or-url> [--force] [--json]",
     "  learn say [name] --text <markdown>",
     "  learn say [name] --file <path>",
     "  learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]",
@@ -213,6 +224,9 @@ const instructionsUsage =
 
 const exportUsage =
   "Usage: learn export [name] [--out <dir>] [--include-transcript] [--force] [--json]";
+const shareUsage = "Usage: learn share [name] [--json]";
+const unpublishUsage = "Usage: learn unpublish [name-or-slug] [--json]";
+const fetchUsage = "Usage: learn fetch <slug-or-url> [--force] [--json]";
 
 const instructionsCommand = (
   args: readonly string[],
@@ -823,6 +837,75 @@ const exportCommand = (
   };
 };
 
+const optionalNameRegistryCommand = (
+  kind: "share" | "unpublish",
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let name: string | undefined;
+  let json = false;
+
+  for (const arg of args) {
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      return result(
+        1,
+        formatHelp(version),
+        kind === "share" ? shareUsage : unpublishUsage,
+      );
+    }
+
+    if (name !== undefined) {
+      return result(1, formatHelp(version), `Too many arguments for ${kind}.`);
+    }
+
+    name = arg;
+  }
+
+  return name === undefined ? { kind, json } : { kind, name, json };
+};
+
+const fetchCommand = (
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let input: string | undefined;
+  let force = false;
+  let json = false;
+
+  for (const arg of args) {
+    if (arg === "--force") {
+      force = true;
+      continue;
+    }
+
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      return result(1, formatHelp(version), fetchUsage);
+    }
+
+    if (input !== undefined) {
+      return result(1, formatHelp(version), "Too many arguments for fetch.");
+    }
+
+    input = arg;
+  }
+
+  if (input === undefined) {
+    return result(1, formatHelp(version), fetchUsage);
+  }
+
+  return { kind: "fetch", input, force, json };
+};
+
 export const parseCli = (
   args: readonly string[],
   version: string,
@@ -859,6 +942,18 @@ export const parseCli = (
 
   if (arg === "export") {
     return exportCommand(rest, version);
+  }
+
+  if (arg === "share") {
+    return optionalNameRegistryCommand("share", rest, version);
+  }
+
+  if (arg === "unpublish") {
+    return optionalNameRegistryCommand("unpublish", rest, version);
+  }
+
+  if (arg === "fetch") {
+    return fetchCommand(rest, version);
   }
 
   if (arg === "say") {

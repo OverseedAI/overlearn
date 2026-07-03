@@ -1,8 +1,11 @@
 .bun-cache/
 .tmp/
+.wrangler/
 coverage/
 dist/
 node_modules/
+registry/.wrangler/
+registry/wrangler.it.*.toml
 
 .env
 .env.*

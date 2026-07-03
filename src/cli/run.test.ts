@@ -18,6 +18,9 @@ describe("runCli", () => {
     expect(result.stdout).toContain("learn instructions [name] [--json]");
     expect(result.stdout).toContain("learn status [name] --json");
     expect(result.stdout).toContain("learn resume <name>");
+    expect(result.stdout).toContain("learn share [name] [--json]");
+    expect(result.stdout).toContain("learn unpublish [name-or-slug] [--json]");
+    expect(result.stdout).toContain("learn fetch <slug-or-url>");
     expect(result.stdout).toContain("learn emit glossary [name]");
     expect(result.stdout).toContain("learn emit demo [name]");
     expect(result.stdout).toContain("learn emit feynman [name]");
@@ -626,6 +629,51 @@ describe("export CLI parsing", () => {
         exitCode: 1,
         stdout: expect.stringContaining("learn export [name]"),
         stderr: "Too many arguments for export.",
+      },
+    });
+  });
+});
+
+describe("registry CLI parsing", () => {
+  test("parses share, unpublish, and fetch commands", () => {
+    expect(parseCli(["share", "course", "--json"], "1.2.3")).toEqual({
+      kind: "share",
+      name: "course",
+      json: true,
+    });
+
+    expect(parseCli(["unpublish", "course-slug"], "1.2.3")).toEqual({
+      kind: "unpublish",
+      name: "course-slug",
+      json: false,
+    });
+
+    expect(
+      parseCli(["fetch", "https://overlearn.org/c/course-slug", "--force", "--json"], "1.2.3"),
+    ).toEqual({
+      kind: "fetch",
+      input: "https://overlearn.org/c/course-slug",
+      force: true,
+      json: true,
+    });
+  });
+
+  test("rejects invalid registry arguments", () => {
+    expect(parseCli(["fetch"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn fetch <slug-or-url>"),
+        stderr: "Usage: learn fetch <slug-or-url> [--force] [--json]",
+      },
+    });
+
+    expect(parseCli(["share", "one", "two"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn share [name]"),
+        stderr: "Too many arguments for share.",
       },
     });
   });
