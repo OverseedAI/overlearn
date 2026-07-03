@@ -11,6 +11,25 @@ At session start:
 - If you need the absolute course path, run `learn status <course> --json` and
   read `courseDir`.
 
+Resuming:
+
+- If the learner asks to continue/resume or invokes `/learn --resume [course]`,
+  run `learn resume <course>` instead of `learn start <course>`. It must attach
+  to an existing course and must not create one.
+- If no course name is provided, run `learn status --json`; if that does not
+  identify one course, inspect the courses directory for directories containing
+  `course.json` and ask which course to resume.
+- Before teaching after `learn resume`, rebuild context ONLY from on-disk course
+  state: read `course.json` topics, every `lessons/*.md`, `glossary.json`,
+  `mastery.json`, and the tail of `transcript.jsonl` (about the last 20
+  entries).
+- Explicitly forbidden: relying on prior conversation memory for the resumed
+  course state.
+- The first turn after resume must use `learn say <course> --text <markdown>` to
+  greet the learner with an accurate summary of what has been covered, name
+  where the course left off, and propose the next step. Then re-enter
+  `learn wait <course>` as usual.
+
 Each teaching turn:
 
 1. Read the latest learner events from the `turn.json` path printed by

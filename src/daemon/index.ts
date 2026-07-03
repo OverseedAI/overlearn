@@ -13,6 +13,7 @@ import {
   clearDaemonMetadata,
   DEFAULT_COURSE_NAME,
   ensureCourseScaffold,
+  requireCourse,
   getCoursePaths,
   readCourseManifest,
   readDaemonMetadata,
@@ -23,6 +24,7 @@ import {
   writePendingEvents,
   writeTurnFile,
   type DaemonMetadata,
+  type CoursePaths,
   type TranscriptEntry,
   type TurnEvent,
 } from "../course";
@@ -231,11 +233,10 @@ const openBrowser = (url: string, env: Env): void => {
   }
 };
 
-export const startCourseDaemon = async (
-  name = DEFAULT_COURSE_NAME,
+const startDaemonForCourse = async (
+  paths: CoursePaths,
   env: Env = process.env,
 ): Promise<string> => {
-  const paths = await ensureCourseScaffold(name, env);
   const existingMetadata = await readDaemonMetadata(paths.courseDir);
 
   if (
@@ -259,6 +260,17 @@ export const startCourseDaemon = async (
 
   return url;
 };
+
+export const startCourseDaemon = async (
+  name = DEFAULT_COURSE_NAME,
+  env: Env = process.env,
+): Promise<string> =>
+  startDaemonForCourse(await ensureCourseScaffold(name, env), env);
+
+export const resumeCourseDaemon = async (
+  name: string,
+  env: Env = process.env,
+): Promise<string> => startDaemonForCourse(await requireCourse(name, env), env);
 
 const parseWaitResponse = async (response: Response): Promise<string> => {
   const body = (await response.json()) as unknown;

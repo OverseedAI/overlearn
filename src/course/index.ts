@@ -507,6 +507,47 @@ const listCourseDirs = async (coursesDir: string): Promise<readonly string[]> =>
   return courseDirs;
 };
 
+export const listCourseNames = async (
+  env: Env = process.env,
+): Promise<readonly string[]> => {
+  const coursesDir = getCoursesDir(env);
+  const courseDirs = await listCourseDirs(coursesDir);
+
+  return courseDirs
+    .map((courseDir) => basename(courseDir))
+    .sort((left, right) => left.localeCompare(right));
+};
+
+const formatAvailableCourses = (
+  coursesDir: string,
+  names: readonly string[],
+): string =>
+  names.length === 0
+    ? `No available courses in ${coursesDir}.`
+    : `Available courses in ${coursesDir}: ${names.join(", ")}.`;
+
+export const requireCourse = async (
+  name = DEFAULT_COURSE_NAME,
+  env: Env = process.env,
+): Promise<CoursePaths> => {
+  const courseDir = resolveNamedCourseDir(name, env);
+  const paths = getCoursePaths(courseDir);
+
+  if (!(await Bun.file(paths.courseJson).exists())) {
+    const coursesDir = getCoursesDir(env);
+    const availableCourses = await listCourseNames(env);
+    throw new Error(
+      [
+        `Cannot resume course "${name}": ${paths.courseJson} does not exist.`,
+        formatAvailableCourses(coursesDir, availableCourses),
+      ].join("\n"),
+    );
+  }
+
+  await readCourseManifest(paths.courseDir);
+  return paths;
+};
+
 export const resolveCourseDirForWait = async (
   name: string | undefined,
   env: Env = process.env,

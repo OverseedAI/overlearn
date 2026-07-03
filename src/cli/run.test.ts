@@ -17,13 +17,19 @@ describe("runCli", () => {
     expect(result.stdout).toContain("learn say [name] --text <markdown>");
     expect(result.stdout).toContain("learn instructions [name] [--json]");
     expect(result.stdout).toContain("learn status [name] --json");
+    expect(result.stdout).toContain("learn resume <name>");
     expect(result.stdout).toContain("learn --help");
     expect(result.stdout).toContain("learn --version");
   });
 
-  test("parses start, wait, and say commands", () => {
+  test("parses start, resume, wait, and say commands", () => {
     expect(parseCli(["start", "demo"], "1.2.3")).toEqual({
       kind: "start",
+      name: "demo",
+    });
+
+    expect(parseCli(["resume", "demo"], "1.2.3")).toEqual({
+      kind: "resume",
       name: "demo",
     });
 
@@ -74,6 +80,17 @@ describe("runCli", () => {
         exitCode: 1,
         stdout: expect.stringContaining("learn status [name] --json"),
         stderr: "Usage: learn status [name] --json",
+      },
+    });
+  });
+
+  test("requires a course name for resume", () => {
+    expect(parseCli(["resume"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn resume <name>"),
+        stderr: "Usage: learn resume <name>",
       },
     });
   });
