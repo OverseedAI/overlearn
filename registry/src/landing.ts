@@ -55,6 +55,8 @@ body {
   box-shadow: inset 0 0 60px rgba(0, 0, 0, 0.55);
   overflow: hidden;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 .board::after { /* chalk dust grain */
   content: "";
@@ -276,7 +278,12 @@ svg .draw {
   .cmd { white-space: normal; flex-wrap: wrap; justify-content: center; row-gap: 6px; }
   .cmd code { word-break: break-all; }
   .footer-line { bottom: clamp(30px, 6vmin, 40px); left: 50%; transform: translateX(-50%); }
-  .turn-hint { display: none; }
+  .turn-hint {
+    top: clamp(10px, 2.2vmin, 20px);
+    right: clamp(12px, 3vmin, 24px);
+    bottom: auto;
+    font-size: 1.05rem;
+  }
   .beat { width: 94%; }
 }
 @media (prefers-reduced-motion: reduce) {
