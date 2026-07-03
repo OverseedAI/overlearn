@@ -370,7 +370,7 @@ describe("landing page", () => {
 
     const body = await landing.text();
     expect(body).toContain("curl -fsSL https://overlearn.org/install.sh | bash");
-    expect(body).toContain("DO NOT ERASE");
+    expect(body).toContain("Get started");
     expect(body).toContain('href="/courses"');
 
     const post = await worker.fetch(
@@ -497,7 +497,7 @@ describe("registry local integration", () => {
     expect(published.url).toBe(`${workerUrl}/c/compound-interest`);
 
     const landingHtml = await fetch(workerUrl).then((response) => response.text());
-    expect(landingHtml).toContain("DO NOT ERASE");
+    expect(landingHtml).toContain("Get started");
 
     const indexHtml = await fetch(`${workerUrl}/courses`).then((response) =>
       response.text(),
