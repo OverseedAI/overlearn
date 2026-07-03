@@ -1,6 +1,6 @@
 ---
 name: learn
-description: Use when the user wants Claude Code to teach an interactive Overlearn course, asks to learn a topic, or invokes /learn.
+description: Use when the user wants the agent to teach an interactive Overlearn course, asks to learn a topic, or invokes /learn.
 ---
 
 # learn

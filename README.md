@@ -24,10 +24,12 @@ chmod 0755 ~/.local/bin/learn
 
 Use `learn-linux-arm64`, `learn-darwin-x64`, or `learn-darwin-arm64` for other platforms.
 
-Install the Claude Code harness files:
+Install the harness files for your agent (Claude Code and Codex today):
 
 ```sh
 learn install claude-code
+# or
+learn install codex
 ```
 
 Claude Code plugin marketplace alternative:
@@ -40,11 +42,11 @@ claude plugin install overlearn@overlearn
 Quickstart:
 
 ```sh
-learn install claude-code
+learn install claude-code   # or: learn install codex
 learn start my-course
 ```
 
-In Claude Code, run `/learn`.
+In your agent, run `/learn`.
 
 ## Registry
 

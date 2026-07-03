@@ -118,8 +118,9 @@ print_path_hint() {
 print_agent_setup() {
   cat <<'AGENT_SETUP'
 
-Claude Code setup (optional, run it yourself):
+Agent harness setup (optional, run it yourself):
   learn install claude-code
+  learn install codex
 AGENT_SETUP
 }
 
@@ -156,8 +157,8 @@ print_agent_setup
 cat <<'QUICKSTART'
 
 Quickstart:
-  learn install claude-code
+  learn install claude-code   (or: learn install codex)
   learn start my-course
-  /learn in Claude Code
+  /learn in your agent
 QUICKSTART
 `;
