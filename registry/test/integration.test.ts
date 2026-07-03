@@ -1,15 +1,20 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { constants } from "node:fs";
 import { createServer } from "node:net";
 import {
+  access,
   mkdir,
   mkdtemp,
   readFile,
   rm,
+  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import worker from "../src/index";
+import type { Env } from "../src/types";
 
 const registryRoot = resolve(import.meta.dir, "..");
 const repoRoot = resolve(registryRoot, "..");
@@ -41,6 +46,27 @@ const writeJson = async (path: string, value: unknown): Promise<void> => {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 };
+
+const findOnPath = async (name: string): Promise<string | undefined> => {
+  for (const dir of (process.env.PATH ?? "").split(":")) {
+    if (dir.length === 0) {
+      continue;
+    }
+
+    const candidate = join(dir, name);
+    try {
+      await access(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Keep searching.
+    }
+  }
+
+  return undefined;
+};
+
+const fetchWorker = (path: string): Promise<Response> =>
+  worker.fetch(new Request(`https://overlearn.org${path}`), {} as Env);
 
 const createFixtureCourse = async (): Promise<Readonly<{ coursesDir: string }>> => {
   const root = await mkdtemp(join(tmpdir(), "overlearn-registry-it-"));
@@ -149,6 +175,38 @@ const startGitHubStub = async (): Promise<string> => {
   });
 
   return `http://127.0.0.1:${server.port}`;
+};
+
+const startReleaseStub = async (): Promise<string> => {
+  const port = await freePort();
+  const fixture = "#!/bin/sh\necho overlearn fixture\n";
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port,
+    fetch: (request) => {
+      const url = new URL(request.url);
+
+      if (
+        /^\/releases\/(?:latest\/download|download\/v[^/]+)\/learn-(?:linux|darwin)-(?:x64|arm64)$/.test(
+          url.pathname,
+        )
+      ) {
+        return new Response(fixture, {
+          headers: {
+            "Content-Type": "application/octet-stream",
+          },
+        });
+      }
+
+      return new Response("not found", { status: 404 });
+    },
+  });
+
+  cleanupTasks.push(async () => {
+    server.stop(true);
+  });
+
+  return `http://127.0.0.1:${server.port}/releases`;
 };
 
 type ProcessResult = Readonly<{
@@ -302,6 +360,91 @@ afterEach(async () => {
     [...tempRoots].map((root) => rm(root, { recursive: true, force: true })),
   );
   tempRoots.clear();
+});
+
+describe("installer", () => {
+  test("serves /install.sh and /install as a shell script", async () => {
+    const response = await fetchWorker("/install.sh");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe(
+      "text/x-shellscript; charset=utf-8",
+    );
+
+    const body = await response.text();
+    expect(body).toStartWith("#!/usr/bin/env bash\n");
+    expect(body).toContain("OVERLEARN_VERSION");
+    expect(body).toContain("claude plugin install overlearn@overlearn");
+
+    const alias = await fetchWorker("/install");
+    expect(alias.status).toBe(200);
+    expect(await alias.text()).toBe(body);
+  });
+
+  test("installer script passes shellcheck when available", async () => {
+    const shellcheck = await findOnPath("shellcheck");
+    if (shellcheck === undefined) {
+      if (process.env.CI === "true") {
+        throw new Error("shellcheck is required in CI.");
+      }
+
+      return;
+    }
+
+    const response = await fetchWorker("/install.sh");
+    const scriptPath = join(
+      await mkdtemp(join(tmpdir(), "overlearn-shellcheck-")),
+      "install.sh",
+    );
+    tempRoots.add(dirname(scriptPath));
+    await writeFile(scriptPath, await response.text(), { mode: 0o755 });
+
+    const result = await runProcess([shellcheck, "-s", "bash", scriptPath], {});
+    expect(result).toEqual({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    });
+  });
+
+  test("installer downloads, installs, hints PATH, and skips Claude when absent", async () => {
+    const bash = await findOnPath("bash");
+    if (bash === undefined) {
+      throw new Error("bash is required to test the installer.");
+    }
+
+    const response = await fetchWorker("/install.sh");
+    const script = await response.text();
+    const releaseBase = await startReleaseStub();
+    const root = await mkdtemp(join(tmpdir(), "overlearn-installer-"));
+    const installDir = join(root, "bin");
+    const homeDir = join(root, "home");
+    tempRoots.add(root);
+
+    const result = await runProcess(
+      [bash, "-c", script],
+      {
+        HOME: homeDir,
+        OVERLEARN_DL_BASE: releaseBase,
+        OVERLEARN_INSTALL_DIR: installDir,
+        PATH: "/usr/bin:/bin",
+        SHELL: "/bin/bash",
+      },
+      repoRoot,
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(`Installed learn to ${installDir}/learn`);
+    expect(result.stdout).toContain("PATH hint:");
+    expect(result.stdout).toContain("Manual Claude Code plugin install:");
+    expect(result.stdout).toContain("Quickstart:");
+    expect(result.stderr).toContain("Claude Code CLI not found; skipping plugin install.");
+
+    const installed = join(installDir, "learn");
+    await expect(readFile(installed, "utf8")).resolves.toBe(
+      "#!/bin/sh\necho overlearn fixture\n",
+    );
+    expect((await stat(installed)).mode & 0o777).toBe(0o755);
+  });
 });
 
 describe("registry local integration", () => {

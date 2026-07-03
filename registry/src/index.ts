@@ -1,6 +1,7 @@
 import { courseMetadata, validateRegistryBundle } from "./bundle";
 import { verifyGitHubPublisher } from "./github";
 import { renderCoursePage, renderIndex } from "./html";
+import { installScript } from "./install-script";
 import {
   bundleKey,
   chooseSlug,
@@ -31,6 +32,16 @@ const html = (body: string, init: ResponseInit = {}): Response =>
     headers: {
       "Cache-Control": "no-store",
       "Content-Type": "text/html; charset=utf-8",
+      ...(init.headers ?? {}),
+    },
+  });
+
+const shellScript = (body: string, init: ResponseInit = {}): Response =>
+  new Response(body, {
+    ...init,
+    headers: {
+      "Cache-Control": "public, max-age=300",
+      "Content-Type": "text/x-shellscript; charset=utf-8",
       ...(init.headers ?? {}),
     },
   });
@@ -151,6 +162,14 @@ const route = async (request: Request, env: Env): Promise<Response> => {
 
   if (path === "/") {
     return html(renderIndex(await listMetadata(env)));
+  }
+
+  if (path === "/install.sh" || path === "/install") {
+    if (request.method !== "GET") {
+      return new Response("Method not allowed.", { status: 405 });
+    }
+
+    return shellScript(installScript);
   }
 
   if (path === "/api/courses") {

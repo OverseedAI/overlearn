@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "overlearn",
+  "version": "0.0.0",
+  "description": "Overlearn Claude Code plugins.",
+  "owner": {
+    "name": "Overseed AI",
+    "url": "https://overlearn.org"
+  },
+  "plugins": [
+    {
+      "name": "overlearn",
+      "version": "0.0.0",
+      "description": "Interactive Overlearn teaching loop driver for Claude Code.",
+      "author": {
+        "name": "Overseed AI",
+        "url": "https://overlearn.org"
+      },
+      "source": "./plugin",
+      "tags": ["education", "learning", "claude-code"]
+    }
+  ]
+}
