@@ -26,6 +26,12 @@ import {
   type TranscriptEntry,
   type TurnEvent,
 } from "../course";
+import {
+  readLessonSnapshot,
+  watchLessonDirectory,
+  type LessonEvent,
+} from "./lessons";
+import { renderMarkdown } from "./markdown";
 import { renderPage } from "./ui";
 
 export type DaemonEndpoint = Readonly<{
@@ -364,8 +370,19 @@ const createSseHub = (getStatus: () => UiStatus) => {
   };
 
   const broadcastMessage = (entry: TranscriptEntry): void => {
+    const renderedEntry = {
+      ...entry,
+      html: renderMarkdown(entry.text),
+    };
+
     for (const subscriber of subscribers) {
-      writeEvent(subscriber, "message", entry);
+      writeEvent(subscriber, "message", renderedEntry);
+    }
+  };
+
+  const broadcastLesson = (event: LessonEvent): void => {
+    for (const subscriber of subscribers) {
+      writeEvent(subscriber, "lesson", event);
     }
   };
 
@@ -386,7 +403,7 @@ const createSseHub = (getStatus: () => UiStatus) => {
     });
   };
 
-  return { broadcastMessage, broadcastStatus, connect };
+  return { broadcastLesson, broadcastMessage, broadcastStatus, connect };
 };
 
 const createSerializer = () => {
@@ -466,7 +483,8 @@ const sendResponse = async (
 };
 
 export const runDaemon = async (courseDir: string): Promise<void> => {
-  const coursePath = getCoursePaths(courseDir).courseDir;
+  const coursePaths = getCoursePaths(courseDir);
+  const coursePath = coursePaths.courseDir;
   const manifest = await readCourseManifest(coursePath);
 
   let status: UiStatus = "agent-working";
@@ -475,6 +493,19 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
 
   const serialize = createSerializer();
   const sseHub = createSseHub(() => status);
+  const lessonWatcher = watchLessonDirectory({
+    lessonsDir: coursePaths.lessonsDir,
+    emit: (event) => {
+      sseHub.broadcastLesson(event);
+    },
+    onError: (error) => {
+      console.error(
+        error instanceof Error
+          ? `Lesson watcher error: ${error.message}`
+          : "Lesson watcher error.",
+      );
+    },
+  });
 
   const setStatus = (nextStatus: UiStatus): void => {
     status = nextStatus;
@@ -606,10 +637,13 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       );
 
       if (method === "GET" && requestUrl.pathname === "/") {
-        const transcript = await readTranscript(coursePath);
+        const [transcript, lessons] = await Promise.all([
+          readTranscript(coursePath),
+          readLessonSnapshot(coursePaths.lessonsDir),
+        ]);
         await sendResponse(
           response,
-          new Response(renderPage(manifest.name, transcript), {
+          new Response(renderPage(manifest.name, transcript, lessons), {
             headers: { "content-type": "text/html; charset=utf-8" },
           }),
         );
@@ -686,6 +720,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   });
 
   const cleanup = async (): Promise<void> => {
+    lessonWatcher.close();
     server.close();
     await clearDaemonMetadata(coursePath);
   };
