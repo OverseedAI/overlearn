@@ -140,3 +140,45 @@ describe("runCli", () => {
     });
   });
 });
+
+describe("instructions CLI parsing", () => {
+  test("parses eject options", () => {
+    expect(parseCli(["instructions", "--eject"], "1.2.3")).toEqual({
+      kind: "instructions-eject",
+      force: false,
+    });
+
+    expect(
+      parseCli(
+        ["instructions", "--eject", "--to", "/tmp/overlearn-instructions", "--force"],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "instructions-eject",
+      toDir: "/tmp/overlearn-instructions",
+      force: true,
+    });
+  });
+
+  test("rejects invalid eject combinations", () => {
+    expect(parseCli(["instructions", "course", "--eject"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn instructions --eject"),
+        stderr:
+          "Usage: learn instructions [name] [--json] or learn instructions --eject [--to <dir>] [--force]",
+      },
+    });
+
+    expect(parseCli(["instructions", "--eject", "--json"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn instructions --eject"),
+        stderr:
+          "Usage: learn instructions [name] [--json] or learn instructions --eject [--to <dir>] [--force]",
+      },
+    });
+  });
+});

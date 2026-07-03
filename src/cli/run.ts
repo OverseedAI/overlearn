@@ -12,6 +12,7 @@ export type CliCommand =
   | Readonly<{ kind: "resume"; name: string }>
   | Readonly<{ kind: "wait"; name?: string }>
   | Readonly<{ kind: "instructions"; name?: string; json: boolean }>
+  | Readonly<{ kind: "instructions-eject"; toDir?: string; force: boolean }>
   | Readonly<{ kind: "status"; name?: string; json: true }>
   | Readonly<{
       kind: "say";
@@ -42,6 +43,7 @@ const formatHelp = (version: string): string =>
     "  learn resume <name>",
     "  learn wait [name]",
     "  learn instructions [name] [--json]",
+    "  learn instructions --eject [--to <dir>] [--force]",
     "  learn status [name] --json",
     "  learn say [name] --text <markdown>",
     "  learn say [name] --file <path>",
@@ -133,6 +135,89 @@ const optionalNameJsonCommand = (
   }
 
   return name === undefined ? { kind, json } : { kind, name, json };
+};
+
+const instructionsUsage =
+  "Usage: learn instructions [name] [--json] or learn instructions --eject [--to <dir>] [--force]";
+
+const instructionsCommand = (
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let name: string | undefined;
+  let json = false;
+  let eject = false;
+  let toDir: string | undefined;
+  let force = false;
+  let index = 0;
+
+  while (index < args.length) {
+    const arg = args[index];
+    index += 1;
+
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg === "--eject") {
+      eject = true;
+      continue;
+    }
+
+    if (arg === "--force") {
+      force = true;
+      continue;
+    }
+
+    if (arg === "--to") {
+      const value = args[index];
+      index += 1;
+
+      if (value === undefined) {
+        return result(1, formatHelp(version), instructionsUsage);
+      }
+
+      toDir = value;
+      continue;
+    }
+
+    if (arg === undefined || arg.startsWith("-")) {
+      return result(
+        1,
+        formatHelp(version),
+        `Unknown option for instructions: ${String(arg)}`,
+      );
+    }
+
+    if (name !== undefined) {
+      return result(
+        1,
+        formatHelp(version),
+        "Too many arguments for instructions.",
+      );
+    }
+
+    name = arg;
+  }
+
+  if (eject) {
+    if (name !== undefined || json) {
+      return result(1, formatHelp(version), instructionsUsage);
+    }
+
+    return toDir === undefined
+      ? { kind: "instructions-eject", force }
+      : { kind: "instructions-eject", toDir, force };
+  }
+
+  if (toDir !== undefined || force) {
+    return result(1, formatHelp(version), instructionsUsage);
+  }
+
+  return name === undefined
+    ? { kind: "instructions", json }
+    : { kind: "instructions", name, json };
 };
 
 const sayCommand = (args: readonly string[], version: string): CliCommand => {
@@ -290,7 +375,7 @@ export const parseCli = (
   }
 
   if (arg === "instructions") {
-    return optionalNameJsonCommand("instructions", rest, version);
+    return instructionsCommand(rest, version);
   }
 
   if (arg === "status") {
