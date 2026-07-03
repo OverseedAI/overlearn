@@ -406,7 +406,7 @@ describe("installer", () => {
     });
   });
 
-  test("installer downloads, installs, hints PATH, and skips Claude when absent", async () => {
+  test("installer downloads, installs, hints PATH, and never touches agent config", async () => {
     const bash = await findOnPath("bash");
     if (bash === undefined) {
       throw new Error("bash is required to test the installer.");
@@ -435,9 +435,9 @@ describe("installer", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain(`Installed learn to ${installDir}/learn`);
     expect(result.stdout).toContain("PATH hint:");
-    expect(result.stdout).toContain("Manual Claude Code plugin install:");
+    expect(result.stdout).toContain("Claude Code setup (optional, run it yourself):");
     expect(result.stdout).toContain("Quickstart:");
-    expect(result.stderr).toContain("Claude Code CLI not found; skipping plugin install.");
+    expect(result.stderr).toBe("");
 
     const installed = join(installDir, "learn");
     await expect(readFile(installed, "utf8")).resolves.toBe(

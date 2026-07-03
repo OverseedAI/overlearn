@@ -113,51 +113,15 @@ print_path_hint() {
   printf '\\nPATH hint:\\n  %s is not on PATH. Add this to %s:\\n    export PATH="%s:\\044PATH"\\n' "$dir" "$profile" "$dir"
 }
 
-print_manual_plugin_install() {
-  cat <<'MANUAL_PLUGIN'
+# The installer never modifies coding-agent configuration; harness setup is an
+# explicit, separate step the user runs themselves.
+print_agent_setup() {
+  cat <<'AGENT_SETUP'
 
-Manual Claude Code plugin install:
+Claude Code setup (optional, run it yourself):
   claude plugin marketplace add OverseedAI/overlearn
   claude plugin install overlearn@overlearn
-MANUAL_PLUGIN
-}
-
-run_claude_command() {
-  description="$1"
-  shift
-
-  if output=$("$@" 2>&1); then
-    printf 'Claude Code: %s.\\n' "$description"
-    return 0
-  fi
-
-  case "$output" in
-    *already* | *Already*)
-      printf 'Claude Code: %s already done.\\n' "$description"
-      return 0
-      ;;
-  esac
-
-  warn "Claude Code \${description} failed; continuing."
-  if [ -n "$output" ]; then
-    while IFS= read -r line; do
-      printf '  %s\\n' "$line" >&2
-    done <<< "$output"
-  fi
-  return 1
-}
-
-install_claude_plugin() {
-  if ! command -v claude >/dev/null 2>&1; then
-    warn "Claude Code CLI not found; skipping plugin install."
-    print_manual_plugin_install
-    return
-  fi
-
-  run_claude_command "marketplace registered" claude plugin marketplace add OverseedAI/overlearn || true
-  if ! run_claude_command "plugin installed" claude plugin install overlearn@overlearn; then
-    print_manual_plugin_install
-  fi
+AGENT_SETUP
 }
 
 require_command curl
@@ -178,7 +142,7 @@ trap cleanup EXIT HUP INT TERM
 tmp_file="$tmp_dir/learn"
 
 printf 'Downloading %s\\n' "$download_url"
-curl -fL --retry 2 --connect-timeout 15 --output "$tmp_file" "$download_url"
+curl -fsSL --retry 2 --connect-timeout 15 --output "$tmp_file" "$download_url"
 
 mkdir -p "$target_dir"
 chmod 0755 "$tmp_file"
@@ -188,7 +152,7 @@ chmod 0755 "$target_dir/learn"
 printf 'Installed learn to %s/learn\\n' "$target_dir"
 print_path_hint "$target_dir"
 
-install_claude_plugin
+print_agent_setup
 
 cat <<'QUICKSTART'
 
