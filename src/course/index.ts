@@ -51,6 +51,7 @@ export type CoursePaths = Readonly<{
   daemonJson: string;
   turnsDir: string;
   pendingEventsJson: string;
+  activeFeynmanJson: string;
 }>;
 
 export type DaemonMetadata = Readonly<{
@@ -69,7 +70,17 @@ export type NavTurnEvent = Readonly<{
   path: string;
 }>;
 
-export type TurnEvent = MessageTurnEvent | NavTurnEvent;
+export type FeynmanAnswerTurnEvent = Readonly<{
+  type: "feynman-answer";
+  concept: string;
+  text: string;
+  keyPoints: readonly string[];
+}>;
+
+export type TurnEvent =
+  | MessageTurnEvent
+  | NavTurnEvent
+  | FeynmanAnswerTurnEvent;
 
 export type TurnFile = Readonly<{
   turn: number;
@@ -142,6 +153,39 @@ export type DemoMutation = Readonly<{
   topic?: TopicNode;
   topics: readonly TopicNode[];
   unassignedDemos: readonly DemoEntry[];
+}>;
+
+export type FeynmanReplacement = Readonly<{
+  concept: string;
+  issuedAt: string;
+  replacedAt: string;
+}>;
+
+export type ActiveFeynmanCheck = Readonly<{
+  concept: string;
+  prompt: string;
+  keyPoints: readonly string[];
+  issuedAt: string;
+  replaced?: FeynmanReplacement;
+}>;
+
+export type FeynmanCheckInput = Readonly<{
+  concept: string;
+  prompt: string;
+  keyPoints?: readonly string[];
+}>;
+
+export type MasteryEntry = Readonly<{
+  concept: string;
+  score: number;
+  gaps?: string;
+  at: string;
+}>;
+
+export type MasteryInput = Readonly<{
+  concept: string;
+  score: number;
+  gaps?: string;
 }>;
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -235,11 +279,26 @@ export const isValidDemoFileName = (fileName: string): boolean =>
   !fileName.includes("\\") &&
   fileName.endsWith(".html");
 
+export const isValidConceptId = (concept: string): boolean =>
+  /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(concept);
+
+export const parseKeyPointsText = (text: string): readonly string[] =>
+  text
+    .split(/[;,]/)
+    .map((point) => point.trim())
+    .filter((point) => point.length > 0);
+
 const invalidTopicMessage = (filePath: string): string =>
   `Invalid course topics in ${filePath}: expected topic tree nodes.`;
 
 const invalidDemoMessage = (filePath: string): string =>
   `Invalid course demos in ${filePath}: expected demo entries.`;
+
+const invalidActiveFeynmanMessage = (filePath: string): string =>
+  `Invalid active Feynman check in ${filePath}`;
+
+const invalidMasteryMessage = (filePath: string): string =>
+  `Invalid mastery entry in ${filePath}`;
 
 const parseDemoEntry = (
   value: unknown,
@@ -478,6 +537,128 @@ const parseDaemonMetadata = (
   return { pid, port, startedAt };
 };
 
+const parseKeyPoints = (
+  value: unknown,
+  errorMessage: string,
+): readonly string[] => {
+  if (!Array.isArray(value)) {
+    throw new Error(errorMessage);
+  }
+
+  return value.map((point) => {
+    if (typeof point !== "string" || point.trim().length === 0) {
+      throw new Error(errorMessage);
+    }
+
+    return point.trim();
+  });
+};
+
+const parseFeynmanReplacement = (
+  value: unknown,
+  filePath: string,
+): FeynmanReplacement | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error(invalidActiveFeynmanMessage(filePath));
+  }
+
+  const concept = value["concept"];
+  const issuedAt = value["issuedAt"];
+  const replacedAt = value["replacedAt"];
+
+  if (
+    typeof concept !== "string" ||
+    !isValidConceptId(concept) ||
+    typeof issuedAt !== "string" ||
+    issuedAt.trim().length === 0 ||
+    typeof replacedAt !== "string" ||
+    replacedAt.trim().length === 0
+  ) {
+    throw new Error(invalidActiveFeynmanMessage(filePath));
+  }
+
+  return {
+    concept,
+    issuedAt,
+    replacedAt,
+  };
+};
+
+const parseActiveFeynmanCheck = (
+  value: unknown,
+  filePath: string,
+): ActiveFeynmanCheck => {
+  if (!isRecord(value)) {
+    throw new Error(invalidActiveFeynmanMessage(filePath));
+  }
+
+  const concept = value["concept"];
+  const prompt = value["prompt"];
+  const keyPoints = value["keyPoints"];
+  const issuedAt = value["issuedAt"];
+  const replaced = parseFeynmanReplacement(value["replaced"], filePath);
+
+  if (
+    typeof concept !== "string" ||
+    !isValidConceptId(concept) ||
+    typeof prompt !== "string" ||
+    prompt.trim().length === 0 ||
+    typeof issuedAt !== "string" ||
+    issuedAt.trim().length === 0
+  ) {
+    throw new Error(invalidActiveFeynmanMessage(filePath));
+  }
+
+  return {
+    concept,
+    prompt: prompt.trim(),
+    keyPoints: parseKeyPoints(keyPoints, invalidActiveFeynmanMessage(filePath)),
+    issuedAt,
+    ...(replaced === undefined ? {} : { replaced }),
+  };
+};
+
+const parseMasteryEntry = (
+  value: unknown,
+  filePath: string,
+  index: number,
+): MasteryEntry => {
+  if (!isRecord(value)) {
+    throw new Error(`${invalidMasteryMessage(filePath)}:${index + 1}`);
+  }
+
+  const concept = value["concept"];
+  const score = value["score"];
+  const gaps = value["gaps"];
+  const at = value["at"];
+
+  if (
+    typeof concept !== "string" ||
+    !isValidConceptId(concept) ||
+    typeof score !== "number" ||
+    !Number.isInteger(score) ||
+    score < 0 ||
+    score > 100 ||
+    (gaps !== undefined &&
+      (typeof gaps !== "string" || gaps.trim().length === 0)) ||
+    typeof at !== "string" ||
+    at.trim().length === 0
+  ) {
+    throw new Error(`${invalidMasteryMessage(filePath)}:${index + 1}`);
+  }
+
+  return {
+    concept,
+    score,
+    ...(gaps === undefined ? {} : { gaps: gaps.trim() }),
+    at,
+  };
+};
+
 const parseTurnEvent = (value: unknown, filePath: string): TurnEvent => {
   if (!isRecord(value)) {
     throw new Error(`Invalid pending event in ${filePath}`);
@@ -503,8 +684,29 @@ const parseTurnEvent = (value: unknown, filePath: string): TurnEvent => {
     return { type, path };
   }
 
-  if (type !== "message" && type !== "nav") {
-    throw new Error(`Invalid pending event in ${filePath}`);
+  if (type === "feynman-answer") {
+    const concept = value["concept"];
+    const text = value["text"];
+    const keyPoints = value["keyPoints"];
+
+    if (
+      typeof concept !== "string" ||
+      !isValidConceptId(concept) ||
+      typeof text !== "string" ||
+      text.trim().length === 0
+    ) {
+      throw new Error(`Invalid pending event in ${filePath}`);
+    }
+
+    return {
+      type,
+      concept,
+      text: text.trim(),
+      keyPoints: parseKeyPoints(
+        keyPoints,
+        `Invalid pending event in ${filePath}`,
+      ),
+    };
   }
 
   throw new Error(`Invalid pending event in ${filePath}`);
@@ -632,6 +834,7 @@ export const getCoursePaths = (courseDir: string): CoursePaths => {
     daemonJson: join(runtimeDir, "daemon.json"),
     turnsDir: join(runtimeDir, "turns"),
     pendingEventsJson: join(runtimeDir, "pending-events.json"),
+    activeFeynmanJson: join(runtimeDir, "active-feynman.json"),
   };
 };
 
@@ -749,6 +952,180 @@ export const writePendingEvents = async (
 
   await mkdir(paths.runtimeDir, { recursive: true });
   await writeJson(paths.pendingEventsJson, events);
+};
+
+const normalizeConceptId = (concept: string): string => {
+  const normalized = concept.trim();
+  if (normalized.length === 0) {
+    throw new Error("Concept id cannot be empty.");
+  }
+
+  if (!isValidConceptId(normalized)) {
+    throw new Error(
+      `Invalid concept id: ${concept}. Use lowercase letters, numbers, and hyphens.`,
+    );
+  }
+
+  return normalized;
+};
+
+const normalizeFeynmanCheckInput = (
+  input: FeynmanCheckInput,
+): FeynmanCheckInput => {
+  const concept = normalizeConceptId(input.concept);
+  const prompt = input.prompt.trim();
+  if (prompt.length === 0) {
+    throw new Error("Feynman prompt cannot be empty.");
+  }
+
+  const keyPoints = input.keyPoints ?? [];
+  const normalizedKeyPoints = keyPoints.map((point) => point.trim());
+  if (normalizedKeyPoints.some((point) => point.length === 0)) {
+    throw new Error("Feynman key points cannot be empty.");
+  }
+
+  return {
+    concept,
+    prompt,
+    keyPoints: normalizedKeyPoints,
+  };
+};
+
+export const readActiveFeynmanCheck = async (
+  courseDir: string,
+): Promise<ActiveFeynmanCheck | undefined> => {
+  const paths = getCoursePaths(courseDir);
+  if (!(await Bun.file(paths.activeFeynmanJson).exists())) {
+    return undefined;
+  }
+
+  return parseActiveFeynmanCheck(
+    await readJson(paths.activeFeynmanJson),
+    paths.activeFeynmanJson,
+  );
+};
+
+export const writeActiveFeynmanCheck = async (
+  courseDir: string,
+  check: ActiveFeynmanCheck,
+): Promise<void> => {
+  const paths = getCoursePaths(courseDir);
+  await mkdir(paths.runtimeDir, { recursive: true });
+  await writeJsonAtomic(paths.activeFeynmanJson, check);
+};
+
+export const clearActiveFeynmanCheck = async (
+  courseDir: string,
+): Promise<void> => {
+  const paths = getCoursePaths(courseDir);
+  await rm(paths.activeFeynmanJson, { force: true });
+};
+
+export const registerFeynmanCheck = async (
+  courseDir: string,
+  input: FeynmanCheckInput,
+  now = new Date(),
+): Promise<ActiveFeynmanCheck> => {
+  const normalized = normalizeFeynmanCheckInput(input);
+  const existing = await readActiveFeynmanCheck(courseDir);
+  const issuedAt = now.toISOString();
+  const replaced =
+    existing === undefined
+      ? undefined
+      : {
+          concept: existing.concept,
+          issuedAt: existing.issuedAt,
+          replacedAt: issuedAt,
+        };
+  const check: ActiveFeynmanCheck = {
+    concept: normalized.concept,
+    prompt: normalized.prompt,
+    keyPoints: normalized.keyPoints ?? [],
+    issuedAt,
+    ...(replaced === undefined ? {} : { replaced }),
+  };
+
+  await writeActiveFeynmanCheck(courseDir, check);
+  return check;
+};
+
+export const readMastery = async (
+  courseDir: string,
+): Promise<readonly MasteryEntry[]> => {
+  const paths = getCoursePaths(courseDir);
+  if (!(await Bun.file(paths.masteryJson).exists())) {
+    return [];
+  }
+
+  const value = await readJson(paths.masteryJson);
+  if (!Array.isArray(value)) {
+    throw new Error(`Invalid mastery in ${paths.masteryJson}`);
+  }
+
+  return value.map((entry, index) =>
+    parseMasteryEntry(entry, paths.masteryJson, index),
+  );
+};
+
+const writeMastery = async (
+  courseDir: string,
+  entries: readonly MasteryEntry[],
+): Promise<void> => {
+  const paths = getCoursePaths(courseDir);
+  await writeJson(paths.masteryJson, entries);
+};
+
+const normalizeMasteryInput = (input: MasteryInput): MasteryInput => {
+  const concept = normalizeConceptId(input.concept);
+  if (!Number.isInteger(input.score) || input.score < 0 || input.score > 100) {
+    throw new Error("Mastery score must be an integer from 0 to 100.");
+  }
+
+  const gaps = input.gaps?.trim();
+  if (gaps !== undefined && gaps.length === 0) {
+    throw new Error("Mastery gaps cannot be empty.");
+  }
+
+  return {
+    concept,
+    score: input.score,
+    ...(gaps === undefined ? {} : { gaps }),
+  };
+};
+
+const nextMasteryTimestamp = (
+  entries: readonly MasteryEntry[],
+  now: Date,
+): string => {
+  const timestampMs = now.getTime();
+  const latestMs = entries.reduce((latest, entry) => {
+    const parsed = Date.parse(entry.at);
+    return Number.isNaN(parsed) ? latest : Math.max(latest, parsed);
+  }, Number.NEGATIVE_INFINITY);
+  const nextMs =
+    Number.isFinite(latestMs) && timestampMs <= latestMs
+      ? latestMs + 1
+      : timestampMs;
+
+  return new Date(nextMs).toISOString();
+};
+
+export const appendMasteryScore = async (
+  courseDir: string,
+  input: MasteryInput,
+  now = new Date(),
+): Promise<MasteryEntry> => {
+  const normalized = normalizeMasteryInput(input);
+  const entries = await readMastery(courseDir);
+  const entry: MasteryEntry = {
+    concept: normalized.concept,
+    score: normalized.score,
+    ...(normalized.gaps === undefined ? {} : { gaps: normalized.gaps }),
+    at: nextMasteryTimestamp(entries, now),
+  };
+
+  await writeMastery(courseDir, [...entries, entry]);
+  return entry;
 };
 
 export const readTranscript = async (

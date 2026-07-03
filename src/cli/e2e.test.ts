@@ -178,6 +178,20 @@ const submitNav = async (url: string, path: string): Promise<void> => {
   expect(response.status).toBe(200);
 };
 
+const submitFeynmanAnswer = async (
+  url: string,
+  concept: string,
+  text: string,
+): Promise<void> => {
+  const response = await fetch(`${url}/api/feynman-answer`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ concept, text }),
+  });
+
+  expect(response.status).toBe(200);
+};
+
 const createSseProbe = (reader: ByteReader): SseProbe => {
   const decoder = new TextDecoder();
   let buffer = "";
@@ -538,6 +552,165 @@ describe("learn start/wait browser round trip", () => {
         createdAt: expect.any(String),
         events: [{ type: "nav", path: "indexes/btree" }],
       });
+
+      const emitFeynman = await runLearn(
+        [
+          "emit",
+          "feynman",
+          courseName,
+          "--concept",
+          "gradient-basics",
+          "--prompt",
+          "Explain what a gradient tells you and how you would use it.",
+          "--key-points",
+          "direction of steepest increase, local rate of change",
+          "--json",
+        ],
+        env,
+      );
+
+      expect(emitFeynman.exitCode).toBe(0);
+      expect(emitFeynman.stderr).toBe("");
+      expect(JSON.parse(emitFeynman.stdout) as unknown).toEqual({
+        ok: true,
+        kind: "feynman",
+        coursePath: courseDir,
+        activeCheck: {
+          concept: "gradient-basics",
+          prompt: "Explain what a gradient tells you and how you would use it.",
+          keyPoints: ["direction of steepest increase", "local rate of change"],
+          issuedAt: expect.any(String),
+        },
+      });
+
+      await firstProbe.waitForText("event: feynman", "SSE feynman event", 1_000);
+      await firstProbe.waitForText(
+        '"concept":"gradient-basics"',
+        "SSE feynman concept",
+        1_000,
+      );
+
+      const feynmanPage = await fetch(url);
+      expect(feynmanPage.status).toBe(200);
+      const feynmanHtml = await feynmanPage.text();
+      expect(feynmanHtml).toContain("Feynman check");
+      expect(feynmanHtml).toContain("Explain it back");
+      expect(feynmanHtml).toContain(
+        "Explain what a gradient tells you and how you would use it.",
+      );
+      expect(feynmanHtml).toContain("gradient-basics");
+
+      const feynmanWait = spawnLearn(["wait", courseName], env);
+      await submitFeynmanAnswer(
+        url,
+        "gradient-basics",
+        "A gradient points in the direction where the output rises fastest, and its size tells the local rate of change.",
+      );
+
+      const feynmanWaitResult = await collectProcess(
+        feynmanWait,
+        "learn wait feynman",
+      );
+      expect(feynmanWaitResult.exitCode).toBe(0);
+      expect(feynmanWaitResult.stderr).toBe("");
+
+      const feynmanTurnPath = feynmanWaitResult.stdout.trim();
+      expect(feynmanTurnPath).toBe(
+        join(courseDir, ".overlearn", "turns", "turn-4.json"),
+      );
+
+      const feynmanTurn = JSON.parse(
+        await readFile(feynmanTurnPath, "utf8"),
+      ) as TurnFile;
+      expect(feynmanTurn).toEqual({
+        turn: 4,
+        createdAt: expect.any(String),
+        events: [
+          {
+            type: "feynman-answer",
+            concept: "gradient-basics",
+            text: "A gradient points in the direction where the output rises fastest, and its size tells the local rate of change.",
+            keyPoints: ["direction of steepest increase", "local rate of change"],
+          },
+        ],
+      });
+
+      const firstMastery = await runLearn(
+        [
+          "emit",
+          "mastery",
+          courseName,
+          "--concept",
+          "gradient-basics",
+          "--score",
+          "78",
+          "--gaps",
+          "needs clearer mechanism",
+          "--json",
+        ],
+        env,
+      );
+      const secondMastery = await runLearn(
+        [
+          "emit",
+          "mastery",
+          courseName,
+          "--concept",
+          "gradient-basics",
+          "--score",
+          "91",
+          "--gaps",
+          "minor precision gap",
+          "--json",
+        ],
+        env,
+      );
+
+      expect(firstMastery.exitCode).toBe(0);
+      expect(firstMastery.stderr).toBe("");
+      expect(secondMastery.exitCode).toBe(0);
+      expect(secondMastery.stderr).toBe("");
+      expect(JSON.parse(firstMastery.stdout) as unknown).toMatchObject({
+        ok: true,
+        kind: "mastery",
+        coursePath: courseDir,
+        entry: {
+          concept: "gradient-basics",
+          score: 78,
+          gaps: "needs clearer mechanism",
+          at: expect.any(String),
+        },
+      });
+      expect(JSON.parse(secondMastery.stdout) as unknown).toMatchObject({
+        ok: true,
+        kind: "mastery",
+        coursePath: courseDir,
+        entry: {
+          concept: "gradient-basics",
+          score: 91,
+          gaps: "minor precision gap",
+          at: expect.any(String),
+        },
+      });
+
+      const masteryFile = JSON.parse(
+        await readFile(join(courseDir, "mastery.json"), "utf8"),
+      ) as readonly { concept: string; score: number; gaps: string; at: string }[];
+      expect(masteryFile).toEqual([
+        {
+          concept: "gradient-basics",
+          score: 78,
+          gaps: "needs clearer mechanism",
+          at: expect.any(String),
+        },
+        {
+          concept: "gradient-basics",
+          score: 91,
+          gaps: "minor precision gap",
+          at: expect.any(String),
+        },
+      ]);
+      expect(masteryFile[0]?.at).not.toBe(masteryFile[1]?.at);
 
       await writeFile(
         join(courseDir, "demos", "growth.html"),

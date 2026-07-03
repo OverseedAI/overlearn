@@ -20,6 +20,8 @@ describe("runCli", () => {
     expect(result.stdout).toContain("learn resume <name>");
     expect(result.stdout).toContain("learn emit glossary [name]");
     expect(result.stdout).toContain("learn emit demo [name]");
+    expect(result.stdout).toContain("learn emit feynman [name]");
+    expect(result.stdout).toContain("learn emit mastery [name]");
     expect(result.stdout).toContain("learn --help");
     expect(result.stdout).toContain("learn --version");
   });
@@ -328,6 +330,248 @@ describe("emit topic CLI parsing", () => {
         exitCode: 1,
         stdout: expect.stringContaining("learn emit topic"),
         stderr: "Topic lesson cannot be empty.",
+      },
+    });
+  });
+});
+
+describe("emit feynman CLI parsing", () => {
+  test("parses feynman emit commands", () => {
+    expect(
+      parseCli(
+        [
+          "emit",
+          "feynman",
+          "demo-course",
+          "--concept",
+          "rule-of-72",
+          "--prompt",
+          "Explain why the shortcut works.",
+          "--key-points",
+          "rate, doubling; logarithm approximation",
+          "--json",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "emit",
+      name: "demo-course",
+      emit: {
+        kind: "feynman",
+        concept: "rule-of-72",
+        prompt: "Explain why the shortcut works.",
+        keyPoints: ["rate", "doubling", "logarithm approximation"],
+        json: true,
+      },
+    });
+
+    expect(
+      parseCli(
+        [
+          "emit",
+          "feynman",
+          "--concept",
+          "compound-growth",
+          "--prompt",
+          "Teach it back.",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "emit",
+      emit: {
+        kind: "feynman",
+        concept: "compound-growth",
+        prompt: "Teach it back.",
+        keyPoints: [],
+        json: false,
+      },
+    });
+  });
+
+  test("rejects invalid feynman fields", () => {
+    expect(parseCli(["emit", "feynman"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit feynman"),
+        stderr:
+          "Usage: learn emit feynman [name] --concept <id> --prompt <prompt> [--key-points <points>] [--json]",
+      },
+    });
+
+    expect(
+      parseCli(
+        [
+          "emit",
+          "feynman",
+          "--concept",
+          "Rule of 72",
+          "--prompt",
+          "Explain it.",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit feynman"),
+        stderr:
+          "Invalid concept id: Rule of 72. Use lowercase letters, numbers, and hyphens.",
+      },
+    });
+
+    expect(
+      parseCli(
+        [
+          "emit",
+          "feynman",
+          "--concept",
+          "rule-of-72",
+          "--prompt",
+          " ",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit feynman"),
+        stderr: "Feynman prompt cannot be empty.",
+      },
+    });
+
+    expect(
+      parseCli(
+        [
+          "emit",
+          "feynman",
+          "--concept",
+          "rule-of-72",
+          "--prompt",
+          "Explain it.",
+          "--key-points",
+          " , ; ",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit feynman"),
+        stderr: "Feynman key points cannot be empty.",
+      },
+    });
+  });
+});
+
+describe("emit mastery CLI parsing", () => {
+  test("parses mastery emit commands", () => {
+    expect(
+      parseCli(
+        [
+          "emit",
+          "mastery",
+          "demo-course",
+          "--concept",
+          "rule-of-72",
+          "--score",
+          "82",
+          "--gaps",
+          "missed the mechanism",
+          "--json",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "emit",
+      name: "demo-course",
+      emit: {
+        kind: "mastery",
+        concept: "rule-of-72",
+        score: 82,
+        gaps: "missed the mechanism",
+        json: true,
+      },
+    });
+  });
+
+  test("rejects invalid mastery fields", () => {
+    expect(parseCli(["emit", "mastery"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit mastery"),
+        stderr:
+          "Usage: learn emit mastery [name] --concept <id> --score <0-100> [--gaps <gaps>] [--json]",
+      },
+    });
+
+    expect(
+      parseCli(
+        [
+          "emit",
+          "mastery",
+          "--concept",
+          "rule-of-72",
+          "--score",
+          "101",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit mastery"),
+        stderr: "Mastery score must be an integer from 0 to 100.",
+      },
+    });
+
+    expect(
+      parseCli(
+        [
+          "emit",
+          "mastery",
+          "--concept",
+          "rule-of-72",
+          "--score",
+          "82.5",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit mastery"),
+        stderr: "Mastery score must be an integer from 0 to 100.",
+      },
+    });
+
+    expect(
+      parseCli(
+        [
+          "emit",
+          "mastery",
+          "--concept",
+          "rule-of-72",
+          "--score",
+          "82",
+          "--gaps",
+          " ",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit mastery"),
+        stderr: "Mastery gaps cannot be empty.",
       },
     });
   });

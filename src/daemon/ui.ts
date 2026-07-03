@@ -1,4 +1,5 @@
 import type {
+  ActiveFeynmanCheck,
   DemoEntry,
   GlossaryEntry,
   TopicNode,
@@ -41,11 +42,20 @@ const initialLessons = __LESSONS__;
 const initialGlossary = __GLOSSARY__;
 const initialTopics = __TOPICS__;
 const initialUnassignedDemos = __UNASSIGNED_DEMOS__;
+const initialActiveFeynman = __ACTIVE_FEYNMAN__ ?? undefined;
 
 const form = document.querySelector("#turn-form");
 const textarea = document.querySelector("#message");
 const submitButton = document.querySelector("#submit");
 const statusLine = document.querySelector("#status");
+const feynmanPanel = document.querySelector("#feynman-panel");
+const feynmanForm = document.querySelector("#feynman-form");
+const feynmanTextarea = document.querySelector("#feynman-answer");
+const feynmanSubmit = document.querySelector("#feynman-submit");
+const feynmanConcept = document.querySelector("#feynman-concept");
+const feynmanPrompt = document.querySelector("#feynman-prompt");
+const feynmanReplacement = document.querySelector("#feynman-replacement");
+const feynmanStatus = document.querySelector("#feynman-status");
 const transcript = document.querySelector("#transcript");
 const lessonList = document.querySelector("#lesson-list");
 const lessonContent = document.querySelector("#lesson-content");
@@ -64,6 +74,9 @@ let userPinnedTopic = false;
 let userPinnedLesson = false;
 let transcriptEntries = [...initialTranscript];
 let glossary = [...initialGlossary];
+let activeFeynman = initialActiveFeynman;
+let submittedFeynmanConcept = undefined;
+let currentStatus = "agent-working";
 let activeView = "lessons";
 let currentTermElement = undefined;
 let hideTermCardTimer = undefined;
@@ -547,11 +560,62 @@ const showTermCard = (target) => {
   positionTermCard(target);
 };
 
+const setFeynmanControls = () => {
+  const canSubmit =
+    activeFeynman !== undefined &&
+    currentStatus === "waiting-for-agent" &&
+    feynmanTextarea.value.trim().length > 0;
+
+  feynmanTextarea.disabled =
+    activeFeynman === undefined || currentStatus !== "waiting-for-agent";
+  feynmanSubmit.disabled = !canSubmit;
+};
+
+const renderFeynmanPanel = () => {
+  if (activeFeynman === undefined) {
+    if (submittedFeynmanConcept === undefined) {
+      feynmanPanel.hidden = true;
+      feynmanPanel.classList.remove("submitted");
+      return;
+    }
+
+    feynmanPanel.hidden = false;
+    feynmanPanel.classList.add("submitted");
+    feynmanConcept.textContent = submittedFeynmanConcept;
+    feynmanPrompt.textContent = "Submitted - awaiting grading.";
+    feynmanReplacement.hidden = true;
+    feynmanStatus.textContent = "Submitted - awaiting grading";
+    feynmanTextarea.value = "";
+    feynmanForm.hidden = true;
+    setFeynmanControls();
+    return;
+  }
+
+  feynmanPanel.hidden = false;
+  feynmanPanel.classList.remove("submitted");
+  feynmanForm.hidden = false;
+  feynmanConcept.textContent = activeFeynman.concept;
+  feynmanPrompt.textContent = activeFeynman.prompt;
+  feynmanStatus.textContent = "Answer in your own words.";
+
+  if (activeFeynman.replaced !== undefined) {
+    feynmanReplacement.hidden = false;
+    feynmanReplacement.textContent =
+      "Previous check for " + activeFeynman.replaced.concept + " was replaced.";
+  } else {
+    feynmanReplacement.hidden = true;
+  }
+
+  setFeynmanControls();
+};
+
 const applyStatus = (status) => {
+  currentStatus = status;
   const waiting = status === "waiting-for-agent";
   statusLine.textContent = waiting ? "Waiting for your message" : "Agent is working…";
   textarea.disabled = !waiting;
   submitButton.disabled = !waiting || textarea.value.trim().length === 0;
+  setFeynmanControls();
 
   if (waiting) {
     textarea.focus();
@@ -579,14 +643,47 @@ const submitMessage = async () => {
   }
 };
 
+const submitFeynmanAnswer = async () => {
+  const check = activeFeynman;
+  const text = feynmanTextarea.value.trim();
+  if (check === undefined || text.length === 0 || feynmanTextarea.disabled) {
+    return;
+  }
+
+  applyStatus("agent-working");
+
+  const response = await fetch("/api/feynman-answer", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      concept: check.concept,
+      text,
+      keyPoints: check.keyPoints,
+    }),
+  });
+
+  if (!response.ok) {
+    feynmanStatus.textContent = await response.text();
+    applyStatus("waiting-for-agent");
+    return;
+  }
+
+  submittedFeynmanConcept = check.concept;
+  activeFeynman = undefined;
+  renderFeynmanPanel();
+};
+
 renderNavigation();
 renderGlossaryList();
 renderViewTabs();
+renderFeynmanPanel();
 renderTranscript();
 
 textarea.addEventListener("input", () => {
   submitButton.disabled = textarea.disabled || textarea.value.trim().length === 0;
 });
+
+feynmanTextarea.addEventListener("input", setFeynmanControls);
 
 textarea.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -598,6 +695,11 @@ textarea.addEventListener("keydown", (event) => {
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   void submitMessage();
+});
+
+feynmanForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void submitFeynmanAnswer();
 });
 
 document.addEventListener("click", (event) => {
@@ -723,6 +825,22 @@ events.addEventListener("topics", (event) => {
   userPinnedTopic = false;
   userPinnedLesson = false;
   renderNavigation();
+});
+events.addEventListener("feynman", (event) => {
+  const payload = JSON.parse(event.data);
+  const previous = activeFeynman;
+  activeFeynman = payload.activeCheck ?? undefined;
+  if (activeFeynman !== undefined) {
+    submittedFeynmanConcept = undefined;
+    if (
+      previous === undefined ||
+      previous.concept !== activeFeynman.concept ||
+      previous.prompt !== activeFeynman.prompt
+    ) {
+      feynmanTextarea.value = "";
+    }
+  }
+  renderFeynmanPanel();
 });
 events.addEventListener("transcript", (event) => {
   transcriptEntries = [...JSON.parse(event.data).entries];
@@ -913,6 +1031,7 @@ export const renderPage = (
   topics: readonly TopicNode[],
   unassignedDemos: readonly DemoEntry[],
   demoFiles: ReadonlySet<string>,
+  activeFeynmanCheck: ActiveFeynmanCheck | undefined,
 ): string => {
   const script = clientScript
     .replace(
@@ -922,7 +1041,11 @@ export const renderPage = (
     .replace("__LESSONS__", escapeScriptJson(lessons))
     .replace("__GLOSSARY__", escapeScriptJson(glossary))
     .replace("__TOPICS__", escapeScriptJson(topics))
-    .replace("__UNASSIGNED_DEMOS__", escapeScriptJson(unassignedDemos));
+    .replace("__UNASSIGNED_DEMOS__", escapeScriptJson(unassignedDemos))
+    .replace(
+      "__ACTIVE_FEYNMAN__",
+      escapeScriptJson(activeFeynmanCheck ?? null),
+    );
 
   return `<!doctype html>
 <html lang="en" class="scheme-only-dark">
@@ -1245,7 +1368,7 @@ export const renderPage = (
 
     .chat-pane {
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr) auto;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
       gap: 0.75rem;
       min-height: 0;
       border-left: 1px solid #2f302b;
@@ -1270,6 +1393,120 @@ export const renderPage = (
       min-height: 12rem;
       overflow-y: auto;
       padding: 0.25rem 0.125rem 0.5rem;
+    }
+
+    .feynman-panel {
+      display: grid;
+      gap: 0.75rem;
+      border: 1px solid #b88745;
+      border-radius: 8px;
+      background: #211b12;
+      padding: 0.85rem;
+      box-shadow: inset 0 0 0 1px rgb(255 219 163 / 8%);
+    }
+
+    .feynman-panel.submitted {
+      border-color: #526747;
+      background: #182017;
+    }
+
+    .feynman-heading {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+
+    .feynman-title {
+      display: grid;
+      gap: 0.15rem;
+      min-width: 0;
+    }
+
+    .feynman-kicker {
+      color: #ffd79a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .feynman-title h3 {
+      margin: 0;
+      color: #fafaf8;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .concept-chip {
+      flex: 0 0 auto;
+      max-width: 12rem;
+      overflow: hidden;
+      border: 1px solid #9e743d;
+      border-radius: 999px;
+      color: #ffe1ae;
+      padding: 0.18rem 0.5rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.78rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .feynman-prompt,
+    .feynman-status,
+    .feynman-replacement {
+      margin: 0;
+      line-height: 1.5;
+    }
+
+    .feynman-prompt {
+      color: #fff3df;
+    }
+
+    .feynman-status {
+      color: #ffd79a;
+      font-size: 0.9rem;
+    }
+
+    .feynman-replacement {
+      border-left: 3px solid #b88745;
+      color: #f0c589;
+      padding-left: 0.6rem;
+      font-size: 0.9rem;
+    }
+
+    .feynman-form {
+      display: grid;
+      gap: 0.65rem;
+    }
+
+    .feynman-answer {
+      min-height: 8rem;
+      border-color: #75552d;
+      background: #17130e;
+    }
+
+    .feynman-answer:focus {
+      outline-color: #d49a4a;
+    }
+
+    .feynman-submit {
+      justify-self: end;
+      min-height: 2.5rem;
+      border: 0;
+      border-radius: 8px;
+      background: #f1b45b;
+      color: #15100a;
+      padding: 0 0.9rem;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .feynman-submit:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
 
     .entry {
@@ -1639,6 +1876,18 @@ export const renderPage = (
       .send-button {
         width: 100%;
       }
+
+      .feynman-heading {
+        display: grid;
+      }
+
+      .concept-chip {
+        max-width: 100%;
+      }
+
+      .feynman-submit {
+        width: 100%;
+      }
     }
   </style>
 </head>
@@ -1678,6 +1927,23 @@ export const renderPage = (
           <h2>Chat</h2>
           <p id="status">Agent is working…</p>
         </div>
+
+        <section id="feynman-panel" class="feynman-panel" aria-labelledby="feynman-heading" hidden>
+          <div class="feynman-heading">
+            <div class="feynman-title">
+              <div class="feynman-kicker">Feynman check</div>
+              <h3 id="feynman-heading">Explain it back</h3>
+            </div>
+            <span id="feynman-concept" class="concept-chip"></span>
+          </div>
+          <p id="feynman-replacement" class="feynman-replacement" hidden></p>
+          <p id="feynman-prompt" class="feynman-prompt"></p>
+          <form id="feynman-form" class="feynman-form">
+            <textarea id="feynman-answer" class="feynman-answer" name="feynman-answer" aria-label="Feynman answer" placeholder="Explain the idea in your own words"></textarea>
+            <button id="feynman-submit" class="feynman-submit" type="submit" disabled>Submit answer</button>
+          </form>
+          <p id="feynman-status" class="feynman-status" aria-live="polite"></p>
+        </section>
 
         <section id="transcript" aria-live="polite"></section>
 

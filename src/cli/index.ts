@@ -20,12 +20,16 @@ import {
 } from "../daemon";
 import {
   appendAgentDemoTranscript,
+  appendMasteryScore,
+  registerFeynmanCheck,
   registerDemo,
   resolveCourseDirForWait,
   upsertGlossaryEntry,
   upsertTopic,
+  type ActiveFeynmanCheck,
   type DemoMutation,
   type GlossaryMutation,
+  type MasteryEntry,
   type TopicMutation,
 } from "../course";
 import { parseCli, type CliResult } from "./run";
@@ -129,6 +133,40 @@ const formatDemoEmitOutput = (
   }
 
   return `${mutation.action} demo: ${mutation.demo.file}`;
+};
+
+const formatFeynmanEmitOutput = (
+  coursePath: string,
+  check: ActiveFeynmanCheck,
+  json: boolean,
+): string => {
+  if (json) {
+    return JSON.stringify({
+      ok: true,
+      kind: "feynman",
+      coursePath,
+      activeCheck: check,
+    });
+  }
+
+  return `active feynman check: ${check.concept}`;
+};
+
+const formatMasteryEmitOutput = (
+  coursePath: string,
+  entry: MasteryEntry,
+  json: boolean,
+): string => {
+  if (json) {
+    return JSON.stringify({
+      ok: true,
+      kind: "mastery",
+      coursePath,
+      entry,
+    });
+  }
+
+  return `recorded mastery: ${entry.concept} ${entry.score}`;
 };
 
 const main = async (): Promise<CliResult> => {
@@ -243,6 +281,22 @@ const main = async (): Promise<CliResult> => {
             stdout,
             stderr: warning,
           };
+    }
+
+    if (command.emit.kind === "feynman") {
+      const check = await registerFeynmanCheck(coursePath, command.emit);
+      return {
+        exitCode: 0,
+        stdout: formatFeynmanEmitOutput(coursePath, check, command.emit.json),
+      };
+    }
+
+    if (command.emit.kind === "mastery") {
+      const entry = await appendMasteryScore(coursePath, command.emit);
+      return {
+        exitCode: 0,
+        stdout: formatMasteryEmitOutput(coursePath, entry, command.emit.json),
+      };
     }
 
     const mutation = await upsertGlossaryEntry(coursePath, command.emit);
