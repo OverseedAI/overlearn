@@ -55,7 +55,7 @@ export type TurnFile = Readonly<{
 }>;
 
 export type TranscriptEntry = Readonly<{
-  role: "learner";
+  role: "learner" | "agent";
   text: string;
   at: string;
 }>;
@@ -185,6 +185,30 @@ const parseTurnEvent = (value: unknown, filePath: string): TurnEvent => {
   }
 
   return { type, text };
+};
+
+const parseTranscriptEntry = (
+  value: unknown,
+  filePath: string,
+  lineNumber: number,
+): TranscriptEntry => {
+  if (!isRecord(value)) {
+    throw new Error(`Invalid transcript entry in ${filePath}:${lineNumber}`);
+  }
+
+  const role = value["role"];
+  const text = value["text"];
+  const at = value["at"];
+
+  if (
+    (role !== "learner" && role !== "agent") ||
+    typeof text !== "string" ||
+    typeof at !== "string"
+  ) {
+    throw new Error(`Invalid transcript entry in ${filePath}:${lineNumber}`);
+  }
+
+  return { role, text, at };
 };
 
 const turnNumberFromFileName = (fileName: string): number | undefined => {
@@ -339,19 +363,70 @@ export const writePendingEvents = async (
   await writeJson(paths.pendingEventsJson, events);
 };
 
+export const readTranscript = async (
+  courseDir: string,
+): Promise<readonly TranscriptEntry[]> => {
+  const paths = getCoursePaths(courseDir);
+  if (!(await Bun.file(paths.transcriptJsonl).exists())) {
+    return [];
+  }
+
+  const contents = await Bun.file(paths.transcriptJsonl).text();
+  if (contents.trim().length === 0) {
+    return [];
+  }
+
+  return contents
+    .split("\n")
+    .flatMap((line, index) =>
+      line.trim().length === 0
+        ? []
+        : [
+            parseTranscriptEntry(
+              JSON.parse(line) as unknown,
+              paths.transcriptJsonl,
+              index + 1,
+            ),
+          ],
+    );
+};
+
+export const appendTranscriptEntry = async (
+  courseDir: string,
+  entry: TranscriptEntry,
+): Promise<void> => {
+  const paths = getCoursePaths(courseDir);
+  await appendFile(paths.transcriptJsonl, `${JSON.stringify(entry)}\n`);
+};
+
 export const appendLearnerTranscript = async (
   courseDir: string,
   text: string,
   at: string,
-): Promise<void> => {
-  const paths = getCoursePaths(courseDir);
+): Promise<TranscriptEntry> => {
   const entry: TranscriptEntry = {
     role: "learner",
     text,
     at,
   };
 
-  await appendFile(paths.transcriptJsonl, `${JSON.stringify(entry)}\n`);
+  await appendTranscriptEntry(courseDir, entry);
+  return entry;
+};
+
+export const appendAgentTranscript = async (
+  courseDir: string,
+  text: string,
+  at: string,
+): Promise<TranscriptEntry> => {
+  const entry: TranscriptEntry = {
+    role: "agent",
+    text,
+    at,
+  };
+
+  await appendTranscriptEntry(courseDir, entry);
+  return entry;
 };
 
 export const nextTurnNumber = async (courseDir: string): Promise<number> => {

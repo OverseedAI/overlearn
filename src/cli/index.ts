@@ -4,6 +4,7 @@ import packageJson from "../../package.json";
 import {
   LearnCommandError,
   runDaemon,
+  sayAgentMessage,
   startCourseDaemon,
   waitForLearnerTurn,
 } from "../daemon";
@@ -54,6 +55,20 @@ const main = async (): Promise<CliResult> => {
       exitCode: 0,
       stdout: await waitForLearnerTurn(command.name),
     };
+  }
+
+  if (command.kind === "say") {
+    const stderr = await sayAgentMessage(command.name, command.source);
+    return stderr === undefined
+      ? {
+          exitCode: 0,
+          stdout: "",
+        }
+      : {
+          exitCode: 0,
+          stdout: "",
+          stderr,
+        };
   }
 
   await runDaemon(command.courseDir);
