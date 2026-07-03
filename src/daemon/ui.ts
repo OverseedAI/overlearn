@@ -58,6 +58,9 @@ const form = document.querySelector("#turn-form");
 const textarea = document.querySelector("#message");
 const submitButton = document.querySelector("#submit");
 const statusLine = document.querySelector("#status");
+const statusIndicator = document.querySelector("#status-line");
+const typingIndicator = document.querySelector("#typing");
+const themeToggle = document.querySelector("#theme-toggle");
 const feynmanPanel = document.querySelector("#feynman-panel");
 const feynmanForm = document.querySelector("#feynman-form");
 const feynmanTextarea = document.querySelector("#feynman-answer");
@@ -97,6 +100,11 @@ let hideTermCardTimer = undefined;
 const scrollTranscript = () => {
   transcript.scrollTop = transcript.scrollHeight;
 };
+
+// Keep the transcript pinned to the latest message unless the learner has
+// scrolled up to read history.
+const transcriptNearBottom = () =>
+  transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96;
 
 const latestLesson = () =>
   lessons.reduce((latest, lesson) => {
@@ -627,9 +635,12 @@ const renderTranscript = () => {
 };
 
 const appendEntry = (entry) => {
+  const stick = entry.role === "learner" || transcriptNearBottom();
   transcriptEntries.push(entry);
   transcript.append(createEntryElement(entry));
-  scrollTranscript();
+  if (stick) {
+    scrollTranscript();
+  }
 };
 
 const clearHideTermCardTimer = () => {
@@ -774,14 +785,23 @@ const applyStatus = (status, nextHasSeenWait = hasSeenWait) => {
   hasSeenWait = nextHasSeenWait;
   const waiting = status === "waiting-for-agent";
   statusLine.textContent = statusText(waiting);
+  statusIndicator.classList.toggle("working", !waiting);
+  typingIndicator.hidden = waiting;
   applyComposerLabel(waiting);
   textarea.disabled = !waiting;
   submitButton.disabled = !waiting || textarea.value.trim().length === 0;
   setFeynmanControls();
 
-  if (waiting) {
+  // Auto-focus only on desktop layouts: on small screens it scrolls the page
+  // to the composer and pops the keyboard while the learner may be reading.
+  if (waiting && window.matchMedia("(min-width: 981px)").matches) {
     textarea.focus();
   }
+};
+
+const autosizeComposer = () => {
+  textarea.style.height = "auto";
+  textarea.style.height = Math.min(textarea.scrollHeight + 2, 200) + "px";
 };
 
 const submitMessage = async () => {
@@ -792,6 +812,7 @@ const submitMessage = async () => {
 
   applyStatus("agent-working");
   textarea.value = "";
+  autosizeComposer();
 
   const response = await fetch("/api/submit", {
     method: "POST",
@@ -841,9 +862,21 @@ renderViewTabs();
 renderFeynmanPanel();
 renderTranscript();
 applyStatus(currentStatus, hasSeenWait);
+autosizeComposer();
 
 textarea.addEventListener("input", () => {
   submitButton.disabled = textarea.disabled || textarea.value.trim().length === 0;
+  autosizeComposer();
+});
+
+themeToggle.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  document.documentElement.dataset.theme = next;
+  try {
+    localStorage.setItem("overlearn-theme", next);
+  } catch {
+    // Persistence is best-effort; the toggle still works for this session.
+  }
 });
 
 feynmanTextarea.addEventListener("input", setFeynmanControls);
@@ -1326,6 +1359,9 @@ export const renderPage = (
   status: UiRenderStatus = "agent-working",
   hasSeenWait = false,
 ): string => {
+  const working = status !== "waiting-for-agent";
+  const statusLineClass = working ? "status-line working" : "status-line";
+  const typingHidden = working ? "" : " hidden";
   const composerDisabled = status === "waiting-for-agent" ? "" : " disabled";
   const composerPlaceholder = composerLabel(status);
   const script = clientScript
@@ -1346,18 +1382,183 @@ export const renderPage = (
     .replace("__HAS_SEEN_WAIT__", escapeScriptJson(hasSeenWait));
 
   return `<!doctype html>
-<html lang="en" class="scheme-only-dark">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(courseTitle)} - overlearn</title>
+  <script>
+    (() => {
+      let theme;
+      try {
+        theme = localStorage.getItem("overlearn-theme");
+      } catch {
+        theme = undefined;
+      }
+      if (theme !== "light" && theme !== "dark") {
+        theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      }
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%238fbf73'/%3E%3Cpath d='M22 43V21h6v8h8v-8h6v22h-6v-9h-8v9z' fill='%2311110f'/%3E%3C/svg%3E">
   <style>
     :root {
       color-scheme: dark;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #11110f;
-      color: #f4f4f1;
+
+      --bg: #11110f;
+      --surface: #151612;
+      --card: #1a1b18;
+      --code-bg: #0a0b0a;
+      --inline-code-bg: #10110f;
+      --blockquote-bg: rgb(255 255 255 / 2%);
+
+      --border: #2f302b;
+      --border-surface: #33342f;
+      --border-strong: #3a3b35;
+
+      --text: #f4f4f1;
+      --heading: #fafaf8;
+      --body-text: #eeeeea;
+      --secondary: #cfcfca;
+      --muted: #a1a19a;
+      --faint: #898b83;
+      --disabled: #7e8078;
+
+      --accent: #8fbf73;
+      --accent-strong: #9fcf86;
+      --on-accent: #11110f;
+      --accent-soft-text: #b9c7a7;
+      --accent-hover-bg: #20261e;
+      --accent-active-bg: #253020;
+      --accent-border: #44523c;
+      --accent-border-strong: #71965f;
+      --accent-button-text: #edf7e8;
+
+      --ok: #73b66d;
+      --ok-text: #c8f3bf;
+      --warn: #d0a548;
+      --warn-text: #ffe0a0;
+      --bad: #d96257;
+      --bad-text: #ffc4bd;
+
+      --term-text: #d9f6b3;
+      --term-underline: #b7dd88;
+      --term-card-border: #4d6041;
+      --term-card-bg: #20231d;
+
+      --demo-text: #c8d7bd;
+      --demo-badge-border: #526747;
+      --demo-badge-text: #bce5a4;
+      --demo-card-border: #3a4933;
+      --demo-card-bg: #121410;
+      --demo-titlebar-bg: #1a1f17;
+      --demo-titlebar-border: #2c3528;
+      --demo-action-border: #42513b;
+      --demo-action-hover-bg: #293422;
+      --demo-warning-border: #7d5631;
+      --demo-warning-bg: #21170f;
+      --demo-warning-titlebar-bg: #2a1b10;
+      --demo-warning-titlebar-border: #6b4828;
+      --demo-warning-text: #ffd8b0;
+
+      --feynman-border: #b88745;
+      --feynman-bg: #211b12;
+      --feynman-kicker: #ffd79a;
+      --feynman-prompt: #fff3df;
+      --feynman-replacement: #f0c589;
+      --feynman-chip-border: #9e743d;
+      --feynman-chip-text: #ffe1ae;
+      --feynman-answer-border: #75552d;
+      --feynman-answer-bg: #17130e;
+      --feynman-submit-bg: #f1b45b;
+      --feynman-submit-text: #15100a;
+      --feynman-done-border: #526747;
+      --feynman-done-bg: #182017;
+
+      --scrollbar: #3a3b35;
+      --pop-shadow: 0 1rem 2.5rem rgb(0 0 0 / 45%);
+
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    :root[data-theme="light"] {
+      color-scheme: light;
+
+      --bg: #f4f3ee;
+      --surface: #fbfaf7;
+      --card: #ffffff;
+      --code-bg: #edebe2;
+      --inline-code-bg: #ebe9df;
+      --blockquote-bg: rgb(93 122 62 / 5%);
+
+      --border: #dfddd2;
+      --border-surface: #e2e0d6;
+      --border-strong: #ccc9bc;
+
+      --text: #23241e;
+      --heading: #15160f;
+      --body-text: #2c2d26;
+      --secondary: #55564c;
+      --muted: #6e6f63;
+      --faint: #8b8c80;
+      --disabled: #9b9c90;
+
+      --accent: #5c8f3e;
+      --accent-strong: #4c7a33;
+      --on-accent: #ffffff;
+      --accent-soft-text: #5b7345;
+      --accent-hover-bg: #edf1e4;
+      --accent-active-bg: #e1ead2;
+      --accent-border: #c3d2ae;
+      --accent-border-strong: #8fae76;
+      --accent-button-text: #33531f;
+
+      --ok: #4c8f45;
+      --ok-text: #38702f;
+      --warn: #c08c1c;
+      --warn-text: #8a6412;
+      --bad: #c74a3e;
+      --bad-text: #a53a2f;
+
+      --term-text: #47762a;
+      --term-underline: #85ac60;
+      --term-card-border: #c3d2ae;
+      --term-card-bg: #ffffff;
+
+      --demo-text: #566349;
+      --demo-badge-border: #a9c295;
+      --demo-badge-text: #4c7a33;
+      --demo-card-border: #ccd6bf;
+      --demo-card-bg: #ffffff;
+      --demo-titlebar-bg: #eef1e6;
+      --demo-titlebar-border: #dde3cf;
+      --demo-action-border: #b9c9a6;
+      --demo-action-hover-bg: #e1ead2;
+      --demo-warning-border: #d9a856;
+      --demo-warning-bg: #fdf4e1;
+      --demo-warning-titlebar-bg: #f6e8c7;
+      --demo-warning-titlebar-border: #e4ca92;
+      --demo-warning-text: #7a5a1e;
+
+      --feynman-border: #d9ab5c;
+      --feynman-bg: #fdf6e7;
+      --feynman-kicker: #9c6d17;
+      --feynman-prompt: #4a3d26;
+      --feynman-replacement: #8a6a33;
+      --feynman-chip-border: #cfa261;
+      --feynman-chip-text: #855c14;
+      --feynman-answer-border: #dcc191;
+      --feynman-answer-bg: #fffdf6;
+      --feynman-submit-bg: #f1b45b;
+      --feynman-submit-text: #15100a;
+      --feynman-done-border: #b6cba4;
+      --feynman-done-bg: #eff4e6;
+
+      --scrollbar: #c9c7ba;
+      --pop-shadow: 0 0.75rem 2rem rgb(40 42 30 / 18%);
     }
 
     * {
@@ -1371,26 +1572,42 @@ export const renderPage = (
     button:focus-visible,
     a:focus-visible,
     .term:focus-visible {
-      outline: 2px solid #8fbf73;
+      outline: 2px solid var(--accent);
       outline-offset: 2px;
     }
 
     textarea:focus-visible {
-      outline: 2px solid #8fbf73;
+      outline: 2px solid var(--accent);
       outline-offset: 0;
+    }
+
+    html {
+      height: 100%;
     }
 
     body {
       margin: 0;
-      min-height: 100vh;
-      background: #11110f;
+      height: 100dvh;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .lesson-nav,
+    .lesson-content,
+    .glossary-pane,
+    #transcript,
+    textarea,
+    .prose pre,
+    .table-wrap {
+      scrollbar-width: thin;
+      scrollbar-color: var(--scrollbar) transparent;
     }
 
     .shell {
       display: grid;
       grid-template-rows: auto minmax(0, 1fr);
       gap: 1rem;
-      min-height: 100vh;
+      height: 100%;
       width: min(100%, 92rem);
       margin: 0 auto;
       padding: 1rem;
@@ -1401,14 +1618,54 @@ export const renderPage = (
       align-items: center;
       justify-content: space-between;
       gap: 1rem;
-      border-bottom: 1px solid #2f302b;
+      border-bottom: 1px solid var(--border);
       padding-bottom: 0.875rem;
+    }
+
+    .header-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .theme-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      width: 2.6rem;
+      min-height: 2.6rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--secondary);
+      padding: 0;
+      cursor: pointer;
+    }
+
+    .theme-toggle:hover {
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+      color: var(--text);
+    }
+
+    .theme-toggle svg {
+      width: 1.1rem;
+      height: 1.1rem;
+    }
+
+    :root[data-theme="light"] .icon-sun {
+      display: none;
+    }
+
+    :root:not([data-theme="light"]) .icon-moon {
+      display: none;
     }
 
     h1,
     h2 {
       margin: 0;
-      color: #fafaf8;
+      color: var(--heading);
       font-weight: 600;
     }
 
@@ -1423,9 +1680,9 @@ export const renderPage = (
     .view-tabs {
       display: flex;
       gap: 0.35rem;
-      border: 1px solid #33342f;
+      border: 1px solid var(--border-surface);
       border-radius: 8px;
-      background: #151612;
+      background: var(--surface);
       padding: 0.25rem;
     }
 
@@ -1434,7 +1691,7 @@ export const renderPage = (
       border: 0;
       border-radius: 6px;
       background: transparent;
-      color: #cfcfca;
+      color: var(--secondary);
       padding: 0 0.75rem;
       font: inherit;
       cursor: pointer;
@@ -1442,8 +1699,8 @@ export const renderPage = (
 
     .view-tab:hover,
     .view-tab.active {
-      background: #253020;
-      color: #f4f4f1;
+      background: var(--accent-active-bg);
+      color: var(--text);
     }
 
     .workspace {
@@ -1454,6 +1711,8 @@ export const renderPage = (
     }
 
     .study-pane {
+      display: grid;
+      grid-template-rows: minmax(0, 1fr);
       min-height: 0;
     }
 
@@ -1467,7 +1726,7 @@ export const renderPage = (
     .lesson-nav {
       min-height: 0;
       overflow-y: auto;
-      border-right: 1px solid #2f302b;
+      border-right: 1px solid var(--border);
       padding-right: 1rem;
     }
 
@@ -1481,9 +1740,9 @@ export const renderPage = (
       display: grid;
       gap: 0.55rem;
       margin-top: 0.75rem;
-      border: 1px solid #33342f;
+      border: 1px solid var(--border-surface);
       border-radius: 8px;
-      background: #151612;
+      background: var(--surface);
       padding: 0.65rem;
     }
 
@@ -1494,23 +1753,23 @@ export const renderPage = (
     }
 
     .mastery-count {
-      color: #fafaf8;
+      color: var(--heading);
       font-size: 0.9rem;
       font-weight: 600;
     }
 
     .mastery-weakest {
-      color: #bdbdb6;
+      color: var(--muted);
       font-size: 0.82rem;
       overflow-wrap: anywhere;
     }
 
     .mastery-review {
       min-height: 2rem;
-      border: 1px solid #4b5a43;
+      border: 1px solid var(--accent-border);
       border-radius: 6px;
-      background: #20261e;
-      color: #edf7e8;
+      background: var(--accent-hover-bg);
+      color: var(--accent-button-text);
       padding: 0 0.65rem;
       font: inherit;
       font-size: 0.86rem;
@@ -1519,14 +1778,14 @@ export const renderPage = (
     }
 
     .mastery-review:hover {
-      border-color: #71965f;
-      background: #273120;
+      border-color: var(--accent-border-strong);
+      background: var(--accent-active-bg);
     }
 
     .mastery-review:disabled {
-      color: #7e8078;
-      border-color: #33342f;
-      background: #181914;
+      color: var(--disabled);
+      border-color: var(--border-surface);
+      background: var(--surface);
       cursor: not-allowed;
     }
 
@@ -1541,7 +1800,7 @@ export const renderPage = (
     .topic-children {
       margin-top: 0.3rem;
       padding-left: 0.85rem;
-      border-left: 1px solid #30352d;
+      border-left: 1px solid var(--border);
     }
 
     .topic-node {
@@ -1561,7 +1820,7 @@ export const renderPage = (
       border-left-width: 3px;
       border-radius: 8px;
       background: transparent;
-      color: #d5d5cf;
+      color: var(--secondary);
       padding: 0.45rem 0.6rem;
       font: inherit;
       text-align: left;
@@ -1577,112 +1836,113 @@ export const renderPage = (
     .mastery-dot {
       width: 0.68rem;
       height: 0.68rem;
-      border: 1px solid #686a62;
+      border: 1px solid var(--faint);
       border-radius: 999px;
       background: transparent;
     }
 
     .mastery-chip {
       min-width: 2.15rem;
-      border: 1px solid #454741;
+      border: 1px solid var(--border-strong);
       border-radius: 999px;
-      color: #cfcfca;
+      color: var(--secondary);
       padding: 0.08rem 0.34rem;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       font-size: 0.8125rem;
       font-weight: 700;
+      font-variant-numeric: tabular-nums;
       line-height: 1.4;
       text-align: center;
     }
 
     .topic-button.mastery-low {
-      border-left-color: #d96257;
+      border-left-color: var(--bad);
     }
 
     .topic-button.mastery-low .mastery-dot,
     .topic-button.mastery-low .mastery-chip {
-      border-color: #d96257;
-      color: #ffc4bd;
+      border-color: var(--bad);
+      color: var(--bad-text);
     }
 
     .topic-button.mastery-low .mastery-dot {
-      background: #d96257;
+      background: var(--bad);
     }
 
     .topic-button.mastery-medium {
-      border-left-color: #d0a548;
+      border-left-color: var(--warn);
     }
 
     .topic-button.mastery-medium .mastery-dot,
     .topic-button.mastery-medium .mastery-chip {
-      border-color: #d0a548;
-      color: #ffe0a0;
+      border-color: var(--warn);
+      color: var(--warn-text);
     }
 
     .topic-button.mastery-medium .mastery-dot {
-      background: #d0a548;
+      background: var(--warn);
     }
 
     .topic-button.mastery-high {
-      border-left-color: #73b66d;
+      border-left-color: var(--ok);
     }
 
     .topic-button.mastery-high .mastery-dot,
     .topic-button.mastery-high .mastery-chip {
-      border-color: #73b66d;
-      color: #c8f3bf;
+      border-color: var(--ok);
+      color: var(--ok-text);
     }
 
     .topic-button.mastery-high .mastery-dot {
-      background: #73b66d;
+      background: var(--ok);
     }
 
     .topic-button.mastery-ungraded {
-      border-left-color: #3a3b35;
+      border-left-color: var(--border-strong);
     }
 
     .topic-button.mastery-ungraded .mastery-chip {
-      color: #898b83;
+      color: var(--faint);
     }
 
     .topic-button.no-lesson {
-      color: #aeb0a8;
+      color: var(--muted);
     }
 
     .topic-button:hover,
     .topic-button.active {
-      border-color: #44523c;
-      background: #20261e;
-      color: #f4f4f1;
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+      color: var(--text);
     }
 
     .topic-button.current {
-      border-color: #8fbf73;
-      color: #f4f4f1;
+      border-color: var(--accent);
+      color: var(--text);
     }
 
     .topic-button.mastery-low:hover,
     .topic-button.mastery-low.active,
     .topic-button.mastery-low.current {
-      border-left-color: #d96257;
+      border-left-color: var(--bad);
     }
 
     .topic-button.mastery-medium:hover,
     .topic-button.mastery-medium.active,
     .topic-button.mastery-medium.current {
-      border-left-color: #d0a548;
+      border-left-color: var(--warn);
     }
 
     .topic-button.mastery-high:hover,
     .topic-button.mastery-high.active,
     .topic-button.mastery-high.current {
-      border-left-color: #73b66d;
+      border-left-color: var(--ok);
     }
 
     .topic-button.mastery-ungraded:hover,
     .topic-button.mastery-ungraded.active,
     .topic-button.mastery-ungraded.current {
-      border-left-color: #3a3b35;
+      border-left-color: var(--border-strong);
     }
 
     .demo-leaves {
@@ -1702,7 +1962,7 @@ export const renderPage = (
       border: 1px solid transparent;
       border-radius: 8px;
       background: transparent;
-      color: #c8d7bd;
+      color: var(--demo-text);
       padding: 0.35rem 0.55rem;
       font: inherit;
       font-size: 0.92rem;
@@ -1712,16 +1972,16 @@ export const renderPage = (
     }
 
     .demo-leaf:hover {
-      border-color: #44523c;
-      background: #20261e;
-      color: #f4f4f1;
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+      color: var(--text);
     }
 
     .demo-badge {
       flex: 0 0 auto;
-      border: 1px solid #526747;
+      border: 1px solid var(--demo-badge-border);
       border-radius: 999px;
-      color: #bce5a4;
+      color: var(--demo-badge-text);
       padding: 0.04rem 0.3rem;
       font-size: 0.68rem;
       font-weight: 700;
@@ -1733,13 +1993,13 @@ export const renderPage = (
       display: grid;
       gap: 0.4rem;
       margin-top: 0.85rem;
-      border-top: 1px solid #2f302b;
+      border-top: 1px solid var(--border);
       padding-top: 0.75rem;
     }
 
     .unassigned-heading {
       margin: 0 0 0.1rem;
-      color: #a1a19a;
+      color: var(--muted);
       font-size: 0.78rem;
       font-weight: 600;
       letter-spacing: 0;
@@ -1752,7 +2012,7 @@ export const renderPage = (
       border: 1px solid transparent;
       border-radius: 8px;
       background: transparent;
-      color: #cfcfca;
+      color: var(--secondary);
       padding: 0.45rem 0.6rem;
       font: inherit;
       text-align: left;
@@ -1762,17 +2022,17 @@ export const renderPage = (
 
     .lesson-tab:hover,
     .lesson-tab.active {
-      border-color: #44523c;
-      background: #20261e;
-      color: #f4f4f1;
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+      color: var(--text);
     }
 
     .lesson-content {
       min-height: 0;
       overflow-y: auto;
-      border: 1px solid #33342f;
+      border: 1px solid var(--border-surface);
       border-radius: 8px;
-      background: #151612;
+      background: var(--surface);
       padding: 1rem 1.125rem;
     }
 
@@ -1784,9 +2044,9 @@ export const renderPage = (
     .glossary-pane {
       min-height: 0;
       overflow-y: auto;
-      border: 1px solid #33342f;
+      border: 1px solid var(--border-surface);
       border-radius: 8px;
-      background: #151612;
+      background: var(--surface);
       padding: 1rem 1.125rem;
     }
 
@@ -1799,22 +2059,22 @@ export const renderPage = (
     .glossary-entry {
       display: grid;
       gap: 0.45rem;
-      border: 1px solid #30312d;
+      border: 1px solid var(--border);
       border-radius: 8px;
-      background: #1a1b18;
+      background: var(--card);
       padding: 0.85rem 0.95rem;
     }
 
     .glossary-entry h3 {
       margin: 0;
-      color: #fafaf8;
+      color: var(--heading);
       font-size: 1rem;
       font-weight: 600;
     }
 
     .glossary-entry p {
       margin: 0;
-      color: #eeeeea;
+      color: var(--body-text);
       line-height: 1.55;
     }
 
@@ -1823,7 +2083,7 @@ export const renderPage = (
       justify-self: start;
       border: 0;
       background: transparent;
-      color: #9fcf86;
+      color: var(--accent-strong);
       padding: 0;
       font: inherit;
       font-size: 0.9rem;
@@ -1835,18 +2095,22 @@ export const renderPage = (
     .empty-state,
     .empty-lesson {
       margin: 0;
-      color: #a1a19a;
+      color: var(--muted);
       font-size: 0.95rem;
       line-height: 1.5;
     }
 
     .chat-pane {
-      display: grid;
-      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      display: flex;
+      flex-direction: column;
       gap: 0.75rem;
       min-height: 0;
-      border-left: 1px solid #2f302b;
+      border-left: 1px solid var(--border);
       padding-left: 1rem;
+    }
+
+    .chat-pane > * {
+      flex: 0 0 auto;
     }
 
     .chat-header {
@@ -1854,34 +2118,129 @@ export const renderPage = (
       align-items: baseline;
       justify-content: space-between;
       gap: 0.75rem;
+      min-width: 0;
     }
 
-    #status {
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
       margin: 0;
-      color: #b9c7a7;
+      min-width: 0;
+      color: var(--accent-soft-text);
       font-size: 0.9rem;
       white-space: nowrap;
     }
 
+    #status {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .status-dot {
+      flex: 0 0 auto;
+      width: 0.55rem;
+      height: 0.55rem;
+      border-radius: 999px;
+      background: var(--accent);
+    }
+
+    .status-line.working {
+      color: var(--muted);
+    }
+
+    .status-line.working .status-dot {
+      background: var(--warn);
+      animation: status-pulse 1.6s ease-in-out infinite;
+    }
+
+    @keyframes status-pulse {
+      0% {
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 45%, transparent);
+      }
+
+      70% {
+        box-shadow: 0 0 0 0.45rem transparent;
+      }
+
+      100% {
+        box-shadow: 0 0 0 0 transparent;
+      }
+    }
+
     #transcript {
-      min-height: 12rem;
+      flex: 1 1 0;
+      min-height: 0;
       overflow-y: auto;
       padding: 0.25rem 0.125rem 0.5rem;
+    }
+
+    #transcript:empty::before {
+      content: "Messages from your teacher will appear here.";
+      display: block;
+      margin-top: 0.25rem;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .typing {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      width: max-content;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px 8px 8px 2px;
+      background: var(--card);
+      padding: 0.6rem 0.75rem;
+    }
+
+    .typing-dot {
+      width: 0.42rem;
+      height: 0.42rem;
+      border-radius: 999px;
+      background: var(--muted);
+      animation: typing-bounce 1.2s ease-in-out infinite;
+    }
+
+    .typing-dot:nth-child(2) {
+      animation-delay: 0.15s;
+    }
+
+    .typing-dot:nth-child(3) {
+      animation-delay: 0.3s;
+    }
+
+    @keyframes typing-bounce {
+      0%, 55%, 100% {
+        opacity: 0.4;
+        transform: none;
+      }
+
+      25% {
+        opacity: 1;
+        transform: translateY(-0.2rem);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .status-line.working .status-dot,
+      .typing-dot {
+        animation: none;
+      }
     }
 
     .feynman-panel {
       display: grid;
       gap: 0.75rem;
-      border: 1px solid #b88745;
+      border: 1px solid var(--feynman-border);
       border-radius: 8px;
-      background: #211b12;
+      background: var(--feynman-bg);
       padding: 0.85rem;
-      box-shadow: inset 0 0 0 1px rgb(255 219 163 / 8%);
     }
 
     .feynman-panel.submitted {
-      border-color: #526747;
-      background: #182017;
+      border-color: var(--feynman-done-border);
+      background: var(--feynman-done-bg);
     }
 
     .feynman-heading {
@@ -1898,7 +2257,7 @@ export const renderPage = (
     }
 
     .feynman-kicker {
-      color: #ffd79a;
+      color: var(--feynman-kicker);
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       font-size: 0.8125rem;
       font-weight: 700;
@@ -1908,7 +2267,7 @@ export const renderPage = (
 
     .feynman-title h3 {
       margin: 0;
-      color: #fafaf8;
+      color: var(--heading);
       font-size: 1rem;
       font-weight: 600;
     }
@@ -1917,9 +2276,9 @@ export const renderPage = (
       flex: 0 0 auto;
       max-width: 12rem;
       overflow: hidden;
-      border: 1px solid #9e743d;
+      border: 1px solid var(--feynman-chip-border);
       border-radius: 999px;
-      color: #ffe1ae;
+      color: var(--feynman-chip-text);
       padding: 0.18rem 0.5rem;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       font-size: 0.8125rem;
@@ -1935,17 +2294,17 @@ export const renderPage = (
     }
 
     .feynman-prompt {
-      color: #fff3df;
+      color: var(--feynman-prompt);
     }
 
     .feynman-status {
-      color: #ffd79a;
+      color: var(--feynman-kicker);
       font-size: 0.9rem;
     }
 
     .feynman-replacement {
-      border-left: 3px solid #b88745;
-      color: #f0c589;
+      border-left: 3px solid var(--feynman-border);
+      color: var(--feynman-replacement);
       padding-left: 0.6rem;
       font-size: 0.9rem;
     }
@@ -1957,8 +2316,8 @@ export const renderPage = (
 
     .feynman-answer {
       min-height: 8rem;
-      border-color: #75552d;
-      background: #17130e;
+      border-color: var(--feynman-answer-border);
+      background: var(--feynman-answer-bg);
     }
 
     .feynman-submit {
@@ -1966,8 +2325,8 @@ export const renderPage = (
       min-height: 2.5rem;
       border: 0;
       border-radius: 8px;
-      background: #f1b45b;
-      color: #15100a;
+      background: var(--feynman-submit-bg);
+      color: var(--feynman-submit-text);
       padding: 0 0.9rem;
       font: inherit;
       font-weight: 600;
@@ -1990,21 +2349,21 @@ export const renderPage = (
     }
 
     .entry-meta {
-      color: #a1a19a;
+      color: var(--muted);
       font-size: 0.8rem;
     }
 
     .message-body {
       width: min(100%, 46rem);
-      border: 1px solid #33342f;
+      border: 1px solid var(--border-surface);
       border-radius: 8px;
-      background: #1a1b18;
+      background: var(--card);
       padding: 0.75rem 0.875rem;
     }
 
     .learner .message-body {
-      border-color: #44523c;
-      background: #20261e;
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
     }
 
     .demo-message-body {
@@ -2017,9 +2376,9 @@ export const renderPage = (
     .demo-card {
       display: grid;
       overflow: hidden;
-      border: 1px solid #3a4933;
+      border: 1px solid var(--demo-card-border);
       border-radius: 8px;
-      background: #121410;
+      background: var(--demo-card-bg);
     }
 
     .demo-titlebar {
@@ -2027,8 +2386,8 @@ export const renderPage = (
       align-items: center;
       justify-content: space-between;
       gap: 0.75rem;
-      border-bottom: 1px solid #2c3528;
-      background: #1a1f17;
+      border-bottom: 1px solid var(--demo-titlebar-border);
+      background: var(--demo-titlebar-bg);
       padding: 0.55rem 0.65rem;
     }
 
@@ -2037,7 +2396,7 @@ export const renderPage = (
       align-items: center;
       gap: 0.5rem;
       min-width: 0;
-      color: #fafaf8;
+      color: var(--heading);
       font-weight: 600;
       line-height: 1.3;
       overflow-wrap: anywhere;
@@ -2051,10 +2410,10 @@ export const renderPage = (
 
     .demo-action {
       min-height: 1.8rem;
-      border: 1px solid #42513b;
+      border: 1px solid var(--demo-action-border);
       border-radius: 6px;
-      background: #20261e;
-      color: #f4f4f1;
+      background: var(--accent-hover-bg);
+      color: var(--text);
       padding: 0 0.5rem;
       font: inherit;
       font-size: 0.82rem;
@@ -2069,8 +2428,8 @@ export const renderPage = (
     }
 
     .demo-action:hover {
-      border-color: #71965f;
-      background: #293422;
+      border-color: var(--accent-border-strong);
+      background: var(--demo-action-hover-bg);
     }
 
     .demo-frame {
@@ -2083,23 +2442,23 @@ export const renderPage = (
     }
 
     .demo-warning {
-      border-color: #7d5631;
-      background: #21170f;
+      border-color: var(--demo-warning-border);
+      background: var(--demo-warning-bg);
     }
 
     .demo-warning .demo-titlebar {
-      border-bottom-color: #6b4828;
-      background: #2a1b10;
+      border-bottom-color: var(--demo-warning-titlebar-border);
+      background: var(--demo-warning-titlebar-bg);
     }
 
     .demo-warning p {
       margin: 0;
       padding: 0.75rem;
-      color: #ffd8b0;
+      color: var(--demo-warning-text);
     }
 
     .prose {
-      color: #eeeeea;
+      color: var(--body-text);
       font-size: 1rem;
       line-height: 1.75;
       overflow-wrap: anywhere;
@@ -2119,7 +2478,7 @@ export const renderPage = (
     .prose h4,
     .prose h5,
     .prose h6 {
-      color: #fafaf8;
+      color: var(--heading);
       font-weight: 600;
     }
 
@@ -2148,14 +2507,14 @@ export const renderPage = (
     }
 
     .prose a {
-      color: #9fcf86;
+      color: var(--accent-strong);
       text-decoration: underline;
       text-underline-offset: 0.2em;
     }
 
     .term {
-      border-bottom: 1px dotted #b7dd88;
-      color: #d9f6b3;
+      border-bottom: 1px dotted var(--term-underline);
+      color: var(--term-text);
       cursor: help;
     }
 
@@ -2168,17 +2527,17 @@ export const renderPage = (
       z-index: 20;
       width: max-content;
       max-width: min(22rem, calc(100vw - 1.5rem));
-      border: 1px solid #4d6041;
+      border: 1px solid var(--term-card-border);
       border-radius: 8px;
-      background: #20231d;
-      box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 45%);
-      color: #eeeeea;
+      background: var(--term-card-bg);
+      box-shadow: var(--pop-shadow);
+      color: var(--body-text);
       padding: 0.75rem 0.85rem;
       line-height: 1.45;
     }
 
     .term-card-title {
-      color: #fafaf8;
+      color: var(--heading);
       font-weight: 600;
     }
 
@@ -2192,24 +2551,24 @@ export const renderPage = (
 
     .prose code {
       border-radius: 5px;
-      background: #10110f;
+      background: var(--inline-code-bg);
       padding: 0.1rem 0.3rem;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       font-size: 0.9em;
     }
 
     .prose blockquote {
-      border-left: 3px solid #8fbf73;
+      border-left: 3px solid var(--accent);
       border-radius: 0 6px 6px 0;
-      background: rgb(255 255 255 / 2%);
-      color: #cfdcc5;
+      background: var(--blockquote-bg);
+      color: var(--body-text);
       padding: 0.05rem 0 0.05rem 0.85rem;
     }
 
     .prose pre {
       overflow-x: auto;
       border-radius: 8px;
-      background: #0a0b0a;
+      background: var(--code-bg);
       padding: 0.75rem;
       line-height: 1.55;
     }
@@ -2239,22 +2598,23 @@ export const renderPage = (
 
     .prose th,
     .prose td {
-      border-bottom: 1px solid #30312d;
+      border-bottom: 1px solid var(--border);
       padding: 0.45rem 0.65rem;
       text-align: left;
       vertical-align: top;
     }
 
     .prose th {
-      color: #fafaf8;
+      color: var(--heading);
       font-weight: 600;
       white-space: nowrap;
     }
 
     .composer {
-      display: grid;
-      gap: 0.75rem;
-      border-top: 1px solid #2f302b;
+      display: flex;
+      align-items: flex-end;
+      gap: 0.5rem;
+      border-top: 1px solid var(--border);
       padding-top: 0.75rem;
     }
 
@@ -2262,30 +2622,36 @@ export const renderPage = (
       width: 100%;
       min-height: 6rem;
       resize: vertical;
-      border: 1px solid #3a3b35;
+      border: 1px solid var(--border-strong);
       border-radius: 8px;
-      background: #191a17;
-      color: #f4f4f1;
+      background: var(--card);
+      color: var(--text);
       padding: 0.8rem 0.875rem;
       font: inherit;
       line-height: 1.5;
     }
 
     textarea:disabled {
-      color: #8d8e86;
-      background: #151612;
+      color: var(--disabled);
+      background: var(--surface);
       cursor: not-allowed;
     }
 
+    #message {
+      flex: 1;
+      min-height: 3.25rem;
+      max-height: 12.5rem;
+      resize: none;
+    }
+
     .send-button {
-      justify-self: end;
-      align-self: start;
+      flex: 0 0 auto;
       min-height: 2.75rem;
       max-height: 2.75rem;
       border: 0;
       border-radius: 8px;
-      background: #9fcf86;
-      color: #11110f;
+      background: var(--accent-strong);
+      color: var(--on-accent);
       padding: 0 1rem;
       font: inherit;
       font-weight: 600;
@@ -2298,15 +2664,29 @@ export const renderPage = (
     }
 
     @media (max-width: 980px) {
+      body {
+        overflow: auto;
+      }
+
+      .shell {
+        height: auto;
+        min-height: 100dvh;
+      }
+
       .workspace {
         grid-template-columns: 1fr;
       }
 
       .chat-pane {
         border-left: 0;
-        border-top: 1px solid #2f302b;
+        border-top: 1px solid var(--border);
         padding-top: 1rem;
         padding-left: 0;
+      }
+
+      #transcript {
+        min-height: 10rem;
+        max-height: 60dvh;
       }
     }
 
@@ -2323,8 +2703,12 @@ export const renderPage = (
         display: grid;
       }
 
-      .view-tabs {
+      .header-controls {
         width: 100%;
+      }
+
+      .view-tabs {
+        flex: 1;
       }
 
       .view-tab {
@@ -2337,7 +2721,7 @@ export const renderPage = (
 
       .lesson-nav {
         border-right: 0;
-        border-bottom: 1px solid #2f302b;
+        border-bottom: 1px solid var(--border);
         padding-right: 0;
         padding-bottom: 0.75rem;
       }
@@ -2346,12 +2730,8 @@ export const renderPage = (
         display: grid;
       }
 
-      #status {
+      .status-line {
         white-space: normal;
-      }
-
-      .send-button {
-        width: 100%;
       }
 
       .feynman-heading {
@@ -2372,10 +2752,16 @@ export const renderPage = (
   <main class="shell">
     <header>
       <h1>${escapeHtml(courseTitle)}</h1>
-      <nav class="view-tabs" aria-label="Study view" role="tablist">
-        <button class="view-tab active" type="button" data-view="lessons" role="tab" aria-selected="true">Lessons</button>
-        <button class="view-tab" type="button" data-view="glossary" role="tab" aria-selected="false">Glossary</button>
-      </nav>
+      <div class="header-controls">
+        <nav class="view-tabs" aria-label="Study view" role="tablist">
+          <button class="view-tab active" type="button" data-view="lessons" role="tab" aria-selected="true">Lessons</button>
+          <button class="view-tab" type="button" data-view="glossary" role="tab" aria-selected="false">Glossary</button>
+        </nav>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle color theme" title="Toggle color theme">
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/></svg>
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+        </button>
+      </div>
     </header>
 
     <div class="workspace">
@@ -2407,7 +2793,7 @@ export const renderPage = (
       <aside class="chat-pane" aria-label="Chat">
         <div class="chat-header">
           <h2>Chat</h2>
-          <p id="status">${escapeHtml(renderStatusText(status, hasSeenWait))}</p>
+          <p id="status-line" class="${statusLineClass}"><span class="status-dot" aria-hidden="true"></span><span id="status">${escapeHtml(renderStatusText(status, hasSeenWait))}</span></p>
         </div>
 
         <section id="feynman-panel" class="feynman-panel" aria-labelledby="feynman-heading" hidden>
@@ -2428,6 +2814,10 @@ export const renderPage = (
         </section>
 
         <section id="transcript" aria-live="polite"></section>
+
+        <div id="typing" class="typing" aria-hidden="true"${typingHidden}>
+          <span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>
+        </div>
 
         <form id="turn-form" class="composer">
           <textarea id="message" name="message" aria-label="${escapeHtml(
