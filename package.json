@@ -10,7 +10,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "bun test",
+    "test": "bun test src",
     "build": "bun build --compile ./src/cli/index.ts --outfile ./dist/learn"
   },
   "devDependencies": {
