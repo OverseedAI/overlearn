@@ -263,7 +263,7 @@ describe("learn start/wait browser round trip", () => {
       const lessonPath = join(courseDir, "lessons", "01-intro.md");
       await writeFile(
         lessonPath,
-        "# Lesson One\n\nFresh **content**\n\n<script>alert(1)</script>",
+        "# Lesson One\n\nFresh **content** about Gradient.\n\n<script>alert(1)</script>",
         "utf8",
       );
       await firstProbe.waitForText("event: lesson", "SSE lesson event", 1_000);
@@ -285,7 +285,7 @@ describe("learn start/wait browser round trip", () => {
 
       await writeFile(
         lessonPath,
-        "# Lesson Revised\n\nUpdated **lesson**",
+        "# Lesson Revised\n\nUpdated **lesson** about Gradient.",
         "utf8",
       );
       await firstProbe.waitForText(
@@ -298,6 +298,81 @@ describe("learn start/wait browser round trip", () => {
         "SSE updated lesson emphasis",
         1_000,
       );
+
+      const emitGlossary = await runLearn(
+        [
+          "emit",
+          "glossary",
+          courseName,
+          "--term",
+          "Gradient",
+          "--def",
+          "Direction of steepest increase.",
+          "--lesson",
+          "01-intro",
+          "--json",
+        ],
+        env,
+      );
+
+      expect(emitGlossary.exitCode).toBe(0);
+      expect(emitGlossary.stderr).toBe("");
+      expect(JSON.parse(emitGlossary.stdout) as unknown).toEqual({
+        ok: true,
+        kind: "glossary",
+        action: "created",
+        coursePath: courseDir,
+        entry: {
+          term: "Gradient",
+          def: "Direction of steepest increase.",
+          lesson: "01-intro",
+          addedAt: expect.any(String),
+        },
+      });
+
+      await firstProbe.waitForText("event: glossary", "SSE glossary event");
+      await firstProbe.waitForText(
+        "Direction of steepest increase.",
+        "SSE glossary definition",
+      );
+      await firstProbe.waitForText(
+        'class=\\"term\\" data-term=\\"Gradient\\"',
+        "SSE glossary-linked lesson",
+      );
+
+      const updateGlossary = await runLearn(
+        [
+          "emit",
+          "glossary",
+          courseName,
+          "--term",
+          "gradient",
+          "--def",
+          "Updated direction definition.",
+        ],
+        env,
+      );
+
+      expect(updateGlossary.exitCode).toBe(0);
+      expect(updateGlossary.stderr).toBe("");
+      expect(updateGlossary.stdout.trim()).toBe("updated glossary term: gradient");
+
+      await firstProbe.waitForText(
+        "Updated direction definition.",
+        "SSE updated glossary definition",
+      );
+
+      const glossaryFile = JSON.parse(
+        await readFile(join(courseDir, "glossary.json"), "utf8"),
+      ) as unknown;
+      expect(glossaryFile).toEqual([
+        {
+          term: "gradient",
+          def: "Updated direction definition.",
+          lesson: "01-intro",
+          addedAt: expect.any(String),
+        },
+      ]);
 
       const wait = spawnLearn(["wait"], env);
       await firstProbe.waitForStatus("waiting-for-agent");
@@ -336,7 +411,7 @@ describe("learn start/wait browser round trip", () => {
       });
 
       const agentText = [
-        "Agent **reply**",
+        "Agent **reply** about Gradient",
         "",
         "```ts",
         "const value = 1;",
@@ -383,6 +458,8 @@ describe("learn start/wait browser round trip", () => {
       expect(reloadedHtml).toContain("01-intro");
       expect(reloadedHtml).toContain("<h1>Lesson Revised</h1>");
       expect(reloadedHtml).toContain("<strong>lesson</strong>");
+      expect(reloadedHtml).toContain('class="term" data-term="gradient"');
+      expect(reloadedHtml).toContain("Updated direction definition.");
       expect(reloadedHtml).toContain("hello from the browser");
       expect(reloadedHtml).toContain("Agent **reply**");
       expect(reloadedHtml).toContain("| item | value |");

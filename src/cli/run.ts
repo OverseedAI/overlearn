@@ -20,6 +20,17 @@ export type CliCommand =
         | Readonly<{ kind: "text"; text: string }>
         | Readonly<{ kind: "file"; path: string }>;
     }>
+  | Readonly<{
+      kind: "emit";
+      name?: string;
+      emit: Readonly<{
+        kind: "glossary";
+        term: string;
+        def: string;
+        lesson?: string;
+        json: boolean;
+      }>;
+    }>
   | Readonly<{ kind: "daemon"; courseDir: string }>;
 
 const formatHelp = (version: string): string =>
@@ -34,9 +45,13 @@ const formatHelp = (version: string): string =>
     "  learn status [name] --json",
     "  learn say [name] --text <markdown>",
     "  learn say [name] --file <path>",
+    "  learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]",
     "  learn --help",
     "  learn --version",
   ].join("\n");
+
+const emitGlossaryUsage =
+  "Usage: learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]";
 
 const result = (
   exitCode: CliExitCode,
@@ -151,6 +166,103 @@ const sayCommand = (args: readonly string[], version: string): CliCommand => {
   return result(1, formatHelp(version), "Usage: learn say [name] --text <markdown> or --file <path>");
 };
 
+const emitGlossaryCommand = (
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let index = 0;
+  const first = args[index];
+  const name = first !== undefined && !first.startsWith("-") ? first : undefined;
+
+  if (name !== undefined) {
+    index += 1;
+  }
+
+  let term: string | undefined;
+  let def: string | undefined;
+  let lesson: string | undefined;
+  let json = false;
+
+  while (index < args.length) {
+    const flag = args[index];
+    index += 1;
+
+    if (flag === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (flag !== "--term" && flag !== "--def" && flag !== "--lesson") {
+      return result(1, formatHelp(version), emitGlossaryUsage);
+    }
+
+    const value = args[index];
+    index += 1;
+
+    if (value === undefined) {
+      return result(1, formatHelp(version), emitGlossaryUsage);
+    }
+
+    if (flag === "--term") {
+      term = value;
+    } else if (flag === "--def") {
+      def = value;
+    } else {
+      lesson = value;
+    }
+  }
+
+  if (term === undefined || def === undefined) {
+    return result(1, formatHelp(version), emitGlossaryUsage);
+  }
+
+  if (term.trim().length === 0) {
+    return result(1, formatHelp(version), "Glossary term cannot be empty.");
+  }
+
+  if (def.trim().length === 0) {
+    return result(1, formatHelp(version), "Glossary definition cannot be empty.");
+  }
+
+  if (lesson !== undefined && lesson.trim().length === 0) {
+    return result(1, formatHelp(version), "Glossary lesson cannot be empty.");
+  }
+
+  return {
+    kind: "emit",
+    ...(name === undefined ? {} : { name }),
+    emit:
+      lesson === undefined
+        ? {
+            kind: "glossary",
+            term,
+            def,
+            json,
+          }
+        : {
+            kind: "glossary",
+            term,
+            def,
+            lesson,
+            json,
+          },
+  };
+};
+
+const emitCommand = (args: readonly string[], version: string): CliCommand => {
+  const [kind, ...rest] = args;
+
+  if (kind === "glossary") {
+    return emitGlossaryCommand(rest, version);
+  }
+
+  if (kind === undefined) {
+    return result(1, formatHelp(version), "Usage: learn emit <kind> ...");
+  }
+
+  return result(1, formatHelp(version), `Unknown emit kind: ${kind}`);
+};
+
 export const parseCli = (
   args: readonly string[],
   version: string,
@@ -187,6 +299,10 @@ export const parseCli = (
 
   if (arg === "say") {
     return sayCommand(rest, version);
+  }
+
+  if (arg === "emit") {
+    return emitCommand(rest, version);
   }
 
   if (arg === "__daemon") {
