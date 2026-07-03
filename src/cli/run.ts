@@ -10,6 +10,8 @@ export type CliCommand =
   | Readonly<{ kind: "result"; result: CliResult }>
   | Readonly<{ kind: "start"; name?: string }>
   | Readonly<{ kind: "wait"; name?: string }>
+  | Readonly<{ kind: "instructions"; name?: string; json: boolean }>
+  | Readonly<{ kind: "status"; name?: string; json: true }>
   | Readonly<{
       kind: "say";
       name?: string;
@@ -26,6 +28,8 @@ const formatHelp = (version: string): string =>
     "Usage:",
     "  learn start [name]",
     "  learn wait [name]",
+    "  learn instructions [name] [--json]",
+    "  learn status [name] --json",
     "  learn say [name] --text <markdown>",
     "  learn say [name] --file <path>",
     "  learn --help",
@@ -60,6 +64,44 @@ const optionalNameCommand = (
   }
 
   return name === undefined ? { kind } : { kind, name };
+};
+
+const optionalNameJsonCommand = (
+  kind: "instructions" | "status",
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let name: string | undefined;
+  let json = false;
+
+  for (const arg of args) {
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      return result(1, formatHelp(version), `Unknown option for ${kind}: ${arg}`);
+    }
+
+    if (name !== undefined) {
+      return result(1, formatHelp(version), `Too many arguments for ${kind}.`);
+    }
+
+    name = arg;
+  }
+
+  if (kind === "status") {
+    if (!json) {
+      return result(1, formatHelp(version), "Usage: learn status [name] --json");
+    }
+
+    return name === undefined
+      ? { kind, json: true }
+      : { kind, name, json: true };
+  }
+
+  return name === undefined ? { kind, json } : { kind, name, json };
 };
 
 const sayCommand = (args: readonly string[], version: string): CliCommand => {
@@ -113,6 +155,14 @@ export const parseCli = (
 
   if (arg === "wait") {
     return optionalNameCommand("wait", rest, version);
+  }
+
+  if (arg === "instructions") {
+    return optionalNameJsonCommand("instructions", rest, version);
+  }
+
+  if (arg === "status") {
+    return optionalNameJsonCommand("status", rest, version);
   }
 
   if (arg === "say") {

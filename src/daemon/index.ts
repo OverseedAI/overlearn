@@ -33,6 +33,12 @@ export type DaemonEndpoint = Readonly<{
   port: number;
 }>;
 
+export type CourseStatus = Readonly<{
+  daemonAlive: boolean;
+  waitPending: boolean;
+  courseDir: string | null;
+}>;
+
 type Env = Readonly<Record<string, string | undefined>>;
 
 type UiStatus = "waiting-for-agent" | "agent-working";
@@ -49,6 +55,11 @@ type Waiter = Readonly<{
 type WaitSetup =
   | Readonly<{ kind: "response"; response: Response }>
   | Readonly<{ kind: "wait"; response: Promise<Response> }>;
+
+type DaemonHealth = Readonly<{
+  coursePath: string;
+  waitPending: boolean;
+}>;
 
 export class LearnCommandError extends Error {
   readonly exitCode: 1 | 2;
@@ -107,21 +118,35 @@ const isPidAlive = (pid: number): boolean => {
   }
 };
 
+const readDaemonHealth = async (
+  metadata: DaemonMetadata,
+): Promise<DaemonHealth | undefined> => {
+  try {
+    const response = await fetch(formatDaemonUrl(metadata.port, "/api/health"));
+    if (!response.ok) {
+      return undefined;
+    }
+
+    const body = (await response.json()) as unknown;
+    if (!isRecord(body) || typeof body["coursePath"] !== "string") {
+      return undefined;
+    }
+
+    return {
+      coursePath: body["coursePath"],
+      waitPending: body["waitPending"] === true,
+    };
+  } catch {
+    return undefined;
+  }
+};
+
 const healthMatchesCourse = async (
   courseDir: string,
   metadata: DaemonMetadata,
 ): Promise<boolean> => {
-  try {
-    const response = await fetch(formatDaemonUrl(metadata.port, "/api/health"));
-    if (!response.ok) {
-      return false;
-    }
-
-    const body = (await response.json()) as unknown;
-    return isRecord(body) && body["coursePath"] === courseDir;
-  } catch {
-    return false;
-  }
+  const health = await readDaemonHealth(metadata);
+  return health?.coursePath === courseDir;
 };
 
 const isUsableDaemon = async (
@@ -274,6 +299,47 @@ export const waitForLearnerTurn = async (
   }
 
   return parseWaitResponse(response);
+};
+
+export const getCourseStatus = async (
+  name: string | undefined,
+  env: Env = process.env,
+  cwd = process.cwd(),
+): Promise<CourseStatus> => {
+  let courseDir: string;
+  try {
+    courseDir = await resolveCourseDirForWait(name, env, cwd);
+  } catch {
+    return {
+      daemonAlive: false,
+      waitPending: false,
+      courseDir: null,
+    };
+  }
+
+  const metadata = await readDaemonMetadata(courseDir);
+  if (metadata === undefined || !isPidAlive(metadata.pid)) {
+    return {
+      daemonAlive: false,
+      waitPending: false,
+      courseDir,
+    };
+  }
+
+  const health = await readDaemonHealth(metadata);
+  if (health?.coursePath !== courseDir) {
+    return {
+      daemonAlive: false,
+      waitPending: false,
+      courseDir,
+    };
+  }
+
+  return {
+    daemonAlive: true,
+    waitPending: health.waitPending,
+    courseDir,
+  };
 };
 
 const readAgentMessageText = async (
@@ -623,6 +689,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
             ok: true,
             coursePath,
             name: manifest.name,
+            waitPending: waiter !== undefined,
           }),
         );
         return;

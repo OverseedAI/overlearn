@@ -15,6 +15,8 @@ describe("runCli", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("learn say [name] --text <markdown>");
+    expect(result.stdout).toContain("learn instructions [name] [--json]");
+    expect(result.stdout).toContain("learn status [name] --json");
     expect(result.stdout).toContain("learn --help");
     expect(result.stdout).toContain("learn --version");
   });
@@ -38,6 +40,41 @@ describe("runCli", () => {
     expect(parseCli(["say", "--file", "reply.md"], "1.2.3")).toEqual({
       kind: "say",
       source: { kind: "file", path: "reply.md" },
+    });
+  });
+
+  test("parses instructions and status commands", () => {
+    expect(parseCli(["instructions"], "1.2.3")).toEqual({
+      kind: "instructions",
+      json: false,
+    });
+
+    expect(parseCli(["instructions", "demo", "--json"], "1.2.3")).toEqual({
+      kind: "instructions",
+      name: "demo",
+      json: true,
+    });
+
+    expect(parseCli(["status", "--json"], "1.2.3")).toEqual({
+      kind: "status",
+      json: true,
+    });
+
+    expect(parseCli(["status", "demo", "--json"], "1.2.3")).toEqual({
+      kind: "status",
+      name: "demo",
+      json: true,
+    });
+  });
+
+  test("requires JSON output for status", () => {
+    expect(parseCli(["status"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn status [name] --json"),
+        stderr: "Usage: learn status [name] --json",
+      },
     });
   });
 });
