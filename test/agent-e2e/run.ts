@@ -34,6 +34,7 @@ type LiveDaemon = Readonly<{
 }>;
 
 const MODEL = "claude-sonnet-5";
+const GRADER_MODEL = "claude-haiku-4-5-20251001";
 const SESSION_TIMEOUT_MS = 10 * 60 * 1_000;
 const POLL_MS = 500;
 
@@ -430,7 +431,7 @@ const runGrader = async (
       "--dangerously-skip-permissions",
       "--no-session-persistence",
       "--model",
-      MODEL,
+      GRADER_MODEL,
       "--max-budget-usd",
       "1.00",
       prompt,
