@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,7 +19,11 @@ type ByteReader = Readonly<{
 
 type SseProbe = Readonly<{
   waitForStatus: (status: string) => Promise<void>;
-  waitForText: (needle: string, label: string) => Promise<void>;
+  waitForText: (
+    needle: string,
+    label: string,
+    milliseconds?: number,
+  ) => Promise<void>;
 }>;
 
 const cliPath = fileURLToPath(new URL("./index.ts", import.meta.url));
@@ -168,7 +172,11 @@ const createSseProbe = (reader: ByteReader): SseProbe => {
   const decoder = new TextDecoder();
   let buffer = "";
 
-  const waitForText = async (needle: string, label: string): Promise<void> => {
+  const waitForText = async (
+    needle: string,
+    label: string,
+    milliseconds = 2_000,
+  ): Promise<void> => {
     await withTimeout(
       (async () => {
         while (true) {
@@ -188,7 +196,7 @@ const createSseProbe = (reader: ByteReader): SseProbe => {
           buffer += decoder.decode(chunk.value, { stream: true });
         }
       })(),
-      2_000,
+      milliseconds,
       label,
     );
   };
@@ -246,6 +254,45 @@ describe("learn start/wait browser round trip", () => {
         throw new Error("SSE stream did not open.");
       }
       const firstProbe = createSseProbe(firstReader);
+
+      const lessonPath = join(courseDir, "lessons", "01-intro.md");
+      await writeFile(
+        lessonPath,
+        "# Lesson One\n\nFresh **content**\n\n<script>alert(1)</script>",
+        "utf8",
+      );
+      await firstProbe.waitForText("event: lesson", "SSE lesson event", 1_000);
+      await firstProbe.waitForText(
+        "<h1>Lesson One</h1>",
+        "SSE rendered lesson heading",
+        1_000,
+      );
+      await firstProbe.waitForText(
+        "<strong>content</strong>",
+        "SSE rendered lesson emphasis",
+        1_000,
+      );
+      await firstProbe.waitForText(
+        "&lt;script&gt;alert(1)&lt;/script&gt;",
+        "SSE sanitized lesson script",
+        1_000,
+      );
+
+      await writeFile(
+        lessonPath,
+        "# Lesson Revised\n\nUpdated **lesson**",
+        "utf8",
+      );
+      await firstProbe.waitForText(
+        "<h1>Lesson Revised</h1>",
+        "SSE updated lesson heading",
+        1_000,
+      );
+      await firstProbe.waitForText(
+        "<strong>lesson</strong>",
+        "SSE updated lesson emphasis",
+        1_000,
+      );
 
       const wait = spawnLearn(["wait"], env);
       await firstProbe.waitForStatus("waiting-for-agent");
@@ -311,6 +358,9 @@ describe("learn start/wait browser round trip", () => {
       expect(reloadedPage.status).toBe(200);
 
       const reloadedHtml = await reloadedPage.text();
+      expect(reloadedHtml).toContain("01-intro");
+      expect(reloadedHtml).toContain("<h1>Lesson Revised</h1>");
+      expect(reloadedHtml).toContain("<strong>lesson</strong>");
       expect(reloadedHtml).toContain("hello from the browser");
       expect(reloadedHtml).toContain("Agent **reply**");
       expect(reloadedHtml).toContain("| item | value |");
