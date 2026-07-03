@@ -3,6 +3,7 @@ import type { FSWatcher } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 
+import type { GlossaryEntry } from "../course";
 import { renderMarkdown } from "./markdown";
 
 export type RenderedLesson = Readonly<{
@@ -24,6 +25,7 @@ export type LessonEvent =
 type LessonEventEmitterOptions = Readonly<{
   lessonsDir: string;
   debounceMs?: number;
+  getGlossary?: () => readonly GlossaryEntry[];
   emit: (event: LessonEvent) => void | Promise<void>;
   onError?: (error: unknown) => void;
 }>;
@@ -60,6 +62,7 @@ export const lessonIdFromFileName = (fileName: string): string =>
 export const readRenderedLessonFile = async (
   lessonsDir: string,
   fileName: string,
+  glossary: readonly GlossaryEntry[] = [],
 ): Promise<RenderedLesson | undefined> => {
   if (!isLessonFileName(fileName)) {
     return undefined;
@@ -76,7 +79,7 @@ export const readRenderedLessonFile = async (
     const markdown = await readFile(filePath, "utf8");
     return {
       id: lessonIdFromFileName(fileName),
-      html: renderMarkdown(markdown),
+      html: renderMarkdown(markdown, { glossary }),
       modifiedAtMs: fileStat.mtimeMs,
     };
   } catch (error) {
@@ -112,12 +115,15 @@ const latestLesson = (
 
 export const readLessonSnapshot = async (
   lessonsDir: string,
+  glossary: readonly GlossaryEntry[] = [],
 ): Promise<LessonSnapshot> => {
   const fileNames = (await readdir(lessonsDir))
     .filter(isLessonFileName)
     .sort((left, right) => left.localeCompare(right));
   const renderedLessons = await Promise.all(
-    fileNames.map((fileName) => readRenderedLessonFile(lessonsDir, fileName)),
+    fileNames.map((fileName) =>
+      readRenderedLessonFile(lessonsDir, fileName, glossary),
+    ),
   );
   const lessons = renderedLessons.flatMap((lesson) =>
     lesson === undefined ? [] : [lesson],
@@ -132,12 +138,13 @@ export const readLessonSnapshot = async (
 export const readLessonChangeEvent = async (
   lessonsDir: string,
   fileName: string,
+  glossary: readonly GlossaryEntry[] = [],
 ): Promise<LessonEvent | undefined> => {
   if (!isLessonFileName(fileName)) {
     return undefined;
   }
 
-  const lesson = await readRenderedLessonFile(lessonsDir, fileName);
+  const lesson = await readRenderedLessonFile(lessonsDir, fileName, glossary);
   return lesson === undefined
     ? { action: "delete", id: lessonIdFromFileName(fileName) }
     : { action: "upsert", lesson };
@@ -171,7 +178,11 @@ export const createLessonEventEmitter = (
       setTimeout(() => {
         timers.delete(fileName);
         void (async () => {
-          const event = await readLessonChangeEvent(options.lessonsDir, fileName);
+          const event = await readLessonChangeEvent(
+            options.lessonsDir,
+            fileName,
+            options.getGlossary?.() ?? [],
+          );
           if (event !== undefined) {
             await options.emit(event);
           }
@@ -188,7 +199,10 @@ export const createLessonEventEmitter = (
     snapshotTimer = setTimeout(() => {
       snapshotTimer = undefined;
       void (async () => {
-        const snapshot = await readLessonSnapshot(options.lessonsDir);
+        const snapshot = await readLessonSnapshot(
+          options.lessonsDir,
+          options.getGlossary?.() ?? [],
+        );
         await options.emit({ action: "snapshot", snapshot });
       })().catch(reportError);
     }, debounceMs);

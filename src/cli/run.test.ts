@@ -17,6 +17,7 @@ describe("runCli", () => {
     expect(result.stdout).toContain("learn say [name] --text <markdown>");
     expect(result.stdout).toContain("learn instructions [name] [--json]");
     expect(result.stdout).toContain("learn status [name] --json");
+    expect(result.stdout).toContain("learn emit glossary [name]");
     expect(result.stdout).toContain("learn --help");
     expect(result.stdout).toContain("learn --version");
   });
@@ -74,6 +75,50 @@ describe("runCli", () => {
         exitCode: 1,
         stdout: expect.stringContaining("learn status [name] --json"),
         stderr: "Usage: learn status [name] --json",
+      },
+    });
+  });
+
+  test("parses glossary emit commands", () => {
+    expect(
+      parseCli(
+        [
+          "emit",
+          "glossary",
+          "demo",
+          "--term",
+          "State",
+          "--def",
+          "A remembered value.",
+          "--lesson",
+          "01-intro",
+          "--json",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "emit",
+      name: "demo",
+      emit: {
+        kind: "glossary",
+        term: "State",
+        def: "A remembered value.",
+        lesson: "01-intro",
+        json: true,
+      },
+    });
+
+    const emptyTerm = parseCli(
+      ["emit", "glossary", "--term", " ", "--def", "Definition."],
+      "1.2.3",
+    );
+
+    expect(emptyTerm).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit glossary"),
+        stderr: "Glossary term cannot be empty.",
       },
     });
   });
