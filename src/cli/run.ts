@@ -10,6 +10,13 @@ export type CliCommand =
   | Readonly<{ kind: "result"; result: CliResult }>
   | Readonly<{ kind: "start"; name?: string }>
   | Readonly<{ kind: "wait"; name?: string }>
+  | Readonly<{
+      kind: "say";
+      name?: string;
+      source:
+        | Readonly<{ kind: "text"; text: string }>
+        | Readonly<{ kind: "file"; path: string }>;
+    }>
   | Readonly<{ kind: "daemon"; courseDir: string }>;
 
 const formatHelp = (version: string): string =>
@@ -19,6 +26,8 @@ const formatHelp = (version: string): string =>
     "Usage:",
     "  learn start [name]",
     "  learn wait [name]",
+    "  learn say [name] --text <markdown>",
+    "  learn say [name] --file <path>",
     "  learn --help",
     "  learn --version",
   ].join("\n");
@@ -53,6 +62,37 @@ const optionalNameCommand = (
   return name === undefined ? { kind } : { kind, name };
 };
 
+const sayCommand = (args: readonly string[], version: string): CliCommand => {
+  const [first, second, third, fourth] = args;
+  const hasName = first !== undefined && !first.startsWith("-");
+  const name = hasName ? first : undefined;
+  const flag = hasName ? second : first;
+  const value = hasName ? third : second;
+  const extra = hasName ? fourth : third;
+
+  if (flag === undefined || value === undefined || extra !== undefined) {
+    return result(1, formatHelp(version), "Usage: learn say [name] --text <markdown> or --file <path>");
+  }
+
+  if (flag === "--text") {
+    return {
+      kind: "say",
+      ...(name === undefined ? {} : { name }),
+      source: { kind: "text", text: value },
+    };
+  }
+
+  if (flag === "--file") {
+    return {
+      kind: "say",
+      ...(name === undefined ? {} : { name }),
+      source: { kind: "file", path: value },
+    };
+  }
+
+  return result(1, formatHelp(version), "Usage: learn say [name] --text <markdown> or --file <path>");
+};
+
 export const parseCli = (
   args: readonly string[],
   version: string,
@@ -73,6 +113,10 @@ export const parseCli = (
 
   if (arg === "wait") {
     return optionalNameCommand("wait", rest, version);
+  }
+
+  if (arg === "say") {
+    return sayCommand(rest, version);
   }
 
   if (arg === "__daemon") {

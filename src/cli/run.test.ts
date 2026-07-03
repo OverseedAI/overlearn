@@ -14,11 +14,12 @@ describe("runCli", () => {
     const result = runCli([], "1.2.3");
 
     expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("learn say [name] --text <markdown>");
     expect(result.stdout).toContain("learn --help");
     expect(result.stdout).toContain("learn --version");
   });
 
-  test("parses start and wait commands", () => {
+  test("parses start, wait, and say commands", () => {
     expect(parseCli(["start", "demo"], "1.2.3")).toEqual({
       kind: "start",
       name: "demo",
@@ -26,6 +27,17 @@ describe("runCli", () => {
 
     expect(parseCli(["wait"], "1.2.3")).toEqual({
       kind: "wait",
+    });
+
+    expect(parseCli(["say", "demo", "--text", "**hello**"], "1.2.3")).toEqual({
+      kind: "say",
+      name: "demo",
+      source: { kind: "text", text: "**hello**" },
+    });
+
+    expect(parseCli(["say", "--file", "reply.md"], "1.2.3")).toEqual({
+      kind: "say",
+      source: { kind: "file", path: "reply.md" },
     });
   });
 });

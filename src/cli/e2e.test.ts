@@ -17,6 +17,11 @@ type ByteReader = Readonly<{
   read: () => Promise<Readonly<{ done: boolean; value?: unknown }>>;
 }>;
 
+type SseProbe = Readonly<{
+  waitForStatus: (status: string) => Promise<void>;
+  waitForText: (needle: string, label: string) => Promise<void>;
+}>;
+
 const cliPath = fileURLToPath(new URL("./index.ts", import.meta.url));
 const liveDaemonPids = new Set<number>();
 
@@ -159,34 +164,40 @@ const submitMessage = async (url: string, text: string): Promise<void> => {
   expect(response.status).toBe(200);
 };
 
-const readStatusFromSse = async (
-  reader: ByteReader,
-  status: string,
-): Promise<void> => {
+const createSseProbe = (reader: ByteReader): SseProbe => {
   const decoder = new TextDecoder();
   let buffer = "";
 
-  await withTimeout(
-    (async () => {
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) {
-          throw new Error("SSE stream closed before status arrived.");
-        }
+  const waitForText = async (needle: string, label: string): Promise<void> => {
+    await withTimeout(
+      (async () => {
+        while (true) {
+          if (buffer.includes(needle)) {
+            return;
+          }
 
-        if (!(chunk.value instanceof Uint8Array)) {
-          throw new Error("SSE stream returned a non-byte chunk.");
-        }
+          const chunk = await reader.read();
+          if (chunk.done) {
+            throw new Error(`SSE stream closed before ${label} arrived.`);
+          }
 
-        buffer += decoder.decode(chunk.value, { stream: true });
-        if (buffer.includes(`"status":"${status}"`)) {
-          return;
+          if (!(chunk.value instanceof Uint8Array)) {
+            throw new Error("SSE stream returned a non-byte chunk.");
+          }
+
+          buffer += decoder.decode(chunk.value, { stream: true });
         }
-      }
-    })(),
-    2_000,
-    `SSE status ${status}`,
-  );
+      })(),
+      2_000,
+      label,
+    );
+  };
+
+  return {
+    waitForStatus: async (status) =>
+      waitForText(`"status":"${status}"`, `SSE status ${status}`),
+    waitForText,
+  };
 };
 
 afterEach(async () => {
@@ -234,13 +245,13 @@ describe("learn start/wait browser round trip", () => {
       if (firstReader === undefined) {
         throw new Error("SSE stream did not open.");
       }
+      const firstProbe = createSseProbe(firstReader);
 
       const wait = spawnLearn(["wait"], env);
-      await readStatusFromSse(firstReader, "waiting-for-agent");
+      await firstProbe.waitForStatus("waiting-for-agent");
       await submitMessage(url, "hello from the browser");
 
       const waitResult = await collectProcess(wait, "learn wait");
-      firstSseAbort.abort();
 
       expect(waitResult.exitCode).toBe(0);
       expect(waitResult.stderr).toBe("");
@@ -255,17 +266,57 @@ describe("learn start/wait browser round trip", () => {
         events: [{ type: "message", text: "hello from the browser" }],
       });
 
+      const agentText = [
+        "Agent **reply**",
+        "",
+        "```ts",
+        "const value = 1;",
+        "```",
+        "",
+        "| item | value |",
+        "| --- | --- |",
+        "| status | persisted |",
+        "",
+        "[bad](javascript:alert(1))",
+        "<script>alert(1)</script>",
+      ].join("\n");
+      const say = await runLearn(["say", courseName, "--text", agentText], env);
+
+      expect(say.exitCode).toBe(0);
+      expect(say.stdout).toBe("");
+      expect(say.stderr).toBe("");
+
+      await firstProbe.waitForText("\"role\":\"agent\"", "SSE agent message");
+      await firstProbe.waitForText("Agent **reply**", "SSE agent markdown");
+      firstSseAbort.abort();
+
       const transcriptLines = (
         await readFile(join(courseDir, "transcript.jsonl"), "utf8")
       )
         .trim()
         .split("\n");
-      expect(transcriptLines).toHaveLength(1);
+      expect(transcriptLines).toHaveLength(2);
       expect(JSON.parse(transcriptLines[0] ?? "{}")).toEqual({
         role: "learner",
         text: "hello from the browser",
         at: expect.any(String),
       });
+      expect(JSON.parse(transcriptLines[1] ?? "{}")).toEqual({
+        role: "agent",
+        text: agentText,
+        at: expect.any(String),
+      });
+
+      const reloadedPage = await fetch(url);
+      expect(reloadedPage.status).toBe(200);
+
+      const reloadedHtml = await reloadedPage.text();
+      expect(reloadedHtml).toContain("hello from the browser");
+      expect(reloadedHtml).toContain("Agent **reply**");
+      expect(reloadedHtml).toContain("| item | value |");
+      expect(reloadedHtml).toContain(
+        "\\u003Cscript\\u003Ealert(1)\\u003C/script\\u003E",
+      );
 
       const reconnect = await runLearn(["start", courseName], env);
       expect(reconnect.exitCode).toBe(0);
@@ -283,11 +334,12 @@ describe("learn start/wait browser round trip", () => {
       if (secondReader === undefined) {
         throw new Error("SSE stream did not open.");
       }
+      const secondProbe = createSseProbe(secondReader);
 
-      await readStatusFromSse(secondReader, "agent-working");
+      await secondProbe.waitForStatus("agent-working");
 
       const secondWait = spawnLearn(["wait"], env);
-      await readStatusFromSse(secondReader, "waiting-for-agent");
+      await secondProbe.waitForStatus("waiting-for-agent");
 
       await killDaemon(daemon.pid);
       secondSseAbort.abort();
