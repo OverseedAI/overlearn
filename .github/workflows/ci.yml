@@ -64,7 +64,7 @@ jobs:
 
       - name: Skip without Anthropic key
         if: ${{ env.ANTHROPIC_API_KEY == '' }}
-        run: echo "Skipping agent E2E: ANTHROPIC_API_KEY is not set."
+        run: 'echo "Skipping agent E2E: ANTHROPIC_API_KEY is not set."'
 
       - name: Install Claude Code
         if: ${{ env.ANTHROPIC_API_KEY != '' }}
