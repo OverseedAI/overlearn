@@ -308,7 +308,7 @@ svg .draw {
           vector-effect="non-scaling-stroke" fill="none" stroke="var(--rose)" stroke-width="2"
           pathLength="100" style="--len:100; --d:0.9s"/>
       </svg>
-      <div class="cordon-label chalk-text chalk-in" style="--d:1.1s">DO NOT ERASE ✕</div>
+      <div class="cordon-label chalk-text chalk-in" style="--d:1.1s">Get started ↓</div>
       <div class="cmd chalk-in" style="--d:1.35s">
         <code id="install-cmd">curl -fsSL https://overlearn.org/install.sh | bash</code>
         <button class="copy-btn" id="copy" type="button" aria-label="Copy install command">copy</button>
@@ -404,7 +404,7 @@ svg .draw {
           <a href="https://github.com/OverseedAI/overlearn#install">install guide</a>
         </nav>
         <div class="hand chalk-in" style="--d:1.5s; color: var(--dust); font-size: clamp(1.1rem, 2.4vmin, 1.4rem); margin-top: 1.4rem">
-          the command is up there — it was never going to get erased
+          the command is up there — it never gets erased
           <svg viewBox="0 0 60 46" aria-hidden="true" style="width:34px; height:26px; vertical-align:-4px; margin-left:8px">
             <path class="draw" d="M6,42 C22,34 38,22 50,8 M50,22 L51,6 L36,8" fill="none"
               stroke="var(--rose)" stroke-width="3" stroke-linecap="round" pathLength="100" style="--len:100; --d:1.8s"/>
