@@ -119,8 +119,7 @@ print_agent_setup() {
   cat <<'AGENT_SETUP'
 
 Claude Code setup (optional, run it yourself):
-  claude plugin marketplace add OverseedAI/overlearn
-  claude plugin install overlearn@overlearn
+  learn install claude-code
 AGENT_SETUP
 }
 
@@ -157,6 +156,7 @@ print_agent_setup
 cat <<'QUICKSTART'
 
 Quickstart:
+  learn install claude-code
   learn start my-course
   /learn in Claude Code
 QUICKSTART

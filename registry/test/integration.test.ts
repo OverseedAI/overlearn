@@ -373,7 +373,8 @@ describe("installer", () => {
     const body = await response.text();
     expect(body).toStartWith("#!/usr/bin/env bash\n");
     expect(body).toContain("OVERLEARN_VERSION");
-    expect(body).toContain("claude plugin install overlearn@overlearn");
+    expect(body).toContain("learn install claude-code");
+    expect(body).not.toContain("claude plugin install overlearn@overlearn");
 
     const alias = await fetchWorker("/install");
     expect(alias.status).toBe(200);
@@ -436,6 +437,7 @@ describe("installer", () => {
     expect(result.stdout).toContain(`Installed learn to ${installDir}/learn`);
     expect(result.stdout).toContain("PATH hint:");
     expect(result.stdout).toContain("Claude Code setup (optional, run it yourself):");
+    expect(result.stdout).toContain("learn install claude-code");
     expect(result.stdout).toContain("Quickstart:");
     expect(result.stderr).toBe("");
 

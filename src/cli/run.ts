@@ -1,4 +1,5 @@
 import { isValidConceptId, parseKeyPointsText } from "../course";
+import type { HarnessTool } from "../harness";
 
 export type CliExitCode = 0 | 1 | 2;
 
@@ -15,6 +16,18 @@ export type CliCommand =
   | Readonly<{ kind: "wait"; name?: string }>
   | Readonly<{ kind: "instructions"; name?: string; json: boolean }>
   | Readonly<{ kind: "instructions-eject"; toDir?: string; force: boolean }>
+  | Readonly<{
+      kind: "install";
+      tool: HarnessTool;
+      project: boolean;
+      force: boolean;
+    }>
+  | Readonly<{
+      kind: "uninstall";
+      tool: HarnessTool;
+      project: boolean;
+      force: boolean;
+    }>
   | Readonly<{ kind: "status"; name?: string; json: true }>
   | Readonly<{
       kind: "export";
@@ -91,6 +104,8 @@ const formatHelp = (version: string): string =>
     "  learn wait [name]",
     "  learn instructions [name] [--json]",
     "  learn instructions --eject [--to <dir>] [--force]",
+    "  learn install <claude-code|codex> [--project] [--force]",
+    "  learn uninstall <claude-code|codex> [--project] [--force]",
     "  learn status [name] --json",
     "  learn export [name] [--out <dir>] [--include-transcript] [--force] [--json]",
     "  learn share [name] [--json]",
@@ -227,6 +242,10 @@ const exportUsage =
 const shareUsage = "Usage: learn share [name] [--json]";
 const unpublishUsage = "Usage: learn unpublish [name-or-slug] [--json]";
 const fetchUsage = "Usage: learn fetch <slug-or-url> [--force] [--json]";
+const installUsage =
+  "Usage: learn install <claude-code|codex> [--project] [--force]";
+const uninstallUsage =
+  "Usage: learn uninstall <claude-code|codex> [--project] [--force]";
 
 const instructionsCommand = (
   args: readonly string[],
@@ -906,6 +925,62 @@ const fetchCommand = (
   return { kind: "fetch", input, force, json };
 };
 
+const parseHarnessTool = (
+  value: string | undefined,
+): HarnessTool | undefined =>
+  value === "claude-code" || value === "codex" ? value : undefined;
+
+const harnessCommand = (
+  kind: "install" | "uninstall",
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let tool: HarnessTool | undefined;
+  let project = false;
+  let force = false;
+  const usage = kind === "install" ? installUsage : uninstallUsage;
+
+  for (const arg of args) {
+    if (arg === "--project") {
+      project = true;
+      continue;
+    }
+
+    if (arg === "--force") {
+      force = true;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      return result(1, formatHelp(version), usage);
+    }
+
+    if (tool !== undefined) {
+      return result(1, formatHelp(version), `Too many arguments for ${kind}.`);
+    }
+
+    tool = parseHarnessTool(arg);
+    if (tool === undefined) {
+      return result(
+        1,
+        formatHelp(version),
+        `Unknown tool for ${kind}: ${arg}. Expected claude-code or codex.`,
+      );
+    }
+  }
+
+  if (tool === undefined) {
+    return result(1, formatHelp(version), usage);
+  }
+
+  return {
+    kind,
+    tool,
+    project,
+    force,
+  };
+};
+
 export const parseCli = (
   args: readonly string[],
   version: string,
@@ -934,6 +1009,14 @@ export const parseCli = (
 
   if (arg === "instructions") {
     return instructionsCommand(rest, version);
+  }
+
+  if (arg === "install") {
+    return harnessCommand("install", rest, version);
+  }
+
+  if (arg === "uninstall") {
+    return harnessCommand("uninstall", rest, version);
   }
 
   if (arg === "status") {
