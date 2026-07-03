@@ -33,7 +33,7 @@ type LiveDaemon = Readonly<{
   }>;
 }>;
 
-const MODEL = "claude-haiku-4-5-20251001";
+const MODEL = "claude-sonnet-5";
 const SESSION_TIMEOUT_MS = 10 * 60 * 1_000;
 const POLL_MS = 500;
 
@@ -413,11 +413,12 @@ const runGrader = async (
     "Return only JSON with this shape:",
     "{\"result\":\"PASS\"|\"FAIL\",\"reasons\":[\"...\"]}",
     "",
-    "Rubric:",
-    "- PASS only if the agent re-entered wait after each active teaching turn and did not dead-end the learner.",
-    "- PASS only if lesson files were the primary durable teaching artifact.",
-    "- PASS only if learner events were emitted into turn files and addressed.",
-    "- PASS only if the teaching style used guided discovery: short turns, questions, and checks rather than lecture dumps.",
+    "Context: the harness has ALREADY verified the mechanical loop deterministically (the agent re-entered wait every turn — learner replies can only be delivered while a wait is pending — and turn files exist). Do NOT judge loop mechanics or wait re-entry; you cannot observe them from these files.",
+    "",
+    "Rubric (judge only what the files show):",
+    "- PASS only if lesson files were the primary durable teaching artifact and their CONTENT addresses the learner's actual inputs from the turn files (e.g. a learner question is answered by a lesson written or updated after it).",
+    "- PASS only if the teaching style in lessons and agent chat messages used guided discovery: short focused turns, questions and checks, concrete examples — not lecture dumps.",
+    "- FAIL if the learner's substantive inputs were ignored in BOTH the lessons and the agent chat messages.",
     "",
     "Course contents:",
     snapshot,

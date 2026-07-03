@@ -20,8 +20,11 @@ Each teaching turn:
    `lessons/<nn>-<slug>.md`.
 4. Keep the lesson note short enough that the learner can review it during the
    course.
-5. Optionally use `learn say <course> --text <markdown>` for conversational
-   glue, a brief prompt, or a pointer to the lesson file.
+5. ALWAYS send one short `learn say <course> --text <markdown>` per teaching
+   turn: acknowledge the learner's input in a sentence, name the lesson file
+   you just wrote or updated, and pose the current check question. Keep it to
+   a few lines — the lesson file carries the substance, the say carries the
+   conversation.
 6. ALWAYS launch `learn wait <course>` as a background task after acting.
 7. STOP after launching the background wait. Do not continue until it exits.
 
