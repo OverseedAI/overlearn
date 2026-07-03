@@ -539,6 +539,95 @@ describe("learn start/wait browser round trip", () => {
         events: [{ type: "nav", path: "indexes/btree" }],
       });
 
+      await writeFile(
+        join(courseDir, "demos", "growth.html"),
+        [
+          "<!doctype html>",
+          "<html>",
+          "<body><button id=\"count\">0</button>",
+          "<script>",
+          "count.addEventListener('click', () => { count.textContent = String(Number(count.textContent) + 1); });",
+          "</script></body>",
+          "</html>",
+        ].join(""),
+        "utf8",
+      );
+
+      const emitDemo = await runLearn(
+        [
+          "emit",
+          "demo",
+          courseName,
+          "--file",
+          "growth.html",
+          "--topic",
+          "indexes/btree",
+          "--title",
+          "Growth curve",
+          "--json",
+        ],
+        env,
+      );
+
+      expect(emitDemo.exitCode).toBe(0);
+      expect(emitDemo.stderr).toBe("");
+      expect(JSON.parse(emitDemo.stdout) as unknown).toMatchObject({
+        ok: true,
+        kind: "demo",
+        action: "created",
+        coursePath: courseDir,
+        demo: {
+          file: "growth.html",
+          title: "Growth curve",
+          addedAt: expect.any(String),
+        },
+        topic: {
+          path: "indexes/btree",
+          demos: [
+            {
+              file: "growth.html",
+              title: "Growth curve",
+              addedAt: expect.any(String),
+            },
+          ],
+        },
+      });
+
+      await firstProbe.waitForText("event: message", "SSE demo message", 1_000);
+      await firstProbe.waitForText('"kind":"demo"', "SSE demo kind", 1_000);
+      await firstProbe.waitForText(
+        'sandbox=\\"allow-scripts\\"',
+        "SSE sandboxed demo iframe",
+        1_000,
+      );
+      await firstProbe.waitForText(
+        '"demos":[{"file":"growth.html"',
+        "SSE demo topic leaf",
+        1_000,
+      );
+
+      const servedDemo = await fetch(`${url}/demos/growth.html`);
+      expect(servedDemo.status).toBe(200);
+      expect(servedDemo.headers.get("content-security-policy")).toBe(
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:;",
+      );
+      expect(servedDemo.headers.get("content-type")).toContain("text/html");
+      expect(await servedDemo.text()).toContain("count.addEventListener");
+
+      const traversalDemo = await fetch(`${url}/demos/../course.json`);
+      expect(traversalDemo.status).toBe(404);
+
+      await writeFile(
+        join(courseDir, "lessons", "02-demo.md"),
+        '# Demo Lesson\n\n:::demo growth.html "Inline lesson demo"',
+        "utf8",
+      );
+      await firstProbe.waitForText(
+        "Inline lesson demo",
+        "SSE lesson demo directive",
+        1_000,
+      );
+
       const agentText = [
         "Agent **reply** about Gradient",
         "",
@@ -568,13 +657,20 @@ describe("learn start/wait browser round trip", () => {
       )
         .trim()
         .split("\n");
-      expect(transcriptLines).toHaveLength(2);
+      expect(transcriptLines).toHaveLength(3);
       expect(JSON.parse(transcriptLines[0] ?? "{}")).toEqual({
         role: "learner",
         text: "hello from the browser",
         at: expect.any(String),
       });
       expect(JSON.parse(transcriptLines[1] ?? "{}")).toEqual({
+        role: "agent",
+        kind: "demo",
+        file: "growth.html",
+        title: "Growth curve",
+        at: expect.any(String),
+      });
+      expect(JSON.parse(transcriptLines[2] ?? "{}")).toEqual({
         role: "agent",
         text: agentText,
         at: expect.any(String),
@@ -593,6 +689,10 @@ describe("learn start/wait browser round trip", () => {
       expect(reloadedHtml).toContain("Updated direction definition.");
       expect(reloadedHtml).toContain("hello from the browser");
       expect(reloadedHtml).toContain("Agent **reply**");
+      expect(reloadedHtml).toContain("Growth curve");
+      expect(reloadedHtml).toContain('sandbox=\\"allow-scripts\\"');
+      expect(reloadedHtml).not.toContain("allow-same-origin");
+      expect(reloadedHtml).toContain('data-demo-file="growth.html"');
       expect(reloadedHtml).toContain("| item | value |");
       expect(reloadedHtml).toContain(
         "\\u003Cscript\\u003Ealert(1)\\u003C/script\\u003E",

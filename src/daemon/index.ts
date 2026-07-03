@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import {
   createServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
   appendAgentTranscript,
@@ -16,6 +16,7 @@ import {
   requireCourse,
   getCoursePaths,
   isValidTopicPath,
+  isValidDemoFileName,
   readCourseManifest,
   readDaemonMetadata,
   readGlossary,
@@ -27,6 +28,7 @@ import {
   writeTurnFile,
   type DaemonMetadata,
   type CoursePaths,
+  type DemoEntry,
   type GlossaryEntry,
   type TopicNode,
   type TranscriptEntry,
@@ -38,7 +40,7 @@ import {
   watchLessonDirectory,
   type LessonEvent,
 } from "./lessons";
-import { renderMarkdown } from "./markdown";
+import { renderDemoEmbed, renderMarkdown } from "./markdown";
 import { watchTopicFile } from "./topics";
 import { renderPage } from "./ui";
 
@@ -113,6 +115,9 @@ const textResponse = (
       "content-type": "text/plain; charset=utf-8",
     },
   });
+
+const DEMO_CSP =
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:;";
 
 const formatPublicUrl = (port: number): string =>
   `http://${LOCALHOST_PRINT_HOST}:${port}`;
@@ -374,6 +379,112 @@ const readAgentMessageText = async (
     ? source.text
     : await readFile(resolve(cwd, source.path), "utf8");
 
+const readDemoFileSet = async (
+  demosDir: string,
+): Promise<ReadonlySet<string>> => {
+  let entries: string[];
+  try {
+    entries = await readdir(demosDir);
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return new Set();
+    }
+
+    throw error;
+  }
+
+  const fileNames = await Promise.all(
+    entries
+      .filter(isValidDemoFileName)
+      .map(async (fileName) => {
+        try {
+          return (await stat(join(demosDir, fileName))).isFile()
+            ? fileName
+            : undefined;
+        } catch (error) {
+          if (
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "ENOENT"
+          ) {
+            return undefined;
+          }
+
+          throw error;
+        }
+      }),
+  );
+
+  return new Set(
+    fileNames.flatMap((fileName) =>
+      fileName === undefined ? [] : [fileName],
+    ),
+  );
+};
+
+const demoFileFromPath = (pathName: string): string | undefined => {
+  if (!pathName.startsWith("/demos/")) {
+    return undefined;
+  }
+
+  const encodedFile = pathName.slice("/demos/".length);
+  if (encodedFile.length === 0 || encodedFile.includes("/")) {
+    return undefined;
+  }
+
+  try {
+    const file = decodeURIComponent(encodedFile);
+    return isValidDemoFileName(file) ? file : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+const demoResponse = async (
+  demosDir: string,
+  pathName: string,
+): Promise<Response | undefined> => {
+  const file = demoFileFromPath(pathName);
+  if (file === undefined) {
+    return undefined;
+  }
+
+  const filePath = join(demosDir, file);
+
+  try {
+    const fileStat = await stat(filePath);
+    if (!fileStat.isFile()) {
+      return textResponse("Demo not found", 404);
+    }
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return textResponse("Demo not found", 404);
+    }
+
+    throw error;
+  }
+
+  return new Response(Bun.file(filePath), {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      // Inline demos are self-contained. The iframe sandbox omits
+      // allow-same-origin, and this CSP blocks network reach-back.
+      "content-security-policy": DEMO_CSP,
+    },
+  });
+};
+
 const notifyAgentMessage = async (
   metadata: DaemonMetadata,
   entry: TranscriptEntry,
@@ -416,6 +527,14 @@ export const sayAgentMessage = async (
 
   const at = new Date().toISOString();
   const entry = await appendAgentTranscript(courseDir, text, at);
+
+  return notifyAgentTranscriptEntry(courseDir, entry);
+};
+
+export const notifyAgentTranscriptEntry = async (
+  courseDir: string,
+  entry: TranscriptEntry,
+): Promise<string | undefined> => {
   const metadata = await readDaemonMetadata(courseDir);
 
   if (
@@ -435,6 +554,8 @@ const createSseHub = (
   getStatus: () => UiStatus,
   getGlossary: () => readonly GlossaryEntry[],
   getTopics: () => readonly TopicNode[],
+  getUnassignedDemos: () => readonly DemoEntry[],
+  getDemoFiles: () => ReadonlySet<string>,
 ) => {
   const subscribers = new Set<ServerResponse>();
 
@@ -459,7 +580,15 @@ const createSseHub = (
 
   const renderTranscriptEntry = (entry: TranscriptEntry) => ({
     ...entry,
-    html: renderMarkdown(entry.text, { glossary: getGlossary() }),
+    html:
+      entry.kind === "demo"
+        ? renderDemoEmbed(entry.file, entry.title, {
+            demoFiles: getDemoFiles(),
+          })
+        : renderMarkdown(entry.text, {
+            glossary: getGlossary(),
+            demoFiles: getDemoFiles(),
+          }),
   });
 
   const broadcastMessage = (entry: TranscriptEntry): void => {
@@ -488,9 +617,12 @@ const createSseHub = (
     }
   };
 
-  const broadcastTopics = (topics: readonly TopicNode[]): void => {
+  const broadcastTopics = (
+    topics: readonly TopicNode[],
+    unassignedDemos: readonly DemoEntry[],
+  ): void => {
     for (const subscriber of subscribers) {
-      writeEvent(subscriber, "topics", { topics });
+      writeEvent(subscriber, "topics", { topics, unassignedDemos });
     }
   };
 
@@ -506,7 +638,10 @@ const createSseHub = (
     subscribers.add(response);
     writeEvent(response, "status", { status: getStatus() });
     writeEvent(response, "glossary", { entries: getGlossary() });
-    writeEvent(response, "topics", { topics: getTopics() });
+    writeEvent(response, "topics", {
+      topics: getTopics(),
+      unassignedDemos: getUnassignedDemos(),
+    });
 
     request.on("close", () => {
       subscribers.delete(response);
@@ -577,10 +712,36 @@ const parseAgentMessage = (bodyText: string): TranscriptEntry => {
   }
 
   const role = body["role"];
+  const kind = body["kind"];
   const text = body["text"];
+  const file = body["file"];
+  const title = body["title"];
   const at = body["at"];
 
-  if (role !== "agent" || typeof text !== "string" || typeof at !== "string") {
+  if (role !== "agent" || typeof at !== "string") {
+    throw new Error("Expected JSON body with agent role and at fields.");
+  }
+
+  if (kind === "demo") {
+    if (
+      typeof file !== "string" ||
+      !isValidDemoFileName(file) ||
+      (title !== undefined &&
+        (typeof title !== "string" || title.trim().length === 0))
+    ) {
+      throw new Error("Expected JSON demo body with a valid file.");
+    }
+
+    return {
+      role,
+      kind,
+      file,
+      ...(title === undefined ? {} : { title: title.trim() }),
+      at,
+    };
+  }
+
+  if ((kind !== undefined && kind !== "text") || typeof text !== "string") {
     throw new Error("Expected JSON body with agent role, text, and at fields.");
   }
 
@@ -624,6 +785,8 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   let manifest = await readCourseManifest(coursePath);
   let glossaryEntries = await readGlossary(coursePath);
   let topicTree = manifest.topics;
+  let unassignedDemos = manifest.unassignedDemos;
+  let demoFileSet = await readDemoFileSet(coursePaths.demosDir);
 
   let status: UiStatus = "agent-working";
   let waiter: Waiter | undefined;
@@ -634,15 +797,22 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     () => status,
     () => glossaryEntries,
     () => topicTree,
+    () => unassignedDemos,
+    () => demoFileSet,
   );
   const refreshGlossary = async (): Promise<void> => {
     await serialize(async () => {
       glossaryEntries = await readGlossary(coursePath);
+      demoFileSet = await readDemoFileSet(coursePaths.demosDir);
       sseHub.broadcastGlossary(glossaryEntries);
 
       const [transcript, lessons] = await Promise.all([
         readTranscript(coursePath),
-        readLessonSnapshot(coursePaths.lessonsDir, glossaryEntries),
+        readLessonSnapshot(
+          coursePaths.lessonsDir,
+          glossaryEntries,
+          demoFileSet,
+        ),
       ]);
 
       sseHub.broadcastLesson({ action: "snapshot", snapshot: lessons });
@@ -653,13 +823,16 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     await serialize(async () => {
       manifest = await readCourseManifest(coursePath);
       topicTree = manifest.topics;
-      sseHub.broadcastTopics(topicTree);
+      unassignedDemos = manifest.unassignedDemos;
+      demoFileSet = await readDemoFileSet(coursePaths.demosDir);
+      sseHub.broadcastTopics(topicTree, unassignedDemos);
     });
   };
 
   const lessonWatcher = watchLessonDirectory({
     lessonsDir: coursePaths.lessonsDir,
     getGlossary: () => glossaryEntries,
+    getDemoFiles: () => demoFileSet,
     emit: (event) => {
       sseHub.broadcastLesson(event);
     },
@@ -836,6 +1009,10 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       return textResponse(message, 400);
     }
 
+    if (entry.kind === "demo") {
+      demoFileSet = await readDemoFileSet(coursePaths.demosDir);
+    }
+
     sseHub.broadcastMessage(entry);
     return jsonResponse({ ok: true });
   };
@@ -848,13 +1025,28 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         `http://${LOCALHOST_BIND_HOST}`,
       );
 
+      if (method === "GET" && requestUrl.pathname.startsWith("/demos/")) {
+        await sendResponse(
+          response,
+          (await demoResponse(coursePaths.demosDir, requestUrl.pathname)) ??
+            textResponse("Invalid demo path", 400),
+        );
+        return;
+      }
+
       if (method === "GET" && requestUrl.pathname === "/") {
         manifest = await readCourseManifest(coursePath);
         topicTree = manifest.topics;
+        unassignedDemos = manifest.unassignedDemos;
         glossaryEntries = await readGlossary(coursePath);
+        demoFileSet = await readDemoFileSet(coursePaths.demosDir);
         const [transcript, lessons] = await Promise.all([
           readTranscript(coursePath),
-          readLessonSnapshot(coursePaths.lessonsDir, glossaryEntries),
+          readLessonSnapshot(
+            coursePaths.lessonsDir,
+            glossaryEntries,
+            demoFileSet,
+          ),
         ]);
         await sendResponse(
           response,
@@ -865,6 +1057,8 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
               lessons,
               glossaryEntries,
               topicTree,
+              unassignedDemos,
+              demoFileSet,
             ),
             {
               headers: { "content-type": "text/html; charset=utf-8" },

@@ -5,9 +5,11 @@ import { join } from "node:path";
 
 import {
   ensureCourseScaffold,
+  isValidDemoFileName,
   isValidTopicPath,
   readCourseManifest,
   readPendingEvents,
+  registerDemo,
   requireCourse,
   resolveCourseDirForWait,
   upsertGlossaryEntry,
@@ -346,6 +348,138 @@ describe("topic storage", () => {
       await expect(readCourseManifest(paths.courseDir)).rejects.toThrow(
         "legacy flat topic arrays are no longer supported",
       );
+    } finally {
+      await rm(coursesDir, { force: true, recursive: true });
+    }
+  });
+});
+
+describe("demo storage", () => {
+  test("validates demo file names", () => {
+    expect(isValidDemoFileName("growth.html")).toBe(true);
+    expect(isValidDemoFileName("nested/growth.html")).toBe(false);
+    expect(isValidDemoFileName("../growth.html")).toBe(false);
+    expect(isValidDemoFileName("growth.htm")).toBe(false);
+    expect(isValidDemoFileName("growth.html/extra")).toBe(false);
+    expect(isValidDemoFileName("growth\\demo.html")).toBe(false);
+  });
+
+  test("registers demos under explicit, current, and unassigned topics", async () => {
+    const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-demo-"));
+    const env = { OVERLEARN_COURSES_DIR: coursesDir };
+
+    try {
+      const paths = await ensureCourseScaffold("demos", env);
+      await writeFile(join(paths.demosDir, "growth.html"), "<h1>Growth</h1>", "utf8");
+      await writeFile(join(paths.demosDir, "rates.html"), "<h1>Rates</h1>", "utf8");
+      await writeFile(join(paths.demosDir, "loose.html"), "<h1>Loose</h1>", "utf8");
+
+      await expect(
+        registerDemo(paths.courseDir, { file: "../secret.html" }),
+      ).rejects.toThrow("Invalid demo file");
+
+      await expect(
+        registerDemo(paths.courseDir, { file: "missing.html" }),
+      ).rejects.toThrow("Demo file does not exist: demos/missing.html");
+
+      const unassigned = await registerDemo(
+        paths.courseDir,
+        { file: "loose.html", title: "Loose demo" },
+        new Date("2026-01-01T00:00:00Z"),
+      );
+
+      expect(unassigned).toEqual({
+        action: "created",
+        demo: {
+          file: "loose.html",
+          title: "Loose demo",
+          addedAt: "2026-01-01T00:00:00.000Z",
+        },
+        topics: [],
+        unassignedDemos: [
+          {
+            file: "loose.html",
+            title: "Loose demo",
+            addedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      });
+
+      await upsertTopic(
+        paths.courseDir,
+        { path: "finance/rule-of-72", title: "Rule of 72" },
+        new Date("2026-01-02T00:00:00Z"),
+      );
+
+      const current = await registerDemo(
+        paths.courseDir,
+        { file: "growth.html", title: "Growth curve" },
+        new Date("2026-01-03T00:00:00Z"),
+      );
+
+      expect(current.topic?.path).toBe("finance/rule-of-72");
+      expect(current.demo).toEqual({
+        file: "growth.html",
+        title: "Growth curve",
+        addedAt: "2026-01-03T00:00:00.000Z",
+      });
+
+      await upsertTopic(
+        paths.courseDir,
+        { path: "finance/rates", title: "Rates" },
+        new Date("2026-01-04T00:00:00Z"),
+      );
+
+      const explicit = await registerDemo(
+        paths.courseDir,
+        { file: "rates.html", topic: "finance/rule-of-72" },
+        new Date("2026-01-05T00:00:00Z"),
+      );
+
+      expect(explicit.topic?.path).toBe("finance/rule-of-72");
+      expect(explicit.topic?.demos).toEqual([
+        {
+          file: "growth.html",
+          title: "Growth curve",
+          addedAt: "2026-01-03T00:00:00.000Z",
+        },
+        {
+          file: "rates.html",
+          addedAt: "2026-01-05T00:00:00.000Z",
+        },
+      ]);
+
+      await expect(
+        registerDemo(paths.courseDir, {
+          file: "growth.html",
+          topic: "finance/missing",
+        }),
+      ).rejects.toThrow("Topic does not exist: finance/missing");
+
+      const manifest = await readCourseManifest(paths.courseDir);
+      const finance = manifest.topics.find((topic) => topic.path === "finance");
+      const ruleOf72 = finance?.children.find(
+        (topic) => topic.path === "finance/rule-of-72",
+      );
+
+      expect(manifest.unassignedDemos).toEqual([
+        {
+          file: "loose.html",
+          title: "Loose demo",
+          addedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ]);
+      expect(ruleOf72?.demos).toEqual([
+        {
+          file: "growth.html",
+          title: "Growth curve",
+          addedAt: "2026-01-03T00:00:00.000Z",
+        },
+        {
+          file: "rates.html",
+          addedAt: "2026-01-05T00:00:00.000Z",
+        },
+      ]);
     } finally {
       await rm(coursesDir, { force: true, recursive: true });
     }

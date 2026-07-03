@@ -19,6 +19,7 @@ describe("runCli", () => {
     expect(result.stdout).toContain("learn status [name] --json");
     expect(result.stdout).toContain("learn resume <name>");
     expect(result.stdout).toContain("learn emit glossary [name]");
+    expect(result.stdout).toContain("learn emit demo [name]");
     expect(result.stdout).toContain("learn --help");
     expect(result.stdout).toContain("learn --version");
   });
@@ -136,6 +137,79 @@ describe("runCli", () => {
         exitCode: 1,
         stdout: expect.stringContaining("learn emit glossary"),
         stderr: "Glossary term cannot be empty.",
+      },
+    });
+  });
+});
+
+describe("emit demo CLI parsing", () => {
+  test("parses demo emit commands", () => {
+    expect(
+      parseCli(
+        [
+          "emit",
+          "demo",
+          "demo-course",
+          "--file",
+          "growth.html",
+          "--topic",
+          "indexes/btree",
+          "--title",
+          "Growth curve",
+          "--json",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "emit",
+      name: "demo-course",
+      emit: {
+        kind: "demo",
+        file: "growth.html",
+        topic: "indexes/btree",
+        title: "Growth curve",
+        json: true,
+      },
+    });
+
+    expect(parseCli(["emit", "demo", "--file", "growth.html"], "1.2.3")).toEqual({
+      kind: "emit",
+      emit: {
+        kind: "demo",
+        file: "growth.html",
+        json: false,
+      },
+    });
+  });
+
+  test("rejects missing and empty demo fields", () => {
+    expect(parseCli(["emit", "demo"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit demo"),
+        stderr:
+          "Usage: learn emit demo [name] --file <file.html> [--topic <topic/path>] [--title <title>] [--json]",
+      },
+    });
+
+    expect(parseCli(["emit", "demo", "--file", " "], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit demo"),
+        stderr: "Demo file cannot be empty.",
+      },
+    });
+
+    expect(
+      parseCli(["emit", "demo", "--file", "growth.html", "--topic", " "], "1.2.3"),
+    ).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit demo"),
+        stderr: "Demo topic cannot be empty.",
       },
     });
   });

@@ -38,6 +38,13 @@ export type CliCommand =
             title?: string;
             lesson?: string;
             json: boolean;
+          }>
+        | Readonly<{
+            kind: "demo";
+            file: string;
+            topic?: string;
+            title?: string;
+            json: boolean;
           }>;
     }>
   | Readonly<{ kind: "daemon"; courseDir: string }>;
@@ -57,6 +64,7 @@ const formatHelp = (version: string): string =>
     "  learn say [name] --file <path>",
     "  learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]",
     "  learn emit topic [name] --enter <topic/path> [--title <title>] [--lesson <lesson-id>] [--json]",
+    "  learn emit demo [name] --file <file.html> [--topic <topic/path>] [--title <title>] [--json]",
     "  learn --help",
     "  learn --version",
   ].join("\n");
@@ -65,6 +73,8 @@ const emitGlossaryUsage =
   "Usage: learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]";
 const emitTopicUsage =
   "Usage: learn emit topic [name] --enter <topic/path> [--title <title>] [--lesson <lesson-id>] [--json]";
+const emitDemoUsage =
+  "Usage: learn emit demo [name] --file <file.html> [--topic <topic/path>] [--title <title>] [--json]";
 
 const result = (
   exitCode: CliExitCode,
@@ -420,6 +430,81 @@ const emitTopicCommand = (
   };
 };
 
+const emitDemoCommand = (
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let index = 0;
+  const first = args[index];
+  const name = first !== undefined && !first.startsWith("-") ? first : undefined;
+
+  if (name !== undefined) {
+    index += 1;
+  }
+
+  let file: string | undefined;
+  let topic: string | undefined;
+  let title: string | undefined;
+  let json = false;
+
+  while (index < args.length) {
+    const flag = args[index];
+    index += 1;
+
+    if (flag === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (flag !== "--file" && flag !== "--topic" && flag !== "--title") {
+      return result(1, formatHelp(version), emitDemoUsage);
+    }
+
+    const value = args[index];
+    index += 1;
+
+    if (value === undefined) {
+      return result(1, formatHelp(version), emitDemoUsage);
+    }
+
+    if (flag === "--file") {
+      file = value;
+    } else if (flag === "--topic") {
+      topic = value;
+    } else {
+      title = value;
+    }
+  }
+
+  if (file === undefined) {
+    return result(1, formatHelp(version), emitDemoUsage);
+  }
+
+  if (file.trim().length === 0) {
+    return result(1, formatHelp(version), "Demo file cannot be empty.");
+  }
+
+  if (topic !== undefined && topic.trim().length === 0) {
+    return result(1, formatHelp(version), "Demo topic cannot be empty.");
+  }
+
+  if (title !== undefined && title.trim().length === 0) {
+    return result(1, formatHelp(version), "Demo title cannot be empty.");
+  }
+
+  return {
+    kind: "emit",
+    ...(name === undefined ? {} : { name }),
+    emit: {
+      kind: "demo",
+      file,
+      ...(topic === undefined ? {} : { topic }),
+      ...(title === undefined ? {} : { title }),
+      json,
+    },
+  };
+};
+
 const emitCommand = (args: readonly string[], version: string): CliCommand => {
   const [kind, ...rest] = args;
 
@@ -429,6 +514,10 @@ const emitCommand = (args: readonly string[], version: string): CliCommand => {
 
   if (kind === "topic") {
     return emitTopicCommand(rest, version);
+  }
+
+  if (kind === "demo") {
+    return emitDemoCommand(rest, version);
   }
 
   if (kind === undefined) {
