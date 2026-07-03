@@ -15,6 +15,8 @@ type RenderedTranscriptEntry = TranscriptEntry &
     html: string;
   }>;
 
+type UiRenderStatus = "waiting-for-agent" | "agent-working";
+
 const escapeHtml = (value: string): string =>
   value
     .replaceAll("&", "&amp;")
@@ -46,7 +48,11 @@ const initialTopics = __TOPICS__;
 const initialUnassignedDemos = __UNASSIGNED_DEMOS__;
 const initialMastery = __MASTERY__;
 const initialActiveFeynman = __ACTIVE_FEYNMAN__ ?? undefined;
+const initialStatus = __STATUS__;
+const initialHasSeenWait = __HAS_SEEN_WAIT__;
 const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
+const enabledComposerLabel = "Message the agent…";
+const disabledComposerLabel = "The agent is teaching — you can reply when it pauses";
 
 const form = document.querySelector("#turn-form");
 const textarea = document.querySelector("#message");
@@ -82,7 +88,8 @@ let transcriptEntries = [...initialTranscript];
 let glossary = [...initialGlossary];
 let activeFeynman = initialActiveFeynman;
 let submittedFeynmanConcept = undefined;
-let currentStatus = "agent-working";
+let currentStatus = initialStatus;
+let hasSeenWait = initialHasSeenWait;
 let activeView = "lessons";
 let currentTermElement = undefined;
 let hideTermCardTimer = undefined;
@@ -395,11 +402,11 @@ const createTopicList = (nodes, nested = false) => {
 
     const chip = document.createElement("span");
     chip.className = "mastery-chip";
-    chip.textContent = masteryEntry === undefined ? "--" : String(masteryEntry.score);
+    chip.textContent = masteryEntry === undefined ? "—" : String(masteryEntry.score);
     chip.setAttribute(
       "aria-label",
       masteryEntry === undefined
-        ? "ungraded"
+        ? "not graded yet"
         : "mastery score " + masteryEntry.score + " out of 100",
     );
 
@@ -746,10 +753,28 @@ const renderFeynmanPanel = () => {
   setFeynmanControls();
 };
 
-const applyStatus = (status) => {
+const statusText = (waiting) => {
+  if (waiting) {
+    return "Your turn — the agent is waiting";
+  }
+
+  return hasSeenWait
+    ? "Agent is working…"
+    : "Waiting for the agent to start teaching";
+};
+
+const applyComposerLabel = (waiting) => {
+  const label = waiting ? enabledComposerLabel : disabledComposerLabel;
+  textarea.placeholder = label;
+  textarea.setAttribute("aria-label", label);
+};
+
+const applyStatus = (status, nextHasSeenWait = hasSeenWait) => {
   currentStatus = status;
+  hasSeenWait = nextHasSeenWait;
   const waiting = status === "waiting-for-agent";
-  statusLine.textContent = waiting ? "Waiting for your message" : "Agent is working…";
+  statusLine.textContent = statusText(waiting);
+  applyComposerLabel(waiting);
   textarea.disabled = !waiting;
   submitButton.disabled = !waiting || textarea.value.trim().length === 0;
   setFeynmanControls();
@@ -815,6 +840,7 @@ renderGlossaryList();
 renderViewTabs();
 renderFeynmanPanel();
 renderTranscript();
+applyStatus(currentStatus, hasSeenWait);
 
 textarea.addEventListener("input", () => {
   submitButton.disabled = textarea.disabled || textarea.value.trim().length === 0;
@@ -939,7 +965,8 @@ window.addEventListener("resize", () => {
 
 const events = new EventSource("/api/events");
 events.addEventListener("status", (event) => {
-  applyStatus(JSON.parse(event.data).status);
+  const payload = JSON.parse(event.data);
+  applyStatus(payload.status, payload.hasSeenWait ?? hasSeenWait);
 });
 events.addEventListener("message", (event) => {
   appendEntry(JSON.parse(event.data));
@@ -1070,7 +1097,7 @@ const masteryTitle = (topic: TopicNode, entry: MasteryEntry | undefined): string
 
 const masteryChipHtml = (entry: MasteryEntry | undefined): string =>
   entry === undefined
-    ? '<span class="mastery-chip" aria-label="ungraded">--</span>'
+    ? '<span class="mastery-chip" aria-label="not graded yet">—</span>'
     : `<span class="mastery-chip" aria-label="mastery score ${entry.score} out of 100">${entry.score}</span>`;
 
 const masteryButtonContent = (
@@ -1268,8 +1295,26 @@ const renderLessonContent = (
   return `<div id="lesson-content" class="lesson-content prose" aria-live="polite">${lesson.html}</div>`;
 };
 
+const renderStatusText = (
+  status: UiRenderStatus,
+  hasSeenWait: boolean,
+): string => {
+  if (status === "waiting-for-agent") {
+    return "Your turn — the agent is waiting";
+  }
+
+  return hasSeenWait
+    ? "Agent is working…"
+    : "Waiting for the agent to start teaching";
+};
+
+const composerLabel = (status: UiRenderStatus): string =>
+  status === "waiting-for-agent"
+    ? "Message the agent…"
+    : "The agent is teaching — you can reply when it pauses";
+
 export const renderPage = (
-  courseName: string,
+  courseTitle: string,
   transcript: readonly TranscriptEntry[],
   lessons: LessonSnapshot,
   glossary: readonly GlossaryEntry[],
@@ -1278,7 +1323,11 @@ export const renderPage = (
   masteryScores: readonly MasteryEntry[],
   demoFiles: ReadonlySet<string>,
   activeFeynmanCheck: ActiveFeynmanCheck | undefined,
+  status: UiRenderStatus = "agent-working",
+  hasSeenWait = false,
 ): string => {
+  const composerDisabled = status === "waiting-for-agent" ? "" : " disabled";
+  const composerPlaceholder = composerLabel(status);
   const script = clientScript
     .replace(
       "__TRANSCRIPT__",
@@ -1292,14 +1341,17 @@ export const renderPage = (
     .replace(
       "__ACTIVE_FEYNMAN__",
       escapeScriptJson(activeFeynmanCheck ?? null),
-    );
+    )
+    .replace("__STATUS__", escapeScriptJson(status))
+    .replace("__HAS_SEEN_WAIT__", escapeScriptJson(hasSeenWait));
 
   return `<!doctype html>
 <html lang="en" class="scheme-only-dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${escapeHtml(courseName)} - overlearn</title>
+  <title>${escapeHtml(courseTitle)} - overlearn</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%238fbf73'/%3E%3Cpath d='M22 43V21h6v8h8v-8h6v22h-6v-9h-8v9z' fill='%2311110f'/%3E%3C/svg%3E">
   <style>
     :root {
       color-scheme: dark;
@@ -1314,6 +1366,18 @@ export const renderPage = (
 
     [hidden] {
       display: none !important;
+    }
+
+    button:focus-visible,
+    a:focus-visible,
+    .term:focus-visible {
+      outline: 2px solid #8fbf73;
+      outline-offset: 2px;
+    }
+
+    textarea:focus-visible {
+      outline: 2px solid #8fbf73;
+      outline-offset: 0;
     }
 
     body {
@@ -1525,7 +1589,7 @@ export const renderPage = (
       color: #cfcfca;
       padding: 0.08rem 0.34rem;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      font-size: 0.72rem;
+      font-size: 0.8125rem;
       font-weight: 700;
       line-height: 1.4;
       text-align: center;
@@ -1712,6 +1776,11 @@ export const renderPage = (
       padding: 1rem 1.125rem;
     }
 
+    .lesson-content.prose {
+      width: min(100%, 70ch);
+      max-width: 70ch;
+    }
+
     .glossary-pane {
       min-height: 0;
       overflow-y: auto;
@@ -1831,7 +1900,7 @@ export const renderPage = (
     .feynman-kicker {
       color: #ffd79a;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      font-size: 0.75rem;
+      font-size: 0.8125rem;
       font-weight: 700;
       letter-spacing: 0.04em;
       text-transform: uppercase;
@@ -1853,7 +1922,7 @@ export const renderPage = (
       color: #ffe1ae;
       padding: 0.18rem 0.5rem;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      font-size: 0.78rem;
+      font-size: 0.8125rem;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
@@ -1890,10 +1959,6 @@ export const renderPage = (
       min-height: 8rem;
       border-color: #75552d;
       background: #17130e;
-    }
-
-    .feynman-answer:focus {
-      outline-color: #d49a4a;
     }
 
     .feynman-submit {
@@ -2066,7 +2131,10 @@ export const renderPage = (
       font-size: 1.2rem;
     }
 
-    .lesson-content h3,
+    .lesson-content h3 {
+      font-size: 1.08rem;
+    }
+
     .lesson-content h4,
     .lesson-content h5,
     .lesson-content h6,
@@ -2091,10 +2159,8 @@ export const renderPage = (
       cursor: help;
     }
 
-    .term:focus {
+    .term:focus-visible {
       border-radius: 4px;
-      outline: 2px solid #8fbf73;
-      outline-offset: 2px;
     }
 
     .term-card {
@@ -2132,6 +2198,14 @@ export const renderPage = (
       font-size: 0.9em;
     }
 
+    .prose blockquote {
+      border-left: 3px solid #8fbf73;
+      border-radius: 0 6px 6px 0;
+      background: rgb(255 255 255 / 2%);
+      color: #cfdcc5;
+      padding: 0.05rem 0 0.05rem 0.85rem;
+    }
+
     .prose pre {
       overflow-x: auto;
       border-radius: 8px;
@@ -2144,6 +2218,7 @@ export const renderPage = (
       display: block;
       background: transparent;
       padding: 0;
+      font-size: 0.875rem;
       white-space: pre;
     }
 
@@ -2159,7 +2234,7 @@ export const renderPage = (
     .prose table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.95rem;
+      font-size: 0.96rem;
     }
 
     .prose th,
@@ -2194,11 +2269,6 @@ export const renderPage = (
       padding: 0.8rem 0.875rem;
       font: inherit;
       line-height: 1.5;
-    }
-
-    textarea:focus {
-      outline: 2px solid #8fbf73;
-      outline-offset: 0;
     }
 
     textarea:disabled {
@@ -2301,7 +2371,7 @@ export const renderPage = (
 <body>
   <main class="shell">
     <header>
-      <h1>${escapeHtml(courseName)}</h1>
+      <h1>${escapeHtml(courseTitle)}</h1>
       <nav class="view-tabs" aria-label="Study view" role="tablist">
         <button class="view-tab active" type="button" data-view="lessons" role="tab" aria-selected="true">Lessons</button>
         <button class="view-tab" type="button" data-view="glossary" role="tab" aria-selected="false">Glossary</button>
@@ -2337,7 +2407,7 @@ export const renderPage = (
       <aside class="chat-pane" aria-label="Chat">
         <div class="chat-header">
           <h2>Chat</h2>
-          <p id="status">Agent is working…</p>
+          <p id="status">${escapeHtml(renderStatusText(status, hasSeenWait))}</p>
         </div>
 
         <section id="feynman-panel" class="feynman-panel" aria-labelledby="feynman-heading" hidden>
@@ -2360,7 +2430,9 @@ export const renderPage = (
         <section id="transcript" aria-live="polite"></section>
 
         <form id="turn-form" class="composer">
-          <textarea id="message" name="message" aria-label="Message" placeholder="Message" disabled></textarea>
+          <textarea id="message" name="message" aria-label="${escapeHtml(
+            composerPlaceholder,
+          )}" placeholder="${escapeHtml(composerPlaceholder)}"${composerDisabled}></textarea>
           <button id="submit" class="send-button" type="submit" disabled>Send</button>
         </form>
       </aside>
