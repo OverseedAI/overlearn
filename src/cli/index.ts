@@ -11,6 +11,7 @@ import {
 import {
   getCourseStatus,
   LearnCommandError,
+  notifyAgentTranscriptEntry,
   resumeCourseDaemon,
   runDaemon,
   sayAgentMessage,
@@ -18,9 +19,12 @@ import {
   waitForLearnerTurn,
 } from "../daemon";
 import {
+  appendAgentDemoTranscript,
+  registerDemo,
   resolveCourseDirForWait,
   upsertGlossaryEntry,
   upsertTopic,
+  type DemoMutation,
   type GlossaryMutation,
   type TopicMutation,
 } from "../course";
@@ -104,6 +108,27 @@ const formatTopicEmitOutput = (
   }
 
   return `${mutation.action} topic: ${mutation.topic.path}`;
+};
+
+const formatDemoEmitOutput = (
+  coursePath: string,
+  mutation: DemoMutation,
+  json: boolean,
+): string => {
+  if (json) {
+    return JSON.stringify({
+      ok: true,
+      kind: "demo",
+      action: mutation.action,
+      coursePath,
+      demo: mutation.demo,
+      ...(mutation.topic === undefined ? {} : { topic: mutation.topic }),
+      topics: mutation.topics,
+      unassignedDemos: mutation.unassignedDemos,
+    });
+  }
+
+  return `${mutation.action} demo: ${mutation.demo.file}`;
 };
 
 const main = async (): Promise<CliResult> => {
@@ -190,6 +215,34 @@ const main = async (): Promise<CliResult> => {
         exitCode: 0,
         stdout: formatTopicEmitOutput(coursePath, mutation, command.emit.json),
       };
+    }
+
+    if (command.emit.kind === "demo") {
+      const now = new Date();
+      const mutation = await registerDemo(coursePath, command.emit, now);
+      const entry = await appendAgentDemoTranscript(
+        coursePath,
+        mutation.demo.file,
+        mutation.demo.title,
+        now.toISOString(),
+      );
+      const warning = await notifyAgentTranscriptEntry(coursePath, entry);
+      const stdout = formatDemoEmitOutput(
+        coursePath,
+        mutation,
+        command.emit.json,
+      );
+
+      return warning === undefined
+        ? {
+            exitCode: 0,
+            stdout,
+          }
+        : {
+            exitCode: 0,
+            stdout,
+            stderr: warning,
+          };
     }
 
     const mutation = await upsertGlossaryEntry(coursePath, command.emit);

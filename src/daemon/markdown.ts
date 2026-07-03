@@ -1,7 +1,8 @@
-import type { GlossaryEntry } from "../course";
+import { isValidDemoFileName, type GlossaryEntry } from "../course";
 
 export type MarkdownRenderOptions = Readonly<{
   glossary?: readonly GlossaryEntry[];
+  demoFiles?: ReadonlySet<string> | readonly string[];
 }>;
 
 const tick = String.fromCharCode(96);
@@ -20,6 +21,17 @@ type LinkableGlossaryTerm = Readonly<{
   escapedTermKey: string;
   key: string;
 }>;
+
+type DemoDirective =
+  | Readonly<{
+      ok: true;
+      file: string;
+      title?: string;
+    }>
+  | Readonly<{
+      ok: false;
+      message: string;
+    }>;
 
 const escapeHtml = (value: string): string =>
   value
@@ -184,6 +196,120 @@ const renderBlock = (
   glossary: readonly GlossaryEntry[],
 ): string => linkGlossaryTermsInHtml(html, glossary);
 
+const isStringArray = (
+  value: ReadonlySet<string> | readonly string[],
+): value is readonly string[] => Array.isArray(value);
+
+const demoFileIsAvailable = (
+  file: string,
+  demoFiles: MarkdownRenderOptions["demoFiles"],
+): boolean => {
+  if (demoFiles === undefined) {
+    return true;
+  }
+
+  if (isStringArray(demoFiles)) {
+    return demoFiles.includes(file);
+  }
+
+  return demoFiles.has(file);
+};
+
+const renderDemoWarning = (message: string): string =>
+  `<div class="demo-card demo-warning" role="note"><div class="demo-titlebar"><div class="demo-title">Demo unavailable</div></div><p>${escapeHtml(
+    message,
+  )}</p></div>`;
+
+export const renderDemoEmbed = (
+  file: string,
+  title: string | undefined,
+  options: MarkdownRenderOptions = {},
+): string => {
+  if (!isValidDemoFileName(file)) {
+    return renderDemoWarning(
+      `Invalid demo file "${file}". Demos must be .html files directly inside demos/.`,
+    );
+  }
+
+  if (!demoFileIsAvailable(file, options.demoFiles)) {
+    return renderDemoWarning(`Missing demo file: demos/${file}`);
+  }
+
+  const displayTitle = title ?? file;
+  const href = `/demos/${encodeURIComponent(file)}`;
+
+  return [
+    `<article class="demo-card" data-demo-file="${escapeHtml(file)}">`,
+    '<div class="demo-titlebar">',
+    `<div class="demo-title"><span class="demo-badge">demo</span>${escapeHtml(
+      displayTitle,
+    )}</div>`,
+    '<div class="demo-actions">',
+    `<button class="demo-action" type="button" data-demo-fullscreen aria-label="Full screen demo ${escapeHtml(
+      displayTitle,
+    )}" title="Full screen">Full</button>`,
+    `<a class="demo-action" href="${escapeHtml(
+      href,
+    )}" target="_blank" rel="noopener noreferrer" title="Open in new tab">Open</a>`,
+    "</div>",
+    "</div>",
+    // No allow-same-origin: the sandboxed document gets an opaque origin; the
+    // demo response CSP blocks network fetches while allowing inline demos.
+    `<iframe class="demo-frame" src="${escapeHtml(href)}" title="${escapeHtml(
+      displayTitle,
+    )}" sandbox="allow-scripts" loading="lazy"></iframe>`,
+    "</article>",
+  ].join("");
+};
+
+export const parseDemoDirective = (line: string): DemoDirective | undefined => {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith(":::demo")) {
+    return undefined;
+  }
+
+  const body = trimmed.slice(":::demo".length).trim();
+  if (body.length === 0) {
+    return {
+      ok: false,
+      message: "Invalid demo directive: expected :::demo <file.html>.",
+    };
+  }
+
+  const match = /^(\S+)(?:\s+"([^"]+)")?\s*$/.exec(body);
+  if (match === null) {
+    return {
+      ok: false,
+      message: "Invalid demo directive: expected :::demo <file.html> \"Title\".",
+    };
+  }
+
+  const file = match[1];
+  const title = match[2];
+  if (file === undefined) {
+    return {
+      ok: false,
+      message: "Invalid demo directive: expected a file name.",
+    };
+  }
+
+  if (title !== undefined && title.trim().length === 0) {
+    return {
+      ok: false,
+      message: "Invalid demo directive: title cannot be empty.",
+    };
+  }
+
+  return {
+    ok: true,
+    file,
+    ...(title === undefined ? {} : { title: title.trim() }),
+  };
+};
+
+const isDemoDirectiveLine = (line: string): boolean =>
+  line.trim().startsWith(":::demo");
+
 const renderPlainInline = (text: string): string => {
   const escaped = escapeHtml(text);
 
@@ -317,6 +443,7 @@ const renderParagraph = (
     if (
       line.trim().length === 0 ||
       line.startsWith(markdownFence) ||
+      isDemoDirectiveLine(line) ||
       isListLine(line) ||
       (line.includes("|") && isTableSeparator(nextLine))
     ) {
@@ -348,6 +475,20 @@ export const renderMarkdown = (
     const line = lines[index] ?? "";
 
     if (line.trim().length === 0) {
+      index += 1;
+      continue;
+    }
+
+    const demoDirective = parseDemoDirective(line);
+    if (demoDirective !== undefined) {
+      blocks.push(
+        renderBlock(
+          demoDirective.ok
+            ? renderDemoEmbed(demoDirective.file, demoDirective.title, options)
+            : renderDemoWarning(demoDirective.message),
+          glossary,
+        ),
+      );
       index += 1;
       continue;
     }

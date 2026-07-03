@@ -17,6 +17,7 @@ export type CourseManifest = Readonly<{
   name: string;
   createdAt: string;
   topics: readonly TopicNode[];
+  unassignedDemos: readonly DemoEntry[];
 }>;
 
 export type TopicNode = Readonly<{
@@ -25,6 +26,7 @@ export type TopicNode = Readonly<{
   lesson?: string;
   enteredAt?: string;
   current: boolean;
+  demos?: readonly DemoEntry[];
   children: readonly TopicNode[];
 }>;
 
@@ -75,11 +77,22 @@ export type TurnFile = Readonly<{
   events: readonly TurnEvent[];
 }>;
 
-export type TranscriptEntry = Readonly<{
+export type TextTranscriptEntry = Readonly<{
   role: "learner" | "agent";
   text: string;
   at: string;
+  kind?: "text";
 }>;
+
+export type DemoTranscriptEntry = Readonly<{
+  role: "agent";
+  kind: "demo";
+  file: string;
+  title?: string;
+  at: string;
+}>;
+
+export type TranscriptEntry = TextTranscriptEntry | DemoTranscriptEntry;
 
 export type GlossaryEntry = Readonly<{
   term: string;
@@ -109,6 +122,26 @@ export type TopicMutation = Readonly<{
   action: "created" | "updated";
   topic: TopicNode;
   topics: readonly TopicNode[];
+}>;
+
+export type DemoEntry = Readonly<{
+  file: string;
+  title?: string;
+  addedAt: string;
+}>;
+
+export type DemoInput = Readonly<{
+  file: string;
+  title?: string;
+  topic?: string;
+}>;
+
+export type DemoMutation = Readonly<{
+  action: "created" | "updated";
+  demo: DemoEntry;
+  topic?: TopicNode;
+  topics: readonly TopicNode[];
+  unassignedDemos: readonly DemoEntry[];
 }>;
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -196,8 +229,66 @@ export const isValidTopicPath = (path: string): boolean =>
   !path.endsWith("/") &&
   path.split("/").every(isValidCourseName);
 
+export const isValidDemoFileName = (fileName: string): boolean =>
+  fileName.length > ".html".length &&
+  fileName === basename(fileName) &&
+  !fileName.includes("\\") &&
+  fileName.endsWith(".html");
+
 const invalidTopicMessage = (filePath: string): string =>
   `Invalid course topics in ${filePath}: expected topic tree nodes.`;
+
+const invalidDemoMessage = (filePath: string): string =>
+  `Invalid course demos in ${filePath}: expected demo entries.`;
+
+const parseDemoEntry = (
+  value: unknown,
+  filePath: string,
+  location: string,
+): DemoEntry => {
+  if (!isRecord(value)) {
+    throw new Error(invalidDemoMessage(filePath));
+  }
+
+  const file = value["file"];
+  const title = value["title"];
+  const addedAt = value["addedAt"];
+
+  if (
+    typeof file !== "string" ||
+    !isValidDemoFileName(file) ||
+    (title !== undefined &&
+      (typeof title !== "string" || title.trim().length === 0)) ||
+    typeof addedAt !== "string" ||
+    addedAt.trim().length === 0
+  ) {
+    throw new Error(`${invalidDemoMessage(filePath)} Invalid entry at ${location}.`);
+  }
+
+  return {
+    file,
+    ...(title === undefined ? {} : { title: title.trim() }),
+    addedAt,
+  };
+};
+
+const parseDemoEntries = (
+  value: unknown,
+  filePath: string,
+  location: string,
+): readonly DemoEntry[] => {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(invalidDemoMessage(filePath));
+  }
+
+  return value.map((entry, index) =>
+    parseDemoEntry(entry, filePath, `${location}[${index}]`),
+  );
+};
 
 const directChildPath = (path: string, parentPath: string): boolean => {
   if (!path.startsWith(`${parentPath}/`)) {
@@ -224,6 +315,7 @@ const parseTopicNode = (
   const lesson = value["lesson"];
   const enteredAt = value["enteredAt"];
   const current = value["current"];
+  const demos = value["demos"];
   const children = value["children"];
 
   if (
@@ -238,6 +330,7 @@ const parseTopicNode = (
     (enteredAt !== undefined &&
       (typeof enteredAt !== "string" || enteredAt.trim().length === 0)) ||
     (current !== undefined && typeof current !== "boolean") ||
+    (demos !== undefined && !Array.isArray(demos)) ||
     !Array.isArray(children)
   ) {
     throw new Error(`${invalidTopicMessage(filePath)} Invalid node at ${location}.`);
@@ -261,6 +354,13 @@ const parseTopicNode = (
     ...(lesson === undefined ? {} : { lesson: lesson.trim() }),
     ...(enteredAt === undefined ? {} : { enteredAt: enteredAt.trim() }),
     current: isCurrent,
+    ...(demos === undefined
+      ? {}
+      : {
+          demos: demos.map((demo, index) =>
+            parseDemoEntry(demo, filePath, `${location}.demos[${index}]`),
+          ),
+        }),
     children: children.map((child, index) =>
       parseTopicNode(
         child,
@@ -330,10 +430,12 @@ const parseCourseManifest = (
   const name = value["name"];
   const createdAt = value["createdAt"];
   const topics = value["topics"];
+  const unassignedDemos = value["unassignedDemos"];
 
   if (
     typeof name !== "string" ||
-    typeof createdAt !== "string"
+    typeof createdAt !== "string" ||
+    (unassignedDemos !== undefined && !Array.isArray(unassignedDemos))
   ) {
     throw new Error(`Invalid course manifest in ${filePath}`);
   }
@@ -343,6 +445,11 @@ const parseCourseManifest = (
     name,
     createdAt,
     topics: parseTopicTree(topics, filePath),
+    unassignedDemos: parseDemoEntries(
+      unassignedDemos,
+      filePath,
+      "unassignedDemos",
+    ),
   };
 };
 
@@ -413,11 +520,33 @@ const parseTranscriptEntry = (
   }
 
   const role = value["role"];
+  const kind = value["kind"];
   const text = value["text"];
+  const file = value["file"];
+  const title = value["title"];
   const at = value["at"];
 
   if (
+    kind === "demo" &&
+    role === "agent" &&
+    typeof file === "string" &&
+    isValidDemoFileName(file) &&
+    (title === undefined ||
+      (typeof title === "string" && title.trim().length > 0)) &&
+    typeof at === "string"
+  ) {
+    return {
+      role,
+      kind,
+      file,
+      ...(title === undefined ? {} : { title: title.trim() }),
+      at,
+    };
+  }
+
+  if (
     (role !== "learner" && role !== "agent") ||
+    (kind !== undefined && kind !== "text") ||
     typeof text !== "string" ||
     typeof at !== "string"
   ) {
@@ -538,6 +667,7 @@ export const ensureCourseScaffold = async (
       name,
       createdAt: new Date().toISOString(),
       topics: [],
+      unassignedDemos: [],
     };
 
     await writeJsonAtomic(paths.courseJson, manifest);
@@ -687,6 +817,32 @@ export const appendAgentTranscript = async (
   return entry;
 };
 
+export const appendAgentDemoTranscript = async (
+  courseDir: string,
+  file: string,
+  title: string | undefined,
+  at: string,
+): Promise<TranscriptEntry> => {
+  const entry: TranscriptEntry =
+    title === undefined
+      ? {
+          role: "agent",
+          kind: "demo",
+          file,
+          at,
+        }
+      : {
+          role: "agent",
+          kind: "demo",
+          file,
+          title,
+          at,
+        };
+
+  await appendTranscriptEntry(courseDir, entry);
+  return entry;
+};
+
 export const readGlossary = async (
   courseDir: string,
 ): Promise<readonly GlossaryEntry[]> => {
@@ -775,6 +931,121 @@ const formatGlossaryEntry = (
   lesson === undefined
     ? { term, def, addedAt }
     : { term, def, lesson, addedAt };
+
+type NormalizedDemoInput = Readonly<{
+  file: string;
+  title?: string;
+  topic?: string;
+}>;
+
+const normalizeDemoInput = (input: DemoInput): NormalizedDemoInput => {
+  const file = input.file.trim();
+  if (file.length === 0) {
+    throw new Error("Demo file cannot be empty.");
+  }
+
+  if (!isValidDemoFileName(file)) {
+    throw new Error(
+      `Invalid demo file: ${input.file}. Use a .html file directly inside demos/.`,
+    );
+  }
+
+  const title = input.title?.trim();
+  if (title !== undefined && title.length === 0) {
+    throw new Error("Demo title cannot be empty.");
+  }
+
+  const topic = input.topic?.trim();
+  if (topic !== undefined && topic.length === 0) {
+    throw new Error("Demo topic cannot be empty.");
+  }
+
+  if (topic !== undefined && !isValidTopicPath(topic)) {
+    throw new Error(
+      `Invalid demo topic: ${input.topic}. Use slash-separated course-name-safe segments.`,
+    );
+  }
+
+  return {
+    file,
+    ...(title === undefined ? {} : { title }),
+    ...(topic === undefined ? {} : { topic }),
+  };
+};
+
+const demoFileExists = async (
+  courseDir: string,
+  fileName: string,
+): Promise<boolean> => {
+  if (!isValidDemoFileName(fileName)) {
+    return false;
+  }
+
+  const paths = getCoursePaths(courseDir);
+
+  try {
+    return (await stat(join(paths.demosDir, fileName))).isFile();
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return false;
+    }
+
+    throw error;
+  }
+};
+
+const formatDemoEntry = (
+  file: string,
+  title: string | undefined,
+  addedAt: string,
+): DemoEntry =>
+  title === undefined
+    ? { file, addedAt }
+    : {
+        file,
+        title,
+        addedAt,
+      };
+
+const upsertDemoList = (
+  demos: readonly DemoEntry[],
+  input: NormalizedDemoInput,
+  addedAt: string,
+): Readonly<{
+  action: "created" | "updated";
+  demo: DemoEntry;
+  demos: readonly DemoEntry[];
+}> => {
+  const existingIndex = demos.findIndex((demo) => demo.file === input.file);
+
+  if (existingIndex === -1) {
+    const demo = formatDemoEntry(input.file, input.title, addedAt);
+    return {
+      action: "created",
+      demo,
+      demos: [...demos, demo],
+    };
+  }
+
+  const existing = demos[existingIndex];
+  if (existing === undefined) {
+    throw new Error("Unable to update demo entry.");
+  }
+
+  const demo = formatDemoEntry(
+    input.file,
+    input.title ?? existing.title,
+    existing.addedAt,
+  );
+
+  return {
+    action: "updated",
+    demo,
+    demos: demos.map((candidate, index) =>
+      index === existingIndex ? demo : candidate,
+    ),
+  };
+};
 
 export const upsertGlossaryEntry = async (
   courseDir: string,
@@ -868,12 +1139,14 @@ const formatTopicNode = (
   enteredAt: string | undefined,
   current: boolean,
   children: readonly TopicNode[],
+  demos: readonly DemoEntry[] | undefined = undefined,
 ): TopicNode => ({
   path,
   title,
   ...(lesson === undefined ? {} : { lesson }),
   ...(enteredAt === undefined ? {} : { enteredAt }),
   current,
+  ...(demos === undefined || demos.length === 0 ? {} : { demos }),
   children,
 });
 
@@ -888,6 +1161,7 @@ const clearTopicCurrent = (node: TopicNode): TopicNode =>
     node.enteredAt,
     false,
     node.children.map(clearTopicCurrent),
+    node.demos,
   );
 
 type TopicTreeWalkResult = Readonly<{
@@ -928,6 +1202,7 @@ const upsertTopicSegments = (
       enteredAt,
       true,
       existing.children,
+      existing.demos,
     );
     const nextTopics =
       existingIndex === -1
@@ -958,6 +1233,7 @@ const upsertTopicSegments = (
     existing.enteredAt,
     false,
     childResult.topics,
+    existing.demos,
   );
   const nextTopics =
     existingIndex === -1
@@ -1019,6 +1295,176 @@ export const upsertTopic = async (
   });
 
   return mutation;
+};
+
+const currentTopicPath = (topics: readonly TopicNode[]): string | undefined => {
+  for (const topic of topics) {
+    if (topic.current) {
+      return topic.path;
+    }
+
+    const childPath = currentTopicPath(topic.children);
+    if (childPath !== undefined) {
+      return childPath;
+    }
+  }
+
+  return undefined;
+};
+
+const findTopic = (
+  topics: readonly TopicNode[],
+  path: string,
+): TopicNode | undefined => {
+  for (const topic of topics) {
+    if (topic.path === path) {
+      return topic;
+    }
+
+    const child = findTopic(topic.children, path);
+    if (child !== undefined) {
+      return child;
+    }
+  }
+
+  return undefined;
+};
+
+type TopicDemoUpdate = Readonly<{
+  topics: readonly TopicNode[];
+  topic: TopicNode | undefined;
+  action: "created" | "updated" | undefined;
+  demo: DemoEntry | undefined;
+}>;
+
+const upsertDemoInTopicTree = (
+  topics: readonly TopicNode[],
+  topicPath: string,
+  input: NormalizedDemoInput,
+  addedAt: string,
+): TopicDemoUpdate => {
+  let updatedTopic: TopicNode | undefined;
+  let action: "created" | "updated" | undefined;
+  let demo: DemoEntry | undefined;
+
+  const nextTopics = topics.map((topic) => {
+    if (topic.path === topicPath) {
+      const update = upsertDemoList(topic.demos ?? [], input, addedAt);
+      updatedTopic = formatTopicNode(
+        topic.path,
+        topic.title,
+        topic.lesson,
+        topic.enteredAt,
+        topic.current,
+        topic.children,
+        update.demos,
+      );
+      action = update.action;
+      demo = update.demo;
+      return updatedTopic;
+    }
+
+    const childUpdate = upsertDemoInTopicTree(
+      topic.children,
+      topicPath,
+      input,
+      addedAt,
+    );
+
+    if (childUpdate.topic === undefined) {
+      return topic;
+    }
+
+    updatedTopic = childUpdate.topic;
+    action = childUpdate.action;
+    demo = childUpdate.demo;
+
+    return formatTopicNode(
+      topic.path,
+      topic.title,
+      topic.lesson,
+      topic.enteredAt,
+      topic.current,
+      childUpdate.topics,
+      topic.demos,
+    );
+  });
+
+  return {
+    topics: nextTopics,
+    topic: updatedTopic,
+    action,
+    demo,
+  };
+};
+
+export const registerDemo = async (
+  courseDir: string,
+  input: DemoInput,
+  now = new Date(),
+): Promise<DemoMutation> => {
+  const normalized = normalizeDemoInput(input);
+
+  if (!(await demoFileExists(courseDir, normalized.file))) {
+    throw new Error(`Demo file does not exist: demos/${normalized.file}`);
+  }
+
+  const manifest = await readCourseManifest(courseDir);
+  const targetTopicPath = normalized.topic ?? currentTopicPath(manifest.topics);
+
+  if (
+    normalized.topic !== undefined &&
+    findTopic(manifest.topics, normalized.topic) === undefined
+  ) {
+    throw new Error(`Topic does not exist: ${normalized.topic}`);
+  }
+
+  if (targetTopicPath === undefined) {
+    const update = upsertDemoList(
+      manifest.unassignedDemos,
+      normalized,
+      now.toISOString(),
+    );
+    await writeCourseManifest(courseDir, {
+      ...manifest,
+      unassignedDemos: update.demos,
+    });
+
+    return {
+      action: update.action,
+      demo: update.demo,
+      topics: manifest.topics,
+      unassignedDemos: update.demos,
+    };
+  }
+
+  const update = upsertDemoInTopicTree(
+    manifest.topics,
+    targetTopicPath,
+    normalized,
+    now.toISOString(),
+  );
+
+  if (
+    update.topic === undefined ||
+    update.action === undefined ||
+    update.demo === undefined
+  ) {
+    throw new Error(`Topic does not exist: ${targetTopicPath}`);
+  }
+
+  await writeCourseManifest(courseDir, {
+    ...manifest,
+    topics: update.topics,
+  });
+
+  return {
+    action: update.action,
+    demo: update.demo,
+    topic: update.topic,
+    topics: update.topics,
+    unassignedDemos: manifest.unassignedDemos,
+  };
 };
 
 export const nextTurnNumber = async (courseDir: string): Promise<number> => {

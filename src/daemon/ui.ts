@@ -1,6 +1,11 @@
-import type { GlossaryEntry, TopicNode, TranscriptEntry } from "../course";
+import type {
+  DemoEntry,
+  GlossaryEntry,
+  TopicNode,
+  TranscriptEntry,
+} from "../course";
 import type { LessonSnapshot, RenderedLesson } from "./lessons";
-import { renderMarkdown } from "./markdown";
+import { renderDemoEmbed, renderMarkdown } from "./markdown";
 
 type RenderedTranscriptEntry = TranscriptEntry &
   Readonly<{
@@ -35,6 +40,7 @@ const initialTranscript = __TRANSCRIPT__;
 const initialLessons = __LESSONS__;
 const initialGlossary = __GLOSSARY__;
 const initialTopics = __TOPICS__;
+const initialUnassignedDemos = __UNASSIGNED_DEMOS__;
 
 const form = document.querySelector("#turn-form");
 const textarea = document.querySelector("#message");
@@ -52,6 +58,7 @@ const viewTabs = [...document.querySelectorAll("[data-view]")];
 let lessons = [...initialLessons.lessons];
 let selectedLessonId = initialLessons.selectedLessonId;
 let topics = [...initialTopics];
+let unassignedDemos = [...initialUnassignedDemos];
 let selectedTopicPath = undefined;
 let userPinnedTopic = false;
 let userPinnedLesson = false;
@@ -191,6 +198,46 @@ const selectLesson = (lessonId) => {
   renderViewTabs();
 };
 
+const openDemo = (file) => {
+  window.open("/demos/" + encodeURIComponent(file), "_blank", "noopener");
+};
+
+const createDemoLeaf = (demo) => {
+  const leaf = document.createElement("button");
+  leaf.type = "button";
+  leaf.className = "demo-leaf";
+  leaf.dataset.demoFile = demo.file;
+
+  const badge = document.createElement("span");
+  badge.className = "demo-badge";
+  badge.textContent = "demo";
+
+  const label = document.createElement("span");
+  label.textContent = demo.title ?? demo.file;
+
+  leaf.append(badge, label);
+  // Demo leaves open standalone so they remain reachable even without a lesson directive.
+  leaf.addEventListener("click", () => {
+    openDemo(demo.file);
+  });
+
+  return leaf;
+};
+
+const createDemoLeafList = (demos) => {
+  const list = document.createElement("ul");
+  list.className = "topic-tree topic-children demo-leaves";
+
+  for (const demo of demos) {
+    const item = document.createElement("li");
+    item.className = "topic-node demo-node";
+    item.append(createDemoLeaf(demo));
+    list.append(item);
+  }
+
+  return list;
+};
+
 const createTopicList = (nodes, nested = false) => {
   const list = document.createElement("ul");
   list.className = nested ? "topic-tree topic-children" : "topic-tree";
@@ -216,6 +263,9 @@ const createTopicList = (nodes, nested = false) => {
     });
 
     item.append(button);
+    if ((topic.demos ?? []).length > 0) {
+      item.append(createDemoLeafList(topic.demos));
+    }
     if ((topic.children ?? []).length > 0) {
       item.append(createTopicList(topic.children, true));
     }
@@ -280,6 +330,22 @@ const renderNavigation = () => {
         selectLesson(lesson.id);
       });
       section.append(tab);
+    }
+
+    lessonList.append(section);
+  }
+
+  if (unassignedDemos.length > 0) {
+    const section = document.createElement("section");
+    section.className = "unassigned-lessons";
+
+    const heading = document.createElement("h3");
+    heading.className = "unassigned-heading";
+    heading.textContent = "Unassigned demos";
+    section.append(heading);
+
+    for (const demo of unassignedDemos) {
+      section.append(createDemoLeaf(demo));
     }
 
     lessonList.append(section);
@@ -380,14 +446,14 @@ const applyLessonEvent = (event) => {
 
 const createEntryElement = (entry) => {
   const article = document.createElement("article");
-  article.className = "entry " + entry.role;
+  article.className = "entry " + entry.role + " " + (entry.kind ?? "text");
 
   const meta = document.createElement("div");
   meta.className = "entry-meta";
   meta.textContent = entry.role === "agent" ? "Agent" : "You";
 
   const body = document.createElement("div");
-  body.className = "message-body prose";
+  body.className = "message-body prose" + (entry.kind === "demo" ? " demo-message-body" : "");
   body.innerHTML = entry.html;
 
   article.append(meta, body);
@@ -534,6 +600,23 @@ form.addEventListener("submit", (event) => {
   void submitMessage();
 });
 
+document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+
+  const fullscreen = event.target.closest("[data-demo-fullscreen]");
+  if (!(fullscreen instanceof HTMLElement)) {
+    return;
+  }
+
+  const card = fullscreen.closest(".demo-card");
+  const frame = card?.querySelector("iframe");
+  if (frame instanceof HTMLIFrameElement && frame.requestFullscreen !== undefined) {
+    void frame.requestFullscreen();
+  }
+});
+
 for (const tab of viewTabs) {
   tab.addEventListener("click", () => {
     const view = tab.dataset.view;
@@ -634,7 +717,9 @@ events.addEventListener("glossary", (event) => {
   }
 });
 events.addEventListener("topics", (event) => {
-  topics = [...JSON.parse(event.data).topics];
+  const payload = JSON.parse(event.data);
+  topics = [...payload.topics];
+  unassignedDemos = [...(payload.unassignedDemos ?? [])];
   userPinnedTopic = false;
   userPinnedLesson = false;
   renderNavigation();
@@ -648,10 +733,14 @@ events.addEventListener("transcript", (event) => {
 const renderTranscript = (
   transcript: readonly TranscriptEntry[],
   glossary: readonly GlossaryEntry[],
+  demoFiles: ReadonlySet<string>,
 ): readonly RenderedTranscriptEntry[] =>
   transcript.map((entry) => ({
     ...entry,
-    html: renderMarkdown(entry.text, { glossary }),
+    html:
+      entry.kind === "demo"
+        ? renderDemoEmbed(entry.file, entry.title, { demoFiles })
+        : renderMarkdown(entry.text, { glossary, demoFiles }),
   }));
 
 const walkTopicTree = (
@@ -684,6 +773,23 @@ const topicLessonIds = (topics: readonly TopicNode[]): ReadonlySet<string> => {
   });
 
   return ids;
+};
+
+const topicDemoHtml = (demos: readonly DemoEntry[] | undefined): string => {
+  if (demos === undefined || demos.length === 0) {
+    return "";
+  }
+
+  return `<ul class="topic-tree topic-children demo-leaves">${demos
+    .map(
+      (demo) =>
+        `<li class="topic-node demo-node"><button class="demo-leaf" type="button" data-demo-file="${escapeHtml(
+          demo.file,
+        )}"><span class="demo-badge">demo</span><span>${escapeHtml(
+          demo.title ?? demo.file,
+        )}</span></button></li>`,
+    )
+    .join("")}</ul>`;
 };
 
 const selectedLesson = (
@@ -724,10 +830,11 @@ const renderTopicTree = (
         topic.children.length === 0
           ? ""
           : renderTopicTree(topic.children, selected, true);
+      const demos = topicDemoHtml(topic.demos);
 
       return `<li class="topic-node"><button class="topic-button${activeClass}${currentClass}${noLessonClass}" type="button" data-topic-path="${escapeHtml(
         topic.path,
-      )}"${ariaCurrent}>${escapeHtml(topic.title)}</button>${children}</li>`;
+      )}"${ariaCurrent}>${escapeHtml(topic.title)}</button>${demos}${children}</li>`;
     })
     .join("")}</ul>`;
 };
@@ -756,16 +863,34 @@ const renderUnassignedLessons = (
     .join("")}</section>`;
 };
 
+const renderUnassignedDemos = (demos: readonly DemoEntry[]): string => {
+  if (demos.length === 0) {
+    return "";
+  }
+
+  return `<section class="unassigned-lessons"><h3 class="unassigned-heading">Unassigned demos</h3>${demos
+    .map(
+      (demo) =>
+        `<button class="demo-leaf" type="button" data-demo-file="${escapeHtml(
+          demo.file,
+        )}"><span class="demo-badge">demo</span><span>${escapeHtml(
+          demo.title ?? demo.file,
+        )}</span></button>`,
+    )
+    .join("")}</section>`;
+};
+
 const renderNavigation = (
   snapshot: LessonSnapshot,
   topics: readonly TopicNode[],
+  unassignedDemos: readonly DemoEntry[],
 ): string => {
   const selected = selectedLesson(snapshot, topics);
   return `${renderTopicTree(topics, selected)}${renderUnassignedLessons(
     snapshot,
     topics,
     selected,
-  )}`;
+  )}${renderUnassignedDemos(unassignedDemos)}`;
 };
 
 const renderLessonContent = (
@@ -786,15 +911,18 @@ export const renderPage = (
   lessons: LessonSnapshot,
   glossary: readonly GlossaryEntry[],
   topics: readonly TopicNode[],
+  unassignedDemos: readonly DemoEntry[],
+  demoFiles: ReadonlySet<string>,
 ): string => {
   const script = clientScript
     .replace(
       "__TRANSCRIPT__",
-      escapeScriptJson(renderTranscript(transcript, glossary)),
+      escapeScriptJson(renderTranscript(transcript, glossary, demoFiles)),
     )
     .replace("__LESSONS__", escapeScriptJson(lessons))
     .replace("__GLOSSARY__", escapeScriptJson(glossary))
-    .replace("__TOPICS__", escapeScriptJson(topics));
+    .replace("__TOPICS__", escapeScriptJson(topics))
+    .replace("__UNASSIGNED_DEMOS__", escapeScriptJson(unassignedDemos));
 
   return `<!doctype html>
 <html lang="en" class="scheme-only-dark">
@@ -965,6 +1093,50 @@ export const renderPage = (
       color: #f4f4f1;
     }
 
+    .demo-leaves {
+      gap: 0.25rem;
+    }
+
+    .demo-node {
+      gap: 0;
+    }
+
+    .demo-leaf {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      width: 100%;
+      min-height: 2rem;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: #c8d7bd;
+      padding: 0.35rem 0.55rem;
+      font: inherit;
+      font-size: 0.92rem;
+      text-align: left;
+      overflow-wrap: anywhere;
+      cursor: pointer;
+    }
+
+    .demo-leaf:hover {
+      border-color: #44523c;
+      background: #20261e;
+      color: #f4f4f1;
+    }
+
+    .demo-badge {
+      flex: 0 0 auto;
+      border: 1px solid #526747;
+      border-radius: 999px;
+      color: #bce5a4;
+      padding: 0.04rem 0.3rem;
+      font-size: 0.68rem;
+      font-weight: 700;
+      line-height: 1.35;
+      text-transform: uppercase;
+    }
+
     .unassigned-lessons {
       display: grid;
       gap: 0.4rem;
@@ -1126,6 +1298,97 @@ export const renderPage = (
     .learner .message-body {
       border-color: #44523c;
       background: #20261e;
+    }
+
+    .demo-message-body {
+      width: min(100%, 52rem);
+      border: 0;
+      background: transparent;
+      padding: 0;
+    }
+
+    .demo-card {
+      display: grid;
+      overflow: hidden;
+      border: 1px solid #3a4933;
+      border-radius: 8px;
+      background: #121410;
+    }
+
+    .demo-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      border-bottom: 1px solid #2c3528;
+      background: #1a1f17;
+      padding: 0.55rem 0.65rem;
+    }
+
+    .demo-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      min-width: 0;
+      color: #fafaf8;
+      font-weight: 600;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
+    }
+
+    .demo-actions {
+      display: flex;
+      flex: 0 0 auto;
+      gap: 0.35rem;
+    }
+
+    .demo-action {
+      min-height: 1.8rem;
+      border: 1px solid #42513b;
+      border-radius: 6px;
+      background: #20261e;
+      color: #f4f4f1;
+      padding: 0 0.5rem;
+      font: inherit;
+      font-size: 0.82rem;
+      line-height: 1;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    a.demo-action {
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .demo-action:hover {
+      border-color: #71965f;
+      background: #293422;
+    }
+
+    .demo-frame {
+      display: block;
+      width: 100%;
+      min-height: 20rem;
+      border: 0;
+      background: #ffffff;
+      aspect-ratio: 16 / 10;
+    }
+
+    .demo-warning {
+      border-color: #7d5631;
+      background: #21170f;
+    }
+
+    .demo-warning .demo-titlebar {
+      border-bottom-color: #6b4828;
+      background: #2a1b10;
+    }
+
+    .demo-warning p {
+      margin: 0;
+      padding: 0.75rem;
+      color: #ffd8b0;
     }
 
     .prose {
@@ -1397,6 +1660,7 @@ export const renderPage = (
             <div id="lesson-list" class="lesson-list">${renderNavigation(
               lessons,
               topics,
+              unassignedDemos,
             )}</div>
           </nav>
 
