@@ -69,6 +69,11 @@ type Env = Readonly<Record<string, string | undefined>>;
 
 type UiStatus = "waiting-for-agent" | "agent-working";
 
+type UiStatusPayload = Readonly<{
+  status: UiStatus;
+  hasSeenWait: boolean;
+}>;
+
 export type AgentMessageSource =
   | Readonly<{ kind: "text"; text: string }>
   | Readonly<{ kind: "file"; path: string }>;
@@ -85,6 +90,7 @@ type WaitSetup =
 type DaemonHealth = Readonly<{
   coursePath: string;
   waitPending: boolean;
+  hasSeenWait: boolean;
 }>;
 
 export class LearnCommandError extends Error {
@@ -165,10 +171,28 @@ const readDaemonHealth = async (
     return {
       coursePath: body["coursePath"],
       waitPending: body["waitPending"] === true,
+      hasSeenWait: body["hasSeenWait"] === true,
     };
   } catch {
     return undefined;
   }
+};
+
+const readCourseDisplayTitle = async (
+  courseJson: string,
+  fallback: string,
+): Promise<string> => {
+  try {
+    const value = JSON.parse(await readFile(courseJson, "utf8")) as unknown;
+    const title = isRecord(value) ? value["title"] : undefined;
+    if (typeof title === "string" && title.trim().length > 0) {
+      return title.trim();
+    }
+  } catch {
+    // Invalid manifests are handled by readCourseManifest; title fallback is best-effort.
+  }
+
+  return fallback;
 };
 
 const healthMatchesCourse = async (
@@ -562,7 +586,7 @@ export const notifyAgentTranscriptEntry = async (
 };
 
 const createSseHub = (
-  getStatus: () => UiStatus,
+  getStatus: () => UiStatusPayload,
   getGlossary: () => readonly GlossaryEntry[],
   getTopics: () => readonly TopicNode[],
   getUnassignedDemos: () => readonly DemoEntry[],
@@ -585,9 +609,10 @@ const createSseHub = (
     response.write(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`);
   };
 
-  const broadcastStatus = (status: UiStatus): void => {
+  const broadcastStatus = (): void => {
+    const payload = getStatus();
     for (const subscriber of subscribers) {
-      writeEvent(subscriber, "status", { status });
+      writeEvent(subscriber, "status", payload);
     }
   };
 
@@ -663,7 +688,7 @@ const createSseHub = (
       "content-type": "text/event-stream",
     });
     subscribers.add(response);
-    writeEvent(response, "status", { status: getStatus() });
+    writeEvent(response, "status", getStatus());
     writeEvent(response, "glossary", { entries: getGlossary() });
     writeEvent(response, "topics", {
       topics: getTopics(),
@@ -867,12 +892,13 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   let activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
 
   let status: UiStatus = "agent-working";
+  let hasSeenWait = false;
   let waiter: Waiter | undefined;
   let nextWaiterId = 1;
 
   const serialize = createSerializer();
   const sseHub = createSseHub(
-    () => status,
+    () => ({ status, hasSeenWait }),
     () => glossaryEntries,
     () => topicTree,
     () => unassignedDemos,
@@ -983,7 +1009,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
 
   const setStatus = (nextStatus: UiStatus): void => {
     status = nextStatus;
-    sseHub.broadcastStatus(nextStatus);
+    sseHub.broadcastStatus();
   };
 
   const flushPendingTurn = async (): Promise<string | undefined> => {
@@ -1018,6 +1044,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     onAbort: (listener: () => void) => void,
   ): Promise<Response> => {
     const setup = await serialize(async (): Promise<WaitSetup> => {
+      hasSeenWait = true;
       setStatus("waiting-for-agent");
 
       const immediateTurnPath = await flushPendingTurn();
@@ -1226,11 +1253,15 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
             demoFileSet,
           ),
         ]);
+        const displayTitle = await readCourseDisplayTitle(
+          coursePaths.courseJson,
+          manifest.name,
+        );
         await sendResponse(
           response,
           new Response(
             renderPage(
-              manifest.name,
+              displayTitle,
               transcript,
               lessons,
               glossaryEntries,
@@ -1239,6 +1270,8 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
               masteryScores,
               demoFileSet,
               activeFeynmanCheck,
+              status,
+              hasSeenWait,
             ),
             {
               headers: { "content-type": "text/html; charset=utf-8" },
@@ -1256,6 +1289,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
             coursePath,
             name: manifest.name,
             waitPending: waiter !== undefined,
+            hasSeenWait,
           }),
         );
         return;

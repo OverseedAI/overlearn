@@ -248,12 +248,12 @@ export const renderDemoEmbed = (
       displayTitle,
     )}</div>`,
     '<div class="demo-actions">',
-    `<button class="demo-action" type="button" data-demo-fullscreen aria-label="Full screen demo ${escapeHtml(
+    `<button class="demo-action" type="button" data-demo-fullscreen aria-label="Expand demo ${escapeHtml(
       displayTitle,
-    )}" title="Full screen">Full</button>`,
+    )}" title="Expand">Expand</button>`,
     `<a class="demo-action" href="${escapeHtml(
       href,
-    )}" target="_blank" rel="noopener noreferrer" title="Open in new tab">Open</a>`,
+    )}" target="_blank" rel="noopener noreferrer" title="Open in tab">Open in tab</a>`,
     "</div>",
     "</div>",
     // No allow-same-origin: the sandboxed document gets an opaque origin; the
@@ -372,6 +372,11 @@ const isTableSeparator = (line: string): boolean =>
 const isListLine = (line: string): boolean =>
   /^\s*[-*+]\s+\S/.test(line) || /^\s*\d+\.\s+\S/.test(line);
 
+const isBlockquoteLine = (line: string): boolean => line.startsWith(">");
+
+const stripBlockquoteMarker = (line: string): string =>
+  line.startsWith("> ") ? line.slice(2) : line.slice(1);
+
 const renderTable = (
   lines: readonly string[],
   startIndex: number,
@@ -445,6 +450,32 @@ const renderList = (
   };
 };
 
+const renderBlockquote = (
+  lines: readonly string[],
+  startIndex: number,
+  options: MarkdownRenderOptions,
+): Readonly<{ html: string; nextIndex: number }> => {
+  const quoteLines: string[] = [];
+  let index = startIndex;
+
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    if (!isBlockquoteLine(line)) {
+      break;
+    }
+
+    quoteLines.push(stripBlockquoteMarker(line));
+    index += 1;
+  }
+
+  return {
+    html: `<blockquote>${quoteLines
+      .map((line) => renderInline(line, options))
+      .join("<br>")}</blockquote>`,
+    nextIndex: index,
+  };
+};
+
 const renderParagraph = (
   lines: readonly string[],
   startIndex: number,
@@ -461,6 +492,7 @@ const renderParagraph = (
       line.trim().length === 0 ||
       line.startsWith(markdownFence) ||
       isDemoDirectiveLine(line) ||
+      isBlockquoteLine(line) ||
       isListLine(line) ||
       (line.includes("|") && isTableSeparator(nextLine))
     ) {
@@ -537,6 +569,13 @@ export const renderMarkdown = (
       const table = renderTable(lines, index, options);
       blocks.push(renderBlock(table.html, glossary));
       index = table.nextIndex;
+      continue;
+    }
+
+    if (isBlockquoteLine(line)) {
+      const blockquote = renderBlockquote(lines, index, options);
+      blocks.push(renderBlock(blockquote.html, glossary));
+      index = blockquote.nextIndex;
       continue;
     }
 
