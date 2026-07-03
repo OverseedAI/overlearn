@@ -2,14 +2,42 @@
 
 overlearn turns a coding harness into a personal teacher: a local `learn` CLI will coordinate a daemon, file-backed course state, and a browser UI so agents can teach interactively while learners respond in the browser. The PRD lives in [Notion](https://app.notion.com/p/3915b1d7dbd481299068f5d1bc0dfeb6).
 
-## Dev Quickstart
+## Install
 
 ```sh
-bun install
-bun test
-bun run build
-./dist/learn --version
+curl -fsSL https://overlearn.org/install.sh | bash
 ```
+
+Pin a release version:
+
+```sh
+curl -fsSL https://overlearn.org/install.sh | OVERLEARN_VERSION=v0.1.0 bash
+```
+
+Manual binary install fallback:
+
+```sh
+mkdir -p ~/.local/bin
+curl -fL -o ~/.local/bin/learn https://github.com/OverseedAI/overlearn/releases/latest/download/learn-linux-x64
+chmod 0755 ~/.local/bin/learn
+```
+
+Use `learn-linux-arm64`, `learn-darwin-x64`, or `learn-darwin-arm64` for other platforms.
+
+Claude Code plugin-only install:
+
+```sh
+claude plugin marketplace add OverseedAI/overlearn
+claude plugin install overlearn@overlearn
+```
+
+Quickstart:
+
+```sh
+learn start my-course
+```
+
+In Claude Code, run `/learn`.
 
 ## Registry
 
