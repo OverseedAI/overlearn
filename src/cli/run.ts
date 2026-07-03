@@ -119,7 +119,7 @@ const validateConceptId = (
     return result(
       1,
       formatHelp(version),
-      `Invalid concept id: ${concept}. Use lowercase letters, numbers, and hyphens.`,
+      `Invalid concept id: ${concept}. Use slash-separated lowercase letters, numbers, and hyphens.`,
     );
   }
 

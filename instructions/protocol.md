@@ -59,6 +59,8 @@ Turn files:
 
 - `turn.json` contains an `events` array.
 - `{"type":"message","text":"..."}` means the learner sent a chat message.
+- `{"type":"review-weak","concepts":["..."]}` means the learner asked to
+  review the lowest-scoring topic concepts.
 - `{"type":"feynman-answer","concept":"...","text":"...","keyPoints":[...]}`
   means the learner submitted an explain-it-back checkpoint answer. Grade it
   using `grading.md` and emit mastery before the next teaching turn.
@@ -71,6 +73,7 @@ Feynman checks:
 - Issue a Feynman check only after the concept has had at least one worked
   example.
 - Issue one before advancing past a major topic or when mastery is uncertain.
+- Use the topic's slug as the Feynman concept id.
 - Use `learn emit feynman <course> --concept <id> --prompt '<prompt>'` and add
   `--key-points 'point one, point two'` when specific rubric anchors matter.
 - Keep one active check at a time. If you need a better prompt, emit a new check;
@@ -78,6 +81,15 @@ Feynman checks:
 - When a `feynman-answer` event arrives, grade per `grading.md`, then run
   `learn emit mastery <course> --concept <id> --score <n> --gaps '<gaps>'`
   before sending the next teaching response.
+
+Review weak areas:
+
+- When a `review-weak` event arrives, re-quiz the listed concepts starting with
+  the lowest-scoring concept.
+- For each listed concept, issue a fresh Feynman check with a new prompt, not a
+  repeat of the old question.
+- Grade each answer with `grading.md`, emit mastery, then return to the regular
+  teaching flow.
 
 Daemon and wait rules:
 

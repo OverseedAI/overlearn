@@ -70,6 +70,11 @@ export type NavTurnEvent = Readonly<{
   path: string;
 }>;
 
+export type ReviewWeakTurnEvent = Readonly<{
+  type: "review-weak";
+  concepts: readonly string[];
+}>;
+
 export type FeynmanAnswerTurnEvent = Readonly<{
   type: "feynman-answer";
   concept: string;
@@ -80,6 +85,7 @@ export type FeynmanAnswerTurnEvent = Readonly<{
 export type TurnEvent =
   | MessageTurnEvent
   | NavTurnEvent
+  | ReviewWeakTurnEvent
   | FeynmanAnswerTurnEvent;
 
 export type TurnFile = Readonly<{
@@ -280,7 +286,12 @@ export const isValidDemoFileName = (fileName: string): boolean =>
   fileName.endsWith(".html");
 
 export const isValidConceptId = (concept: string): boolean =>
-  /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(concept);
+  /^[a-z0-9]+(?:-[a-z0-9]+)*(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)*$/.test(
+    concept,
+  );
+
+const invalidConceptIdMessage = (concept: string): string =>
+  `Invalid concept id: ${concept}. Use slash-separated lowercase letters, numbers, and hyphens.`;
 
 export const parseKeyPointsText = (text: string): readonly string[] =>
   text
@@ -684,6 +695,24 @@ const parseTurnEvent = (value: unknown, filePath: string): TurnEvent => {
     return { type, path };
   }
 
+  if (type === "review-weak") {
+    const concepts = value["concepts"];
+    if (!Array.isArray(concepts)) {
+      throw new Error(`Invalid pending event in ${filePath}`);
+    }
+
+    return {
+      type,
+      concepts: concepts.map((concept) => {
+        if (typeof concept !== "string" || !isValidConceptId(concept)) {
+          throw new Error(`Invalid pending event in ${filePath}`);
+        }
+
+        return concept;
+      }),
+    };
+  }
+
   if (type === "feynman-answer") {
     const concept = value["concept"];
     const text = value["text"];
@@ -961,9 +990,7 @@ const normalizeConceptId = (concept: string): string => {
   }
 
   if (!isValidConceptId(normalized)) {
-    throw new Error(
-      `Invalid concept id: ${concept}. Use lowercase letters, numbers, and hyphens.`,
-    );
+    throw new Error(invalidConceptIdMessage(concept));
   }
 
   return normalized;
@@ -1126,6 +1153,138 @@ export const appendMasteryScore = async (
 
   await writeMastery(courseDir, [...entries, entry]);
   return entry;
+};
+
+const masteryTimeMs = (entry: MasteryEntry): number => {
+  const parsed = Date.parse(entry.at);
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+};
+
+const compareMasteryRecency = (
+  left: MasteryEntry,
+  leftIndex: number,
+  right: MasteryEntry,
+  rightIndex: number,
+): number => {
+  const timeDelta = masteryTimeMs(left) - masteryTimeMs(right);
+  if (timeDelta !== 0) {
+    return timeDelta;
+  }
+
+  const stringDelta = left.at.localeCompare(right.at);
+  if (stringDelta !== 0) {
+    return stringDelta;
+  }
+
+  return leftIndex - rightIndex;
+};
+
+export const latestMasteryScores = (
+  entries: readonly MasteryEntry[],
+): readonly MasteryEntry[] => {
+  const byConcept = new Map<
+    string,
+    Readonly<{ entry: MasteryEntry; index: number }>
+  >();
+
+  entries.forEach((entry, index) => {
+    const existing = byConcept.get(entry.concept);
+    if (
+      existing === undefined ||
+      compareMasteryRecency(entry, index, existing.entry, existing.index) > 0
+    ) {
+      byConcept.set(entry.concept, { entry, index });
+    }
+  });
+
+  return [...byConcept.values()]
+    .map((value) => value.entry)
+    .sort((left, right) => left.concept.localeCompare(right.concept));
+};
+
+export const topicConceptIds = (topicPath: string): readonly string[] => {
+  const slug = topicPath.split("/").at(-1) ?? topicPath;
+  return slug === topicPath ? [topicPath] : [topicPath, slug];
+};
+
+export const latestMasteryForTopic = (
+  topic: TopicNode,
+  scores: readonly MasteryEntry[],
+): MasteryEntry | undefined => {
+  const conceptIds = new Set(topicConceptIds(topic.path));
+  let match: Readonly<{ entry: MasteryEntry; index: number }> | undefined;
+
+  scores.forEach((entry, index) => {
+    if (!conceptIds.has(entry.concept)) {
+      return;
+    }
+
+    if (
+      match === undefined ||
+      compareMasteryRecency(entry, index, match.entry, match.index) > 0
+    ) {
+      match = { entry, index };
+    }
+  });
+
+  return match?.entry;
+};
+
+const collectTopicMastery = (
+  topics: readonly TopicNode[],
+  scores: readonly MasteryEntry[],
+): readonly MasteryEntry[] =>
+  topics.flatMap((topic) => {
+    const entry = latestMasteryForTopic(topic, scores);
+    return [
+      ...(entry === undefined ? [] : [entry]),
+      ...collectTopicMastery(topic.children, scores),
+    ];
+  });
+
+const compareWeakestMastery = (
+  left: MasteryEntry,
+  right: MasteryEntry,
+): number => {
+  const scoreDelta = left.score - right.score;
+  if (scoreDelta !== 0) {
+    return scoreDelta;
+  }
+
+  const timeDelta = masteryTimeMs(left) - masteryTimeMs(right);
+  if (timeDelta !== 0) {
+    return timeDelta;
+  }
+
+  const stringDelta = left.at.localeCompare(right.at);
+  if (stringDelta !== 0) {
+    return stringDelta;
+  }
+
+  return left.concept.localeCompare(right.concept);
+};
+
+export const selectWeakestTopicConcepts = (
+  topics: readonly TopicNode[],
+  scores: readonly MasteryEntry[],
+  limit = 3,
+): readonly string[] => {
+  if (limit <= 0) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  return [...collectTopicMastery(topics, scores)]
+    .sort(compareWeakestMastery)
+    .flatMap((entry) => {
+      if (seen.has(entry.concept)) {
+        return [];
+      }
+
+      seen.add(entry.concept);
+      return [entry.concept];
+    })
+    .slice(0, limit);
 };
 
 export const readTranscript = async (
