@@ -23,13 +23,21 @@ export type CliCommand =
   | Readonly<{
       kind: "emit";
       name?: string;
-      emit: Readonly<{
-        kind: "glossary";
-        term: string;
-        def: string;
-        lesson?: string;
-        json: boolean;
-      }>;
+      emit:
+        | Readonly<{
+            kind: "glossary";
+            term: string;
+            def: string;
+            lesson?: string;
+            json: boolean;
+          }>
+        | Readonly<{
+            kind: "topic";
+            path: string;
+            title?: string;
+            lesson?: string;
+            json: boolean;
+          }>;
     }>
   | Readonly<{ kind: "daemon"; courseDir: string }>;
 
@@ -46,12 +54,15 @@ const formatHelp = (version: string): string =>
     "  learn say [name] --text <markdown>",
     "  learn say [name] --file <path>",
     "  learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]",
+    "  learn emit topic [name] --enter <topic/path> [--title <title>] [--lesson <lesson-id>] [--json]",
     "  learn --help",
     "  learn --version",
   ].join("\n");
 
 const emitGlossaryUsage =
   "Usage: learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]";
+const emitTopicUsage =
+  "Usage: learn emit topic [name] --enter <topic/path> [--title <title>] [--lesson <lesson-id>] [--json]";
 
 const result = (
   exitCode: CliExitCode,
@@ -249,11 +260,90 @@ const emitGlossaryCommand = (
   };
 };
 
+const emitTopicCommand = (
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let index = 0;
+  const first = args[index];
+  const name = first !== undefined && !first.startsWith("-") ? first : undefined;
+
+  if (name !== undefined) {
+    index += 1;
+  }
+
+  let path: string | undefined;
+  let title: string | undefined;
+  let lesson: string | undefined;
+  let json = false;
+
+  while (index < args.length) {
+    const flag = args[index];
+    index += 1;
+
+    if (flag === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (flag !== "--enter" && flag !== "--title" && flag !== "--lesson") {
+      return result(1, formatHelp(version), emitTopicUsage);
+    }
+
+    const value = args[index];
+    index += 1;
+
+    if (value === undefined) {
+      return result(1, formatHelp(version), emitTopicUsage);
+    }
+
+    if (flag === "--enter") {
+      path = value;
+    } else if (flag === "--title") {
+      title = value;
+    } else {
+      lesson = value;
+    }
+  }
+
+  if (path === undefined) {
+    return result(1, formatHelp(version), emitTopicUsage);
+  }
+
+  if (path.trim().length === 0) {
+    return result(1, formatHelp(version), "Topic path cannot be empty.");
+  }
+
+  if (title !== undefined && title.trim().length === 0) {
+    return result(1, formatHelp(version), "Topic title cannot be empty.");
+  }
+
+  if (lesson !== undefined && lesson.trim().length === 0) {
+    return result(1, formatHelp(version), "Topic lesson cannot be empty.");
+  }
+
+  return {
+    kind: "emit",
+    ...(name === undefined ? {} : { name }),
+    emit: {
+      kind: "topic",
+      path,
+      ...(title === undefined ? {} : { title }),
+      ...(lesson === undefined ? {} : { lesson }),
+      json,
+    },
+  };
+};
+
 const emitCommand = (args: readonly string[], version: string): CliCommand => {
   const [kind, ...rest] = args;
 
   if (kind === "glossary") {
     return emitGlossaryCommand(rest, version);
+  }
+
+  if (kind === "topic") {
+    return emitTopicCommand(rest, version);
   }
 
   if (kind === undefined) {

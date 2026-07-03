@@ -15,6 +15,7 @@ import {
   ensureCourseScaffold,
   requireCourse,
   getCoursePaths,
+  isValidTopicPath,
   readCourseManifest,
   readDaemonMetadata,
   readGlossary,
@@ -27,6 +28,7 @@ import {
   type DaemonMetadata,
   type CoursePaths,
   type GlossaryEntry,
+  type TopicNode,
   type TranscriptEntry,
   type TurnEvent,
 } from "../course";
@@ -37,6 +39,7 @@ import {
   type LessonEvent,
 } from "./lessons";
 import { renderMarkdown } from "./markdown";
+import { watchTopicFile } from "./topics";
 import { renderPage } from "./ui";
 
 export type DaemonEndpoint = Readonly<{
@@ -431,6 +434,7 @@ export const sayAgentMessage = async (
 const createSseHub = (
   getStatus: () => UiStatus,
   getGlossary: () => readonly GlossaryEntry[],
+  getTopics: () => readonly TopicNode[],
 ) => {
   const subscribers = new Set<ServerResponse>();
 
@@ -484,6 +488,12 @@ const createSseHub = (
     }
   };
 
+  const broadcastTopics = (topics: readonly TopicNode[]): void => {
+    for (const subscriber of subscribers) {
+      writeEvent(subscriber, "topics", { topics });
+    }
+  };
+
   const connect = (
     request: IncomingMessage,
     response: ServerResponse,
@@ -496,6 +506,7 @@ const createSseHub = (
     subscribers.add(response);
     writeEvent(response, "status", { status: getStatus() });
     writeEvent(response, "glossary", { entries: getGlossary() });
+    writeEvent(response, "topics", { topics: getTopics() });
 
     request.on("close", () => {
       subscribers.delete(response);
@@ -508,6 +519,7 @@ const createSseHub = (
     broadcastMessage,
     broadcastStatus,
     broadcastTranscript,
+    broadcastTopics,
     connect,
   };
 };
@@ -538,6 +550,24 @@ const parseSubmitText = (bodyText: string): string => {
   }
 
   return text;
+};
+
+const parseNavPath = (bodyText: string): string => {
+  const body = JSON.parse(bodyText) as unknown;
+  if (!isRecord(body) || typeof body["path"] !== "string") {
+    throw new Error("Expected JSON body with a path field.");
+  }
+
+  const path = body["path"].trim();
+  if (path.length === 0) {
+    throw new Error("Topic path cannot be empty.");
+  }
+
+  if (!isValidTopicPath(path)) {
+    throw new Error(`Invalid topic path: ${body["path"]}.`);
+  }
+
+  return path;
 };
 
 const parseAgentMessage = (bodyText: string): TranscriptEntry => {
@@ -591,15 +621,20 @@ const sendResponse = async (
 export const runDaemon = async (courseDir: string): Promise<void> => {
   const coursePaths = getCoursePaths(courseDir);
   const coursePath = coursePaths.courseDir;
-  const manifest = await readCourseManifest(coursePath);
+  let manifest = await readCourseManifest(coursePath);
   let glossaryEntries = await readGlossary(coursePath);
+  let topicTree = manifest.topics;
 
   let status: UiStatus = "agent-working";
   let waiter: Waiter | undefined;
   let nextWaiterId = 1;
 
   const serialize = createSerializer();
-  const sseHub = createSseHub(() => status, () => glossaryEntries);
+  const sseHub = createSseHub(
+    () => status,
+    () => glossaryEntries,
+    () => topicTree,
+  );
   const refreshGlossary = async (): Promise<void> => {
     await serialize(async () => {
       glossaryEntries = await readGlossary(coursePath);
@@ -612,6 +647,13 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
 
       sseHub.broadcastLesson({ action: "snapshot", snapshot: lessons });
       sseHub.broadcastTranscript(transcript);
+    });
+  };
+  const refreshTopics = async (): Promise<void> => {
+    await serialize(async () => {
+      manifest = await readCourseManifest(coursePath);
+      topicTree = manifest.topics;
+      sseHub.broadcastTopics(topicTree);
     });
   };
 
@@ -637,6 +679,17 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         error instanceof Error
           ? `Glossary watcher error: ${error.message}`
           : "Glossary watcher error.",
+      );
+    },
+  });
+  const topicWatcher = watchTopicFile({
+    courseJson: coursePaths.courseJson,
+    emit: refreshTopics,
+    onError: (error) => {
+      console.error(
+        error instanceof Error
+          ? `Topic watcher error: ${error.message}`
+          : "Topic watcher error.",
       );
     },
   });
@@ -748,6 +801,31 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     return jsonResponse({ ok: true });
   };
 
+  const handleNav = async (bodyText: string): Promise<Response> => {
+    let path: string;
+    try {
+      path = parseNavPath(bodyText);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Invalid nav request.";
+      return textResponse(message, 400);
+    }
+
+    await serialize(async () => {
+      const event: TurnEvent = { type: "nav", path };
+      const pendingEvents = await readPendingEvents(coursePath);
+
+      await writePendingEvents(coursePath, [...pendingEvents, event]);
+      await maybeResolveWaiter();
+
+      if (waiter === undefined) {
+        setStatus("agent-working");
+      }
+    });
+
+    return jsonResponse({ ok: true });
+  };
+
   const handleAgentMessage = async (bodyText: string): Promise<Response> => {
     let entry: TranscriptEntry;
     try {
@@ -771,6 +849,8 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       );
 
       if (method === "GET" && requestUrl.pathname === "/") {
+        manifest = await readCourseManifest(coursePath);
+        topicTree = manifest.topics;
         glossaryEntries = await readGlossary(coursePath);
         const [transcript, lessons] = await Promise.all([
           readTranscript(coursePath),
@@ -779,7 +859,13 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         await sendResponse(
           response,
           new Response(
-            renderPage(manifest.name, transcript, lessons, glossaryEntries),
+            renderPage(
+              manifest.name,
+              transcript,
+              lessons,
+              glossaryEntries,
+              topicTree,
+            ),
             {
               headers: { "content-type": "text/html; charset=utf-8" },
             },
@@ -822,6 +908,12 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         return;
       }
 
+      if (method === "POST" && requestUrl.pathname === "/api/nav") {
+        const bodyText = await readRequestBody(request);
+        await sendResponse(response, await handleNav(bodyText));
+        return;
+      }
+
       if (method === "POST" && requestUrl.pathname === "/api/agent-message") {
         const bodyText = await readRequestBody(request);
         await sendResponse(response, await handleAgentMessage(bodyText));
@@ -861,6 +953,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   const cleanup = async (): Promise<void> => {
     lessonWatcher.close();
     glossaryWatcher.close();
+    topicWatcher.close();
     server.close();
     await clearDaemonMetadata(coursePath);
   };

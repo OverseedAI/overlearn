@@ -168,6 +168,16 @@ const submitMessage = async (url: string, text: string): Promise<void> => {
   expect(response.status).toBe(200);
 };
 
+const submitNav = async (url: string, path: string): Promise<void> => {
+  const response = await fetch(`${url}/api/nav`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+
+  expect(response.status).toBe(200);
+};
+
 const createSseProbe = (reader: ByteReader): SseProbe => {
   const decoder = new TextDecoder();
   let buffer = "";
@@ -374,6 +384,82 @@ describe("learn start/wait browser round trip", () => {
         },
       ]);
 
+      const emitTopic = await runLearn(
+        [
+          "emit",
+          "topic",
+          courseName,
+          "--enter",
+          "indexes/btree",
+          "--title",
+          "B-tree",
+          "--lesson",
+          "01-intro",
+          "--json",
+        ],
+        env,
+      );
+
+      expect(emitTopic.exitCode).toBe(0);
+      expect(emitTopic.stderr).toBe("");
+      expect(JSON.parse(emitTopic.stdout) as unknown).toEqual({
+        ok: true,
+        kind: "topic",
+        action: "created",
+        coursePath: courseDir,
+        topic: {
+          path: "indexes/btree",
+          title: "B-tree",
+          lesson: "01-intro",
+          enteredAt: expect.any(String),
+          current: true,
+          children: [],
+        },
+        topics: [
+          {
+            path: "indexes",
+            title: "indexes",
+            current: false,
+            children: [
+              {
+                path: "indexes/btree",
+                title: "B-tree",
+                lesson: "01-intro",
+                enteredAt: expect.any(String),
+                current: true,
+                children: [],
+              },
+            ],
+          },
+        ],
+      });
+
+      await firstProbe.waitForText("event: topics", "SSE topics event");
+      await firstProbe.waitForText(
+        '"path":"indexes/btree"',
+        "SSE topic path",
+      );
+      await firstProbe.waitForText('"current":true', "SSE current topic");
+
+      const courseFile = JSON.parse(
+        await readFile(join(courseDir, "course.json"), "utf8"),
+      ) as unknown;
+      expect(courseFile).toMatchObject({
+        topics: [
+          {
+            path: "indexes",
+            children: [
+              {
+                path: "indexes/btree",
+                title: "B-tree",
+                lesson: "01-intro",
+                current: true,
+              },
+            ],
+          },
+        ],
+      });
+
       const wait = spawnLearn(["wait"], env);
       await firstProbe.waitForStatus("waiting-for-agent");
 
@@ -408,6 +494,49 @@ describe("learn start/wait browser round trip", () => {
         turn: 1,
         createdAt: expect.any(String),
         events: [{ type: "message", text: "hello from the browser" }],
+      });
+
+      const navWait = spawnLearn(["wait"], env);
+      await firstProbe.waitForStatus("waiting-for-agent");
+
+      await submitNav(url, "indexes/btree");
+
+      const navWaitResult = await collectProcess(navWait, "learn wait nav");
+      expect(navWaitResult.exitCode).toBe(0);
+      expect(navWaitResult.stderr).toBe("");
+
+      const navTurnPath = navWaitResult.stdout.trim();
+      expect(navTurnPath).toBe(
+        join(courseDir, ".overlearn", "turns", "turn-2.json"),
+      );
+
+      const navTurn = JSON.parse(
+        await readFile(navTurnPath, "utf8"),
+      ) as TurnFile;
+      expect(navTurn).toEqual({
+        turn: 2,
+        createdAt: expect.any(String),
+        events: [{ type: "nav", path: "indexes/btree" }],
+      });
+
+      await submitNav(url, "indexes/btree");
+
+      const queuedNavWait = await runLearn(["wait", courseName], env);
+      expect(queuedNavWait.exitCode).toBe(0);
+      expect(queuedNavWait.stderr).toBe("");
+
+      const queuedNavTurnPath = queuedNavWait.stdout.trim();
+      expect(queuedNavTurnPath).toBe(
+        join(courseDir, ".overlearn", "turns", "turn-3.json"),
+      );
+
+      const queuedNavTurn = JSON.parse(
+        await readFile(queuedNavTurnPath, "utf8"),
+      ) as TurnFile;
+      expect(queuedNavTurn).toEqual({
+        turn: 3,
+        createdAt: expect.any(String),
+        events: [{ type: "nav", path: "indexes/btree" }],
       });
 
       const agentText = [
@@ -456,6 +585,8 @@ describe("learn start/wait browser round trip", () => {
 
       const reloadedHtml = await reloadedPage.text();
       expect(reloadedHtml).toContain("01-intro");
+      expect(reloadedHtml).toContain("B-tree");
+      expect(reloadedHtml).toContain('data-topic-path="indexes/btree"');
       expect(reloadedHtml).toContain("<h1>Lesson Revised</h1>");
       expect(reloadedHtml).toContain("<strong>lesson</strong>");
       expect(reloadedHtml).toContain('class="term" data-term="gradient"');
@@ -505,5 +636,5 @@ describe("learn start/wait browser round trip", () => {
     } finally {
       await rm(coursesDir, { force: true, recursive: true });
     }
-  }, 10_000);
+  }, 15_000);
 });

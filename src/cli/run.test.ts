@@ -140,3 +140,79 @@ describe("runCli", () => {
     });
   });
 });
+
+describe("emit topic CLI parsing", () => {
+  test("parses topic emit commands", () => {
+    expect(
+      parseCli(
+        [
+          "emit",
+          "topic",
+          "demo",
+          "--enter",
+          "indexes/btree",
+          "--title",
+          "B-tree",
+          "--lesson",
+          "02-btree",
+          "--json",
+        ],
+        "1.2.3",
+      ),
+    ).toEqual({
+      kind: "emit",
+      name: "demo",
+      emit: {
+        kind: "topic",
+        path: "indexes/btree",
+        title: "B-tree",
+        lesson: "02-btree",
+        json: true,
+      },
+    });
+
+    expect(
+      parseCli(["emit", "topic", "--enter", "indexes"], "1.2.3"),
+    ).toEqual({
+      kind: "emit",
+      emit: {
+        kind: "topic",
+        path: "indexes",
+        json: false,
+      },
+    });
+  });
+
+  test("rejects missing and empty topic fields", () => {
+    expect(parseCli(["emit", "topic"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit topic"),
+        stderr: "Usage: learn emit topic [name] --enter <topic/path> [--title <title>] [--lesson <lesson-id>] [--json]",
+      },
+    });
+
+    expect(
+      parseCli(["emit", "topic", "--enter", " "], "1.2.3"),
+    ).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit topic"),
+        stderr: "Topic path cannot be empty.",
+      },
+    });
+
+    expect(
+      parseCli(["emit", "topic", "--enter", "indexes", "--lesson", " "], "1.2.3"),
+    ).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn emit topic"),
+        stderr: "Topic lesson cannot be empty.",
+      },
+    });
+  });
+});

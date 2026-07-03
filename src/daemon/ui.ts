@@ -1,4 +1,4 @@
-import type { GlossaryEntry, TranscriptEntry } from "../course";
+import type { GlossaryEntry, TopicNode, TranscriptEntry } from "../course";
 import type { LessonSnapshot, RenderedLesson } from "./lessons";
 import { renderMarkdown } from "./markdown";
 
@@ -34,6 +34,7 @@ const clientScript = String.raw`
 const initialTranscript = __TRANSCRIPT__;
 const initialLessons = __LESSONS__;
 const initialGlossary = __GLOSSARY__;
+const initialTopics = __TOPICS__;
 
 const form = document.querySelector("#turn-form");
 const textarea = document.querySelector("#message");
@@ -50,6 +51,9 @@ const viewTabs = [...document.querySelectorAll("[data-view]")];
 
 let lessons = [...initialLessons.lessons];
 let selectedLessonId = initialLessons.selectedLessonId;
+let topics = [...initialTopics];
+let selectedTopicPath = undefined;
+let userPinnedTopic = false;
 let userPinnedLesson = false;
 let transcriptEntries = [...initialTranscript];
 let glossary = [...initialGlossary];
@@ -93,51 +97,195 @@ const setActiveView = (view) => {
   renderViewTabs();
 };
 
-const selectLesson = (lessonId) => {
-  userPinnedLesson = true;
-  selectedLessonId = lessonId;
-  activeView = "lessons";
-  renderLessonList();
-  renderViewTabs();
+const walkTopics = (nodes, visit) => {
+  for (const topic of nodes) {
+    visit(topic);
+    walkTopics(topic.children ?? [], visit);
+  }
 };
 
-const renderLessonList = () => {
-  hideTermCard();
-  lessons.sort((left, right) => left.id.localeCompare(right.id));
-  lessonList.replaceChildren();
+const findCurrentTopic = () => {
+  let current = undefined;
+  walkTopics(topics, (topic) => {
+    if (topic.current === true) {
+      current = topic;
+    }
+  });
+  return current;
+};
 
-  if (lessons.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "empty-state";
-    empty.textContent = "No lessons yet.";
-    lessonList.append(empty);
-    lessonContent.className = "lesson-content empty-lesson";
-    lessonContent.textContent = "No lesson selected.";
+const findTopicForLesson = (lessonId) => {
+  let match = undefined;
+  walkTopics(topics, (topic) => {
+    if (match === undefined && topic.lesson === lessonId) {
+      match = topic;
+    }
+  });
+  return match;
+};
+
+const referencedLessonIds = () => {
+  const ids = new Set();
+  walkTopics(topics, (topic) => {
+    if (topic.lesson !== undefined) {
+      ids.add(topic.lesson);
+    }
+  });
+  return ids;
+};
+
+const applyCurrentTopicSelection = () => {
+  const topic = findCurrentTopic();
+  if (topic === undefined) {
     return;
   }
 
+  if (!userPinnedTopic) {
+    selectedTopicPath = topic.path;
+  }
+
+  if (
+    !userPinnedLesson &&
+    topic.lesson !== undefined &&
+    lessons.some((lesson) => lesson.id === topic.lesson)
+  ) {
+    selectedLessonId = topic.lesson;
+  }
+};
+
+const submitNav = async (path) => {
+  applyStatus("agent-working");
+
+  const response = await fetch("/api/nav", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+
+  if (!response.ok) {
+    statusLine.textContent = await response.text();
+  }
+};
+
+const selectTopic = async (topic) => {
+  selectedTopicPath = topic.path;
+  userPinnedTopic = true;
+  if (topic.lesson !== undefined) {
+    selectedLessonId = topic.lesson;
+    userPinnedLesson = true;
+  }
+
+  activeView = "lessons";
+  renderNavigation();
+  renderViewTabs();
+  await submitNav(topic.path);
+};
+
+const selectLesson = (lessonId) => {
+  userPinnedLesson = true;
+  selectedLessonId = lessonId;
+  selectedTopicPath = findTopicForLesson(lessonId)?.path;
+  userPinnedTopic = selectedTopicPath !== undefined;
+  activeView = "lessons";
+  renderNavigation();
+  renderViewTabs();
+};
+
+const createTopicList = (nodes, nested = false) => {
+  const list = document.createElement("ul");
+  list.className = nested ? "topic-tree topic-children" : "topic-tree";
+
+  for (const topic of nodes) {
+    const item = document.createElement("li");
+    item.className = "topic-node";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className =
+      "topic-button" +
+      (topic.path === selectedTopicPath ? " active" : "") +
+      (topic.current === true ? " current" : "") +
+      (topic.lesson === undefined ? " no-lesson" : "");
+    button.dataset.topicPath = topic.path;
+    button.textContent = topic.title;
+    if (topic.current === true) {
+      button.setAttribute("aria-current", "page");
+    }
+    button.addEventListener("click", () => {
+      void selectTopic(topic);
+    });
+
+    item.append(button);
+    if ((topic.children ?? []).length > 0) {
+      item.append(createTopicList(topic.children, true));
+    }
+
+    list.append(item);
+  }
+
+  return list;
+};
+
+const renderLessonContent = () => {
   let selected = lessons.find((lesson) => lesson.id === selectedLessonId);
   if (selected === undefined) {
     selected = latestLesson() ?? lessons[0];
     selectedLessonId = selected?.id;
   }
 
-  for (const lesson of lessons) {
-    const tab = document.createElement("button");
-    tab.type = "button";
-    tab.className = "lesson-tab" + (lesson.id === selectedLessonId ? " active" : "");
-    tab.dataset.lessonId = lesson.id;
-    tab.textContent = lesson.id;
-    tab.addEventListener("click", () => {
-      selectLesson(lesson.id);
-    });
-    lessonList.append(tab);
+  if (selected === undefined) {
+    lessonContent.className = "lesson-content empty-lesson";
+    lessonContent.textContent = "No lesson selected.";
+    return;
   }
 
-  if (selected !== undefined) {
-    lessonContent.className = "lesson-content prose";
-    lessonContent.innerHTML = selected.html;
+  lessonContent.className = "lesson-content prose";
+  lessonContent.innerHTML = selected.html;
+};
+
+const renderNavigation = () => {
+  hideTermCard();
+  lessons.sort((left, right) => left.id.localeCompare(right.id));
+  lessonList.replaceChildren();
+  applyCurrentTopicSelection();
+
+  if (topics.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No topics yet.";
+    lessonList.append(empty);
+  } else {
+    lessonList.append(createTopicList(topics));
   }
+
+  const assignedLessonIds = referencedLessonIds();
+  const unassignedLessons = lessons.filter((lesson) => !assignedLessonIds.has(lesson.id));
+
+  if (unassignedLessons.length > 0) {
+    const section = document.createElement("section");
+    section.className = "unassigned-lessons";
+
+    const heading = document.createElement("h3");
+    heading.className = "unassigned-heading";
+    heading.textContent = "Unassigned lessons";
+    section.append(heading);
+
+    for (const lesson of unassignedLessons) {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "lesson-tab" + (lesson.id === selectedLessonId ? " active" : "");
+      tab.dataset.lessonId = lesson.id;
+      tab.textContent = lesson.id;
+      tab.addEventListener("click", () => {
+        selectLesson(lesson.id);
+      });
+      section.append(tab);
+    }
+
+    lessonList.append(section);
+  }
+
+  renderLessonContent();
 };
 
 const renderGlossaryList = () => {
@@ -193,7 +341,7 @@ const upsertLesson = (lesson) => {
     userPinnedLesson = false;
   }
 
-  renderLessonList();
+  renderNavigation();
 };
 
 const deleteLesson = (id) => {
@@ -205,7 +353,7 @@ const deleteLesson = (id) => {
     selectedLessonId = latestLesson()?.id;
   }
 
-  renderLessonList();
+  renderNavigation();
 };
 
 const applyLessonEvent = (event) => {
@@ -226,7 +374,7 @@ const applyLessonEvent = (event) => {
       userPinnedLesson = false;
       selectedLessonId = event.snapshot.selectedLessonId;
     }
-    renderLessonList();
+    renderNavigation();
   }
 };
 
@@ -365,7 +513,7 @@ const submitMessage = async () => {
   }
 };
 
-renderLessonList();
+renderNavigation();
 renderGlossaryList();
 renderViewTabs();
 renderTranscript();
@@ -485,6 +633,12 @@ events.addEventListener("glossary", (event) => {
     showTermCard(currentTermElement);
   }
 });
+events.addEventListener("topics", (event) => {
+  topics = [...JSON.parse(event.data).topics];
+  userPinnedTopic = false;
+  userPinnedLesson = false;
+  renderNavigation();
+});
 events.addEventListener("transcript", (event) => {
   transcriptEntries = [...JSON.parse(event.data).entries];
   renderTranscript();
@@ -500,36 +654,125 @@ const renderTranscript = (
     html: renderMarkdown(entry.text, { glossary }),
   }));
 
+const walkTopicTree = (
+  topics: readonly TopicNode[],
+  visit: (topic: TopicNode) => void,
+): void => {
+  for (const topic of topics) {
+    visit(topic);
+    walkTopicTree(topic.children, visit);
+  }
+};
+
+const currentTopic = (topics: readonly TopicNode[]): TopicNode | undefined => {
+  let current: TopicNode | undefined;
+  walkTopicTree(topics, (topic) => {
+    if (topic.current) {
+      current = topic;
+    }
+  });
+
+  return current;
+};
+
+const topicLessonIds = (topics: readonly TopicNode[]): ReadonlySet<string> => {
+  const ids = new Set<string>();
+  walkTopicTree(topics, (topic) => {
+    if (topic.lesson !== undefined) {
+      ids.add(topic.lesson);
+    }
+  });
+
+  return ids;
+};
+
 const selectedLesson = (
   snapshot: LessonSnapshot,
+  topics: readonly TopicNode[],
 ): RenderedLesson | undefined => {
+  const currentLessonId = currentTopic(topics)?.lesson;
+  const selectedCurrent =
+    currentLessonId === undefined
+      ? undefined
+      : snapshot.lessons.find((lesson) => lesson.id === currentLessonId);
   const selectedById =
     snapshot.selectedLessonId === undefined
       ? undefined
       : snapshot.lessons.find((lesson) => lesson.id === snapshot.selectedLessonId);
 
-  return selectedById ?? snapshot.lessons[0];
+  return selectedCurrent ?? selectedById ?? snapshot.lessons[0];
 };
 
-const renderLessonTabs = (snapshot: LessonSnapshot): string => {
-  const selected = selectedLesson(snapshot);
-
-  if (snapshot.lessons.length === 0) {
-    return '<p class="empty-state">No lessons yet.</p>';
+const renderTopicTree = (
+  topics: readonly TopicNode[],
+  selected: RenderedLesson | undefined,
+  nested = false,
+): string => {
+  if (topics.length === 0) {
+    return '<p class="empty-state">No topics yet.</p>';
   }
 
-  return snapshot.lessons
+  const className = nested ? "topic-tree topic-children" : "topic-tree";
+
+  return `<ul class="${className}">${topics
+    .map((topic) => {
+      const activeClass = topic.lesson === selected?.id ? " active" : "";
+      const currentClass = topic.current ? " current" : "";
+      const noLessonClass = topic.lesson === undefined ? " no-lesson" : "";
+      const ariaCurrent = topic.current ? ' aria-current="page"' : "";
+      const children =
+        topic.children.length === 0
+          ? ""
+          : renderTopicTree(topic.children, selected, true);
+
+      return `<li class="topic-node"><button class="topic-button${activeClass}${currentClass}${noLessonClass}" type="button" data-topic-path="${escapeHtml(
+        topic.path,
+      )}"${ariaCurrent}>${escapeHtml(topic.title)}</button>${children}</li>`;
+    })
+    .join("")}</ul>`;
+};
+
+const renderUnassignedLessons = (
+  snapshot: LessonSnapshot,
+  topics: readonly TopicNode[],
+  selected: RenderedLesson | undefined,
+): string => {
+  const assignedLessonIds = topicLessonIds(topics);
+  const unassignedLessons = snapshot.lessons.filter(
+    (lesson) => !assignedLessonIds.has(lesson.id),
+  );
+
+  if (unassignedLessons.length === 0) {
+    return "";
+  }
+
+  return `<section class="unassigned-lessons"><h3 class="unassigned-heading">Unassigned lessons</h3>${unassignedLessons
     .map((lesson) => {
       const activeClass = lesson.id === selected?.id ? " active" : "";
       return `<button class="lesson-tab${activeClass}" type="button" data-lesson-id="${escapeHtml(
         lesson.id,
       )}">${escapeHtml(lesson.id)}</button>`;
     })
-    .join("");
+    .join("")}</section>`;
 };
 
-const renderLessonContent = (snapshot: LessonSnapshot): string => {
-  const lesson = selectedLesson(snapshot);
+const renderNavigation = (
+  snapshot: LessonSnapshot,
+  topics: readonly TopicNode[],
+): string => {
+  const selected = selectedLesson(snapshot, topics);
+  return `${renderTopicTree(topics, selected)}${renderUnassignedLessons(
+    snapshot,
+    topics,
+    selected,
+  )}`;
+};
+
+const renderLessonContent = (
+  snapshot: LessonSnapshot,
+  topics: readonly TopicNode[],
+): string => {
+  const lesson = selectedLesson(snapshot, topics);
   if (lesson === undefined) {
     return '<div id="lesson-content" class="lesson-content empty-lesson" aria-live="polite">No lesson selected.</div>';
   }
@@ -542,6 +785,7 @@ export const renderPage = (
   transcript: readonly TranscriptEntry[],
   lessons: LessonSnapshot,
   glossary: readonly GlossaryEntry[],
+  topics: readonly TopicNode[],
 ): string => {
   const script = clientScript
     .replace(
@@ -549,7 +793,8 @@ export const renderPage = (
       escapeScriptJson(renderTranscript(transcript, glossary)),
     )
     .replace("__LESSONS__", escapeScriptJson(lessons))
-    .replace("__GLOSSARY__", escapeScriptJson(glossary));
+    .replace("__GLOSSARY__", escapeScriptJson(glossary))
+    .replace("__TOPICS__", escapeScriptJson(topics));
 
   return `<!doctype html>
 <html lang="en" class="scheme-only-dark">
@@ -668,6 +913,73 @@ export const renderPage = (
       display: grid;
       gap: 0.4rem;
       margin-top: 0.75rem;
+    }
+
+    .topic-tree {
+      display: grid;
+      gap: 0.3rem;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .topic-children {
+      margin-top: 0.3rem;
+      padding-left: 0.85rem;
+      border-left: 1px solid #30352d;
+    }
+
+    .topic-node {
+      display: grid;
+      gap: 0.3rem;
+      min-width: 0;
+    }
+
+    .topic-button {
+      width: 100%;
+      min-height: 2.25rem;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: #d5d5cf;
+      padding: 0.45rem 0.6rem;
+      font: inherit;
+      text-align: left;
+      overflow-wrap: anywhere;
+      cursor: pointer;
+    }
+
+    .topic-button.no-lesson {
+      color: #aeb0a8;
+    }
+
+    .topic-button:hover,
+    .topic-button.active {
+      border-color: #44523c;
+      background: #20261e;
+      color: #f4f4f1;
+    }
+
+    .topic-button.current {
+      border-color: #8fbf73;
+      color: #f4f4f1;
+    }
+
+    .unassigned-lessons {
+      display: grid;
+      gap: 0.4rem;
+      margin-top: 0.85rem;
+      border-top: 1px solid #2f302b;
+      padding-top: 0.75rem;
+    }
+
+    .unassigned-heading {
+      margin: 0 0 0.1rem;
+      color: #a1a19a;
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0;
+      text-transform: uppercase;
     }
 
     .lesson-tab {
@@ -1081,13 +1393,14 @@ export const renderPage = (
       <div class="study-pane">
         <section id="lesson-view" class="lesson-pane" aria-labelledby="lesson-heading">
           <nav class="lesson-nav" aria-labelledby="lesson-heading">
-            <h2 id="lesson-heading">Lessons</h2>
-            <div id="lesson-list" class="lesson-list">${renderLessonTabs(
+            <h2 id="lesson-heading">Topics</h2>
+            <div id="lesson-list" class="lesson-list">${renderNavigation(
               lessons,
+              topics,
             )}</div>
           </nav>
 
-          ${renderLessonContent(lessons)}
+          ${renderLessonContent(lessons, topics)}
         </section>
 
         <section id="glossary-view" class="glossary-pane" aria-labelledby="glossary-heading" hidden>

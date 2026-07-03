@@ -1,4 +1,11 @@
-import { appendFile, mkdir, readdir, rm, stat } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readdir,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -9,7 +16,16 @@ export type CourseManifest = Readonly<{
   formatVersion: typeof COURSE_FORMAT_VERSION;
   name: string;
   createdAt: string;
-  topics: readonly string[];
+  topics: readonly TopicNode[];
+}>;
+
+export type TopicNode = Readonly<{
+  path: string;
+  title: string;
+  lesson?: string;
+  enteredAt?: string;
+  current: boolean;
+  children: readonly TopicNode[];
 }>;
 
 export type CourseFileLayout = Readonly<{
@@ -46,7 +62,12 @@ export type MessageTurnEvent = Readonly<{
   text: string;
 }>;
 
-export type TurnEvent = MessageTurnEvent;
+export type NavTurnEvent = Readonly<{
+  type: "nav";
+  path: string;
+}>;
+
+export type TurnEvent = MessageTurnEvent | NavTurnEvent;
 
 export type TurnFile = Readonly<{
   turn: number;
@@ -76,6 +97,18 @@ export type GlossaryEntryInput = Readonly<{
 export type GlossaryMutation = Readonly<{
   action: "created" | "updated";
   entry: GlossaryEntry;
+}>;
+
+export type TopicInput = Readonly<{
+  path: string;
+  title?: string;
+  lesson?: string;
+}>;
+
+export type TopicMutation = Readonly<{
+  action: "created" | "updated";
+  topic: TopicNode;
+  topics: readonly TopicNode[];
 }>;
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -112,8 +145,31 @@ const readJson = async (filePath: string): Promise<unknown> => {
   }
 };
 
+const tempJsonPath = (filePath: string): string =>
+  join(
+    dirname(filePath),
+    `.${basename(filePath)}.${process.pid}.${Date.now()}.${Math.random()
+      .toString(36)
+      .slice(2)}.tmp`,
+  );
+
 const writeJson = async (filePath: string, value: unknown): Promise<void> => {
   await Bun.write(filePath, `${JSON.stringify(value, null, 2)}\n`);
+};
+
+const writeJsonAtomic = async (
+  filePath: string,
+  value: unknown,
+): Promise<void> => {
+  const temporaryPath = tempJsonPath(filePath);
+
+  try {
+    await Bun.write(temporaryPath, `${JSON.stringify(value, null, 2)}\n`);
+    await rename(temporaryPath, filePath);
+  } catch (error) {
+    await rm(temporaryPath, { force: true });
+    throw error;
+  }
 };
 
 const writeIfMissing = async (
@@ -125,6 +181,133 @@ const writeIfMissing = async (
   }
 
   await Bun.write(filePath, contents);
+};
+
+export const isValidCourseName = (name: string): boolean =>
+  name.length > 0 &&
+  name !== "." &&
+  name !== ".." &&
+  !name.includes("/") &&
+  !name.includes("\\");
+
+export const isValidTopicPath = (path: string): boolean =>
+  path.length > 0 &&
+  !path.startsWith("/") &&
+  !path.endsWith("/") &&
+  path.split("/").every(isValidCourseName);
+
+const invalidTopicMessage = (filePath: string): string =>
+  `Invalid course topics in ${filePath}: expected topic tree nodes.`;
+
+const directChildPath = (path: string, parentPath: string): boolean => {
+  if (!path.startsWith(`${parentPath}/`)) {
+    return false;
+  }
+
+  return path.split("/").length === parentPath.split("/").length + 1;
+};
+
+const parseTopicNode = (
+  value: unknown,
+  filePath: string,
+  location: string,
+  parentPath: string | undefined,
+  seenPaths: Set<string>,
+  currentCount: { value: number },
+): TopicNode => {
+  if (!isRecord(value)) {
+    throw new Error(invalidTopicMessage(filePath));
+  }
+
+  const path = value["path"];
+  const title = value["title"];
+  const lesson = value["lesson"];
+  const enteredAt = value["enteredAt"];
+  const current = value["current"];
+  const children = value["children"];
+
+  if (
+    typeof path !== "string" ||
+    !isValidTopicPath(path) ||
+    (parentPath === undefined && path.includes("/")) ||
+    (parentPath !== undefined && !directChildPath(path, parentPath)) ||
+    typeof title !== "string" ||
+    title.trim().length === 0 ||
+    (lesson !== undefined &&
+      (typeof lesson !== "string" || lesson.trim().length === 0)) ||
+    (enteredAt !== undefined &&
+      (typeof enteredAt !== "string" || enteredAt.trim().length === 0)) ||
+    (current !== undefined && typeof current !== "boolean") ||
+    !Array.isArray(children)
+  ) {
+    throw new Error(`${invalidTopicMessage(filePath)} Invalid node at ${location}.`);
+  }
+
+  if (seenPaths.has(path)) {
+    throw new Error(
+      `${invalidTopicMessage(filePath)} Duplicate path: ${path}.`,
+    );
+  }
+  seenPaths.add(path);
+
+  const isCurrent = current === true;
+  if (isCurrent) {
+    currentCount.value += 1;
+  }
+
+  return {
+    path,
+    title: title.trim(),
+    ...(lesson === undefined ? {} : { lesson: lesson.trim() }),
+    ...(enteredAt === undefined ? {} : { enteredAt: enteredAt.trim() }),
+    current: isCurrent,
+    children: children.map((child, index) =>
+      parseTopicNode(
+        child,
+        filePath,
+        `${location}.children[${index}]`,
+        path,
+        seenPaths,
+        currentCount,
+      ),
+    ),
+  };
+};
+
+const parseTopicTree = (
+  value: unknown,
+  filePath: string,
+): readonly TopicNode[] => {
+  if (!Array.isArray(value)) {
+    throw new Error(invalidTopicMessage(filePath));
+  }
+
+  if (value.length > 0 && value.every((topic) => typeof topic === "string")) {
+    throw new Error(
+      `Invalid course topics in ${filePath}: legacy flat topic arrays are no longer supported; expected topic tree nodes.`,
+    );
+  }
+
+  const seenPaths = new Set<string>();
+  const currentCount = { value: 0 };
+  const topics = value.map((topic, index) =>
+    parseTopicNode(
+      topic,
+      filePath,
+      `topics[${index}]`,
+      undefined,
+      seenPaths,
+      currentCount,
+    ),
+  );
+
+  if (topics.length > 0 && currentCount.value !== 1) {
+    throw new Error(
+      `Invalid course topics in ${filePath}: expected exactly one current topic.`,
+    );
+  }
+
+  return topics;
 };
 
 const parseCourseManifest = (
@@ -150,9 +333,7 @@ const parseCourseManifest = (
 
   if (
     typeof name !== "string" ||
-    typeof createdAt !== "string" ||
-    !Array.isArray(topics) ||
-    !topics.every((topic) => typeof topic === "string")
+    typeof createdAt !== "string"
   ) {
     throw new Error(`Invalid course manifest in ${filePath}`);
   }
@@ -161,7 +342,7 @@ const parseCourseManifest = (
     formatVersion,
     name,
     createdAt,
-    topics,
+    topics: parseTopicTree(topics, filePath),
   };
 };
 
@@ -196,13 +377,30 @@ const parseTurnEvent = (value: unknown, filePath: string): TurnEvent => {
   }
 
   const type = value["type"];
-  const text = value["text"];
 
-  if (type !== "message" || typeof text !== "string") {
+  if (type === "message") {
+    const text = value["text"];
+    if (typeof text !== "string") {
+      throw new Error(`Invalid pending event in ${filePath}`);
+    }
+
+    return { type, text };
+  }
+
+  if (type === "nav") {
+    const path = value["path"];
+    if (typeof path !== "string" || !isValidTopicPath(path)) {
+      throw new Error(`Invalid pending event in ${filePath}`);
+    }
+
+    return { type, path };
+  }
+
+  if (type !== "message" && type !== "nav") {
     throw new Error(`Invalid pending event in ${filePath}`);
   }
 
-  return { type, text };
+  throw new Error(`Invalid pending event in ${filePath}`);
 };
 
 const parseTranscriptEntry = (
@@ -284,13 +482,6 @@ const turnNumberFromFileName = (fileName: string): number | undefined => {
   return Number.parseInt(numberText, 10);
 };
 
-export const isValidCourseName = (name: string): boolean =>
-  name.length > 0 &&
-  name !== "." &&
-  name !== ".." &&
-  !name.includes("/") &&
-  !name.includes("\\");
-
 export const getCoursesDir = (env: Env = process.env): string => {
   const override = env["OVERLEARN_COURSES_DIR"];
   return resolve(override ?? join(homedir(), "courses"));
@@ -349,7 +540,7 @@ export const ensureCourseScaffold = async (
       topics: [],
     };
 
-    await writeJson(paths.courseJson, manifest);
+    await writeJsonAtomic(paths.courseJson, manifest);
   }
 
   await writeIfMissing(paths.transcriptJsonl, "");
@@ -364,6 +555,14 @@ export const readCourseManifest = async (
 ): Promise<CourseManifest> => {
   const paths = getCoursePaths(courseDir);
   return parseCourseManifest(await readJson(paths.courseJson), paths.courseJson);
+};
+
+const writeCourseManifest = async (
+  courseDir: string,
+  manifest: CourseManifest,
+): Promise<void> => {
+  const paths = getCoursePaths(courseDir);
+  await writeJsonAtomic(paths.courseJson, manifest);
 };
 
 export const readDaemonMetadata = async (
@@ -625,6 +824,201 @@ export const upsertGlossaryEntry = async (
 
   await writeGlossary(courseDir, nextEntries);
   return { action: "updated", entry };
+};
+
+type NormalizedTopicInput = Readonly<{
+  path: string;
+  title?: string;
+  lesson?: string;
+}>;
+
+const normalizeTopicInput = (input: TopicInput): NormalizedTopicInput => {
+  const path = input.path.trim();
+  if (path.length === 0) {
+    throw new Error("Topic path cannot be empty.");
+  }
+
+  if (!isValidTopicPath(path)) {
+    throw new Error(
+      `Invalid topic path: ${input.path}. Use slash-separated course-name-safe segments.`,
+    );
+  }
+
+  const title = input.title?.trim();
+  if (title !== undefined && title.length === 0) {
+    throw new Error("Topic title cannot be empty.");
+  }
+
+  const lesson = input.lesson?.trim();
+  if (lesson !== undefined && lesson.length === 0) {
+    throw new Error("Topic lesson cannot be empty.");
+  }
+
+  return {
+    path,
+    ...(title === undefined ? {} : { title }),
+    ...(lesson === undefined ? {} : { lesson }),
+  };
+};
+
+const formatTopicNode = (
+  path: string,
+  title: string,
+  lesson: string | undefined,
+  enteredAt: string | undefined,
+  current: boolean,
+  children: readonly TopicNode[],
+): TopicNode => ({
+  path,
+  title,
+  ...(lesson === undefined ? {} : { lesson }),
+  ...(enteredAt === undefined ? {} : { enteredAt }),
+  current,
+  children,
+});
+
+const createTopicNode = (path: string, title: string): TopicNode =>
+  formatTopicNode(path, title, undefined, undefined, false, []);
+
+const clearTopicCurrent = (node: TopicNode): TopicNode =>
+  formatTopicNode(
+    node.path,
+    node.title,
+    node.lesson,
+    node.enteredAt,
+    false,
+    node.children.map(clearTopicCurrent),
+  );
+
+type TopicTreeWalkResult = Readonly<{
+  created: boolean;
+  topic: TopicNode;
+  topics: readonly TopicNode[];
+}>;
+
+const upsertTopicSegments = (
+  topics: readonly TopicNode[],
+  segments: readonly string[],
+  index: number,
+  parentPath: string | undefined,
+  input: NormalizedTopicInput,
+  enteredAt: string,
+): TopicTreeWalkResult => {
+  const segment = segments[index];
+  if (segment === undefined) {
+    throw new Error("Topic path cannot be empty.");
+  }
+
+  const path = parentPath === undefined ? segment : `${parentPath}/${segment}`;
+  const existingIndex = topics.findIndex((topic) => topic.path === path);
+  const existing =
+    existingIndex === -1 ? createTopicNode(path, segment) : topics[existingIndex];
+
+  if (existing === undefined) {
+    throw new Error("Unable to update topic tree.");
+  }
+
+  const target = index === segments.length - 1;
+
+  if (target) {
+    const topic = formatTopicNode(
+      existing.path,
+      input.title ?? existing.title,
+      input.lesson ?? existing.lesson,
+      enteredAt,
+      true,
+      existing.children,
+    );
+    const nextTopics =
+      existingIndex === -1
+        ? [...topics, topic]
+        : topics.map((candidate, candidateIndex) =>
+            candidateIndex === existingIndex ? topic : candidate,
+          );
+
+    return {
+      created: existingIndex === -1,
+      topic,
+      topics: nextTopics,
+    };
+  }
+
+  const childResult = upsertTopicSegments(
+    existing.children,
+    segments,
+    index + 1,
+    path,
+    input,
+    enteredAt,
+  );
+  const topic = formatTopicNode(
+    existing.path,
+    existing.title,
+    existing.lesson,
+    existing.enteredAt,
+    false,
+    childResult.topics,
+  );
+  const nextTopics =
+    existingIndex === -1
+      ? [...topics, topic]
+      : topics.map((candidate, candidateIndex) =>
+          candidateIndex === existingIndex ? topic : candidate,
+        );
+
+  return {
+    created: existingIndex === -1 || childResult.created,
+    topic: childResult.topic,
+    topics: nextTopics,
+  };
+};
+
+export const upsertTopicTree = (
+  topics: readonly TopicNode[],
+  input: TopicInput,
+  now = new Date(),
+): TopicMutation => {
+  const normalized = normalizeTopicInput(input);
+  const segments = normalized.path.split("/");
+  const clearedTopics = topics.map(clearTopicCurrent);
+  const result = upsertTopicSegments(
+    clearedTopics,
+    segments,
+    0,
+    undefined,
+    normalized,
+    now.toISOString(),
+  );
+
+  return {
+    action: result.created ? "created" : "updated",
+    topic: result.topic,
+    topics: result.topics,
+  };
+};
+
+export const upsertTopic = async (
+  courseDir: string,
+  input: TopicInput,
+  now = new Date(),
+): Promise<TopicMutation> => {
+  const normalized = normalizeTopicInput(input);
+
+  if (
+    normalized.lesson !== undefined &&
+    !(await lessonExists(courseDir, normalized.lesson))
+  ) {
+    throw new Error(`Lesson does not exist: ${normalized.lesson}`);
+  }
+
+  const manifest = await readCourseManifest(courseDir);
+  const mutation = upsertTopicTree(manifest.topics, normalized, now);
+  await writeCourseManifest(courseDir, {
+    ...manifest,
+    topics: mutation.topics,
+  });
+
+  return mutation;
 };
 
 export const nextTurnNumber = async (courseDir: string): Promise<number> => {
