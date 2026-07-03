@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import {
   createServer,
   type IncomingMessage,
@@ -854,6 +854,10 @@ const sendResponse = async (
 export const runDaemon = async (courseDir: string): Promise<void> => {
   const coursePaths = getCoursePaths(courseDir);
   const coursePath = coursePaths.courseDir;
+
+  // Resumed/fetched courses have no runtime dir yet; watchers below need it.
+  await mkdir(coursePaths.turnsDir, { recursive: true });
+
   let manifest = await readCourseManifest(coursePath);
   let glossaryEntries = await readGlossary(coursePath);
   let topicTree = manifest.topics;

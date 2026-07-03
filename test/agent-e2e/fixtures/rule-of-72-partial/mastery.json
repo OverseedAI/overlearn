@@ -1,14 +1,14 @@
 [
   {
-    "topic": "What the Rule of 72 estimates",
-    "status": "introduced"
+    "concept": "estimate",
+    "score": 78,
+    "gaps": "explained doubling time but did not connect it to the 72/rate formula unprompted",
+    "at": "2026-06-30T18:03:05.000Z"
   },
   {
-    "topic": "Using 72 divided by the rate",
-    "status": "practiced"
-  },
-  {
-    "topic": "Why 72 is a useful numerator",
-    "status": "next"
+    "concept": "rate-to-years",
+    "score": 88,
+    "gaps": "solid on 6% and 9% cases; slightly hesitant converting decimal rates",
+    "at": "2026-06-30T18:04:50.000Z"
   }
 ]
