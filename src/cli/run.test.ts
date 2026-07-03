@@ -17,11 +17,8 @@ describe("runCli", () => {
     expect(result.stdout).toContain("learn say [name] --text <markdown>");
     expect(result.stdout).toContain("learn instructions [name] [--json]");
     expect(result.stdout).toContain("learn status [name] --json");
-<<<<<<< HEAD
     expect(result.stdout).toContain("learn resume <name>");
-=======
     expect(result.stdout).toContain("learn emit glossary [name]");
->>>>>>> origin/main
     expect(result.stdout).toContain("learn --help");
     expect(result.stdout).toContain("learn --version");
   });
@@ -88,7 +85,6 @@ describe("runCli", () => {
     });
   });
 
-<<<<<<< HEAD
   test("requires a course name for resume", () => {
     expect(parseCli(["resume"], "1.2.3")).toEqual({
       kind: "result",
@@ -96,7 +92,10 @@ describe("runCli", () => {
         exitCode: 1,
         stdout: expect.stringContaining("learn resume <name>"),
         stderr: "Usage: learn resume <name>",
-=======
+      },
+    });
+  });
+
   test("parses glossary emit commands", () => {
     expect(
       parseCli(
@@ -137,7 +136,6 @@ describe("runCli", () => {
         exitCode: 1,
         stdout: expect.stringContaining("learn emit glossary"),
         stderr: "Glossary term cannot be empty.",
->>>>>>> origin/main
       },
     });
   });
