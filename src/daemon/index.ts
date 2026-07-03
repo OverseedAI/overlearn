@@ -328,11 +328,16 @@ const parseWaitResponse = async (response: Response): Promise<string> => {
   return body["turnPath"];
 };
 
+export type LearnerTurn = Readonly<{
+  turnPath: string;
+  courseDir: string;
+}>;
+
 export const waitForLearnerTurn = async (
   name: string | undefined,
   env: Env = process.env,
   cwd = process.cwd(),
-): Promise<string> => {
+): Promise<LearnerTurn> => {
   const courseDir = await resolveCourseDirForWait(name, env, cwd);
   const metadata = await readDaemonMetadata(courseDir);
 
@@ -371,7 +376,10 @@ export const waitForLearnerTurn = async (
     );
   }
 
-  return parseWaitResponse(response);
+  return {
+    turnPath: await parseWaitResponse(response),
+    courseDir,
+  };
 };
 
 export const getCourseStatus = async (

@@ -44,8 +44,11 @@ Each teaching turn:
    you just wrote or updated, and pose the current check question. Keep it to
    a few lines — the lesson file carries the substance, the say carries the
    conversation.
-6. ALWAYS launch `learn wait <course>` as a background task after acting.
-7. STOP after launching the background wait. Do not continue until it exits.
+6. ALWAYS re-enter `learn wait <course>` after acting, using your harness's
+   discipline: on Claude Code launch it as a background task and stop; on
+   Codex (or any harness that does not wake you when a background process
+   exits) run it in the foreground and block.
+7. Do not produce more output or continue teaching until the wait exits.
 
 Lesson files:
 
@@ -97,7 +100,9 @@ Daemon and wait rules:
 - Exit code 2 means the daemon died or the wait could not continue.
 - On wait failure, run `learn start <course>`, inspect `learn status <course>
   --json`, and resume from the course files and transcript.
-- Never leave an active learner session without a pending `learn wait`.
+- Never leave an active learner session without a pending `learn wait`. On
+  harnesses without background-task wake-ups (Codex), pending means a
+  foreground `learn wait` blocking your current turn.
 - If the learner explicitly ends the session, write a compact final lesson or
   summary, optionally send a closing `learn say`, and then stop without
   re-entering wait.

@@ -24,11 +24,22 @@ chmod 0755 ~/.local/bin/learn
 
 Use `learn-linux-arm64`, `learn-darwin-x64`, or `learn-darwin-arm64` for other platforms.
 
-Install the Claude Code harness files:
+Install the harness files for your agent (Claude Code and Codex today):
 
 ```sh
 learn install claude-code
+# or
+learn install codex
 ```
+
+Both installs write a harness-specific `learn` skill and a Stop-hook backstop
+that keeps the agent in the teaching loop. Claude Code gets the hook in
+`.claude/settings.json`; Codex gets it in `~/.codex/hooks.json`, and the
+install also enables `features.hooks` in `~/.codex/config.toml` if needed.
+
+Re-running `learn install` after upgrading the CLI refreshes the installed
+files, as long as you haven't edited them yourself (use `--force` to overwrite
+your edits too).
 
 Claude Code plugin marketplace alternative:
 
@@ -40,11 +51,11 @@ claude plugin install overlearn@overlearn
 Quickstart:
 
 ```sh
-learn install claude-code
+learn install claude-code   # or: learn install codex
 learn start my-course
 ```
 
-In Claude Code, run `/learn`.
+In your agent, run `/learn`.
 
 ## Registry
 

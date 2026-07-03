@@ -455,7 +455,7 @@ describe("installer", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain(`Installed learn to ${installDir}/learn`);
     expect(result.stdout).toContain("PATH hint:");
-    expect(result.stdout).toContain("Claude Code setup (optional, run it yourself):");
+    expect(result.stdout).toContain("Agent harness setup (optional, run it yourself):");
     expect(result.stdout).toContain("learn install claude-code");
     expect(result.stdout).toContain("Quickstart:");
     expect(result.stderr).toBe("");

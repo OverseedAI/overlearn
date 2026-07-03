@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 
+# Stop-hook backstop. No argument: Claude Code mode (block by exit 2 +
+# stderr). With "codex" as $1: Codex mode (block by printing a
+# {"decision":"block"} JSON decision to stdout, per the Codex hooks protocol).
+
 set -uo pipefail
+
+mode="${1:-claude-code}"
 
 find_learn_bin() {
   if command -v learn >/dev/null 2>&1; then
@@ -47,7 +53,10 @@ if ! printf '%s\n' "${status_json}" |
   exit 0
 fi
 
-if printf '%s\n' "${status_json}" |
+# A pending wait only makes stopping safe on Claude Code, where the harness
+# re-invokes the agent when the background wait exits. Codex has no such
+# wake-up, so an ended turn strands the session even with a wait pending.
+if [[ "${mode}" != "codex" ]] && printf '%s\n' "${status_json}" |
   grep -Eq '"waitPending"[[:space:]]*:[[:space:]]*true'; then
   exit 0
 fi
@@ -58,6 +67,12 @@ course_dir=$(
 )
 
 if [[ -n "${course_dir}" ]] && last_learner_said_goodbye "${course_dir}"; then
+  exit 0
+fi
+
+if [[ "${mode}" == "codex" ]]; then
+  # Codex Stop hooks read a JSON decision from stdout; exit 0 either way.
+  printf '%s\n' '{"decision":"block","reason":"Overlearn learner session is active, but no `learn wait` is pending. Re-enter the loop: run `learn wait <course>` in the FOREGROUND and block until it exits, then act on the turn.json it prints."}'
   exit 0
 fi
 

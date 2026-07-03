@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { basename } from "node:path";
+
 import packageJson from "../../package.json";
 import {
   assembleInstructionModules,
@@ -203,9 +205,20 @@ const main = async (): Promise<CliResult> => {
   }
 
   if (command.kind === "wait") {
+    const turn = await waitForLearnerTurn(command.name);
+    const course = basename(turn.courseDir);
+
+    // Crit-style wake-time re-prompt: restate the loop discipline at the
+    // moment the agent resumes, instead of trusting skill text from earlier
+    // turns. Stdout stays machine-readable (the turn.json path only).
     return {
       exitCode: 0,
-      stdout: await waitForLearnerTurn(command.name),
+      stdout: turn.turnPath,
+      stderr: [
+        `Act on every event in the printed turn.json, then immediately re-enter \`learn wait ${course}\` —`,
+        "as a background task on Claude Code, or as a foreground blocking command on Codex.",
+        "Never end the session without a pending wait unless the learner said goodbye.",
+      ].join("\n"),
     };
   }
 

@@ -50,11 +50,13 @@ Do not inline or invent teaching policy. The teaching directives must come from
    - Do NOT treat chat as the primary deliverable.
 
 6. Re-enter the wait.
-   - MANDATORY: launch `learn wait <course>` as a background task.
-   - STOP immediately after launching the background wait.
-   - Do NOT produce more output, continue teaching, or end the session while the
-     wait is pending.
-   - Do NOT proceed until the background wait exits.
+   - MANDATORY: run `learn wait <course>` in the FOREGROUND and block until it
+     exits. That blocking command is how the learner's next message reaches
+     you — its exit is your wake-up signal.
+   - Do NOT run it in the background: this harness does not wake you when a
+     background process exits, so a backgrounded wait strands the learner.
+   - Do NOT end your turn, produce more output, or continue teaching while the
+     wait is running.
 
 7. Handle the next learner turn.
    - When `learn wait` exits 0, read the `turn.json` path it printed.
@@ -67,5 +69,5 @@ Do not inline or invent teaching policy. The teaching directives must come from
    - Resume from the course files and transcript.
    - GOTO step 5.
 
-Never end an active learner session without either a pending `learn wait` or a
+Never end an active learner session without either a running `learn wait` or a
 clear learner goodbye handled according to the ingested protocol.
