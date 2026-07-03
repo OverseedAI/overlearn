@@ -8,6 +8,11 @@ import {
   startCourseDaemon,
   waitForLearnerTurn,
 } from "../daemon";
+import {
+  resolveCourseDirForWait,
+  upsertGlossaryEntry,
+  type GlossaryMutation,
+} from "../course";
 import { parseCli, type CliResult } from "./run";
 
 const writeResult = (result: CliResult): void => {
@@ -34,6 +39,24 @@ const errorResult = (error: unknown): CliResult => {
     stdout: "",
     stderr: error instanceof Error ? error.message : "Unknown error.",
   };
+};
+
+const formatGlossaryEmitOutput = (
+  coursePath: string,
+  mutation: GlossaryMutation,
+  json: boolean,
+): string => {
+  if (json) {
+    return JSON.stringify({
+      ok: true,
+      kind: "glossary",
+      action: mutation.action,
+      coursePath,
+      entry: mutation.entry,
+    });
+  }
+
+  return `${mutation.action} glossary term: ${mutation.entry.term}`;
 };
 
 const main = async (): Promise<CliResult> => {
@@ -69,6 +92,16 @@ const main = async (): Promise<CliResult> => {
           stdout: "",
           stderr,
         };
+  }
+
+  if (command.kind === "emit") {
+    const coursePath = await resolveCourseDirForWait(command.name);
+    const mutation = await upsertGlossaryEntry(coursePath, command.emit);
+
+    return {
+      exitCode: 0,
+      stdout: formatGlossaryEmitOutput(coursePath, mutation, command.emit.json),
+    };
   }
 
   await runDaemon(command.courseDir);

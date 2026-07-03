@@ -1,4 +1,4 @@
-import type { TranscriptEntry } from "../course";
+import type { GlossaryEntry, TranscriptEntry } from "../course";
 import type { LessonSnapshot, RenderedLesson } from "./lessons";
 import { renderMarkdown } from "./markdown";
 
@@ -33,6 +33,7 @@ const escapeScriptJson = (value: unknown): string => {
 const clientScript = String.raw`
 const initialTranscript = __TRANSCRIPT__;
 const initialLessons = __LESSONS__;
+const initialGlossary = __GLOSSARY__;
 
 const form = document.querySelector("#turn-form");
 const textarea = document.querySelector("#message");
@@ -41,10 +42,20 @@ const statusLine = document.querySelector("#status");
 const transcript = document.querySelector("#transcript");
 const lessonList = document.querySelector("#lesson-list");
 const lessonContent = document.querySelector("#lesson-content");
+const lessonView = document.querySelector("#lesson-view");
+const glossaryView = document.querySelector("#glossary-view");
+const glossaryList = document.querySelector("#glossary-list");
+const termCard = document.querySelector("#term-card");
+const viewTabs = [...document.querySelectorAll("[data-view]")];
 
 let lessons = [...initialLessons.lessons];
 let selectedLessonId = initialLessons.selectedLessonId;
 let userPinnedLesson = false;
+let transcriptEntries = [...initialTranscript];
+let glossary = [...initialGlossary];
+let activeView = "lessons";
+let currentTermElement = undefined;
+let hideTermCardTimer = undefined;
 
 const scrollTranscript = () => {
   transcript.scrollTop = transcript.scrollHeight;
@@ -58,7 +69,40 @@ const latestLesson = () =>
     return latest;
   }, undefined);
 
+const glossaryKey = (term) => term.toLocaleLowerCase();
+
+const glossaryEntryForTerm = (term) =>
+  glossary.find((entry) => glossaryKey(entry.term) === glossaryKey(term));
+
+const sortedGlossary = () =>
+  [...glossary].sort((left, right) => left.term.localeCompare(right.term));
+
+const renderViewTabs = () => {
+  for (const tab of viewTabs) {
+    const selected = tab.dataset.view === activeView;
+    tab.classList.toggle("active", selected);
+    tab.setAttribute("aria-selected", selected ? "true" : "false");
+  }
+
+  lessonView.hidden = activeView !== "lessons";
+  glossaryView.hidden = activeView !== "glossary";
+};
+
+const setActiveView = (view) => {
+  activeView = view;
+  renderViewTabs();
+};
+
+const selectLesson = (lessonId) => {
+  userPinnedLesson = true;
+  selectedLessonId = lessonId;
+  activeView = "lessons";
+  renderLessonList();
+  renderViewTabs();
+};
+
 const renderLessonList = () => {
+  hideTermCard();
   lessons.sort((left, right) => left.id.localeCompare(right.id));
   lessonList.replaceChildren();
 
@@ -85,9 +129,7 @@ const renderLessonList = () => {
     tab.dataset.lessonId = lesson.id;
     tab.textContent = lesson.id;
     tab.addEventListener("click", () => {
-      userPinnedLesson = true;
-      selectedLessonId = lesson.id;
-      renderLessonList();
+      selectLesson(lesson.id);
     });
     lessonList.append(tab);
   }
@@ -95,6 +137,45 @@ const renderLessonList = () => {
   if (selected !== undefined) {
     lessonContent.className = "lesson-content prose";
     lessonContent.innerHTML = selected.html;
+  }
+};
+
+const renderGlossaryList = () => {
+  glossaryList.replaceChildren();
+  const entries = sortedGlossary();
+
+  if (entries.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No glossary terms yet.";
+    glossaryList.append(empty);
+    return;
+  }
+
+  for (const entry of entries) {
+    const article = document.createElement("article");
+    article.className = "glossary-entry";
+
+    const title = document.createElement("h3");
+    title.textContent = entry.term;
+
+    const definition = document.createElement("p");
+    definition.textContent = entry.def;
+
+    article.append(title, definition);
+
+    if (entry.lesson !== undefined) {
+      const lessonButton = document.createElement("button");
+      lessonButton.type = "button";
+      lessonButton.className = "glossary-lesson-link";
+      lessonButton.textContent = "first taught in " + entry.lesson;
+      lessonButton.addEventListener("click", () => {
+        selectLesson(entry.lesson);
+      });
+      article.append(lessonButton);
+    }
+
+    glossaryList.append(article);
   }
 };
 
@@ -149,7 +230,7 @@ const applyLessonEvent = (event) => {
   }
 };
 
-const appendEntry = (entry) => {
+const createEntryElement = (entry) => {
   const article = document.createElement("article");
   article.className = "entry " + entry.role;
 
@@ -162,8 +243,94 @@ const appendEntry = (entry) => {
   body.innerHTML = entry.html;
 
   article.append(meta, body);
-  transcript.append(article);
+  return article;
+};
+
+const renderTranscript = () => {
+  hideTermCard();
+  transcript.replaceChildren();
+  for (const entry of transcriptEntries) {
+    transcript.append(createEntryElement(entry));
+  }
   scrollTranscript();
+};
+
+const appendEntry = (entry) => {
+  transcriptEntries.push(entry);
+  transcript.append(createEntryElement(entry));
+  scrollTranscript();
+};
+
+const clearHideTermCardTimer = () => {
+  if (hideTermCardTimer !== undefined) {
+    clearTimeout(hideTermCardTimer);
+    hideTermCardTimer = undefined;
+  }
+};
+
+const hideTermCard = () => {
+  clearHideTermCardTimer();
+  termCard.hidden = true;
+  termCard.classList.remove("visible");
+  currentTermElement = undefined;
+};
+
+const scheduleHideTermCard = () => {
+  clearHideTermCardTimer();
+  hideTermCardTimer = setTimeout(hideTermCard, 120);
+};
+
+const positionTermCard = (target) => {
+  const gap = 8;
+  const margin = 12;
+  const rect = target.getBoundingClientRect();
+  const cardRect = termCard.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(rect.left, margin),
+    window.innerWidth - cardRect.width - margin,
+  );
+  const top =
+    rect.bottom + gap + cardRect.height <= window.innerHeight - margin
+      ? rect.bottom + gap
+      : Math.max(rect.top - cardRect.height - gap, margin);
+
+  termCard.style.left = left + "px";
+  termCard.style.top = top + "px";
+};
+
+const showTermCard = (target) => {
+  const term = target.dataset.term;
+  const entry = term === undefined ? undefined : glossaryEntryForTerm(term);
+  if (entry === undefined) {
+    hideTermCard();
+    return;
+  }
+
+  clearHideTermCardTimer();
+  currentTermElement = target;
+  termCard.replaceChildren();
+
+  const title = document.createElement("div");
+  title.className = "term-card-title";
+  title.textContent = entry.term;
+
+  const definition = document.createElement("p");
+  definition.textContent = entry.def;
+
+  termCard.append(title, definition);
+
+  if (entry.lesson !== undefined) {
+    const lessonButton = document.createElement("button");
+    lessonButton.type = "button";
+    lessonButton.className = "term-card-link";
+    lessonButton.dataset.lessonId = entry.lesson;
+    lessonButton.textContent = "first taught in " + entry.lesson;
+    termCard.append(lessonButton);
+  }
+
+  termCard.hidden = false;
+  termCard.classList.add("visible");
+  positionTermCard(target);
 };
 
 const applyStatus = (status) => {
@@ -199,10 +366,9 @@ const submitMessage = async () => {
 };
 
 renderLessonList();
-
-for (const entry of initialTranscript) {
-  appendEntry(entry);
-}
+renderGlossaryList();
+renderViewTabs();
+renderTranscript();
 
 textarea.addEventListener("input", () => {
   submitButton.disabled = textarea.disabled || textarea.value.trim().length === 0;
@@ -220,6 +386,87 @@ form.addEventListener("submit", (event) => {
   void submitMessage();
 });
 
+for (const tab of viewTabs) {
+  tab.addEventListener("click", () => {
+    const view = tab.dataset.view;
+    if (view !== undefined) {
+      setActiveView(view);
+    }
+  });
+}
+
+document.addEventListener("mouseover", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+
+  const term = event.target.closest(".term");
+  if (term instanceof HTMLElement) {
+    showTermCard(term);
+  }
+});
+
+document.addEventListener("focusin", (event) => {
+  if (!(event.target instanceof HTMLElement) || !event.target.classList.contains("term")) {
+    return;
+  }
+
+  showTermCard(event.target);
+});
+
+document.addEventListener("mouseout", (event) => {
+  if (!(event.target instanceof Element) || currentTermElement === undefined) {
+    return;
+  }
+
+  const term = event.target.closest(".term");
+  if (term !== currentTermElement) {
+    return;
+  }
+
+  if (event.relatedTarget instanceof Node && termCard.contains(event.relatedTarget)) {
+    return;
+  }
+
+  scheduleHideTermCard();
+});
+
+document.addEventListener("focusout", (event) => {
+  if (event.target === currentTermElement) {
+    if (event.relatedTarget instanceof Node && termCard.contains(event.relatedTarget)) {
+      return;
+    }
+
+    scheduleHideTermCard();
+  }
+});
+
+termCard.addEventListener("mouseenter", clearHideTermCardTimer);
+termCard.addEventListener("mouseleave", hideTermCard);
+termCard.addEventListener("click", (event) => {
+  if (!(event.target instanceof HTMLElement)) {
+    return;
+  }
+
+  const lessonId = event.target.dataset.lessonId;
+  if (lessonId !== undefined) {
+    selectLesson(lessonId);
+    hideTermCard();
+  }
+});
+
+window.addEventListener("scroll", () => {
+  if (currentTermElement !== undefined) {
+    positionTermCard(currentTermElement);
+  }
+}, true);
+
+window.addEventListener("resize", () => {
+  if (currentTermElement !== undefined) {
+    positionTermCard(currentTermElement);
+  }
+});
+
 const events = new EventSource("/api/events");
 events.addEventListener("status", (event) => {
   applyStatus(JSON.parse(event.data).status);
@@ -230,14 +477,27 @@ events.addEventListener("message", (event) => {
 events.addEventListener("lesson", (event) => {
   applyLessonEvent(JSON.parse(event.data));
 });
+events.addEventListener("glossary", (event) => {
+  glossary = [...JSON.parse(event.data).entries];
+  renderGlossaryList();
+
+  if (currentTermElement !== undefined) {
+    showTermCard(currentTermElement);
+  }
+});
+events.addEventListener("transcript", (event) => {
+  transcriptEntries = [...JSON.parse(event.data).entries];
+  renderTranscript();
+});
 `;
 
 const renderTranscript = (
   transcript: readonly TranscriptEntry[],
+  glossary: readonly GlossaryEntry[],
 ): readonly RenderedTranscriptEntry[] =>
   transcript.map((entry) => ({
     ...entry,
-    html: renderMarkdown(entry.text),
+    html: renderMarkdown(entry.text, { glossary }),
   }));
 
 const selectedLesson = (
@@ -281,10 +541,15 @@ export const renderPage = (
   courseName: string,
   transcript: readonly TranscriptEntry[],
   lessons: LessonSnapshot,
+  glossary: readonly GlossaryEntry[],
 ): string => {
   const script = clientScript
-    .replace("__TRANSCRIPT__", escapeScriptJson(renderTranscript(transcript)))
-    .replace("__LESSONS__", escapeScriptJson(lessons));
+    .replace(
+      "__TRANSCRIPT__",
+      escapeScriptJson(renderTranscript(transcript, glossary)),
+    )
+    .replace("__LESSONS__", escapeScriptJson(lessons))
+    .replace("__GLOSSARY__", escapeScriptJson(glossary));
 
   return `<!doctype html>
 <html lang="en" class="scheme-only-dark">
@@ -304,6 +569,10 @@ export const renderPage = (
       box-sizing: border-box;
     }
 
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       margin: 0;
       min-height: 100vh;
@@ -321,6 +590,10 @@ export const renderPage = (
     }
 
     header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
       border-bottom: 1px solid #2f302b;
       padding-bottom: 0.875rem;
     }
@@ -340,10 +613,40 @@ export const renderPage = (
       font-size: 1rem;
     }
 
+    .view-tabs {
+      display: flex;
+      gap: 0.35rem;
+      border: 1px solid #33342f;
+      border-radius: 8px;
+      background: #151612;
+      padding: 0.25rem;
+    }
+
+    .view-tab {
+      min-height: 2rem;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: #cfcfca;
+      padding: 0 0.75rem;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .view-tab:hover,
+    .view-tab.active {
+      background: #253020;
+      color: #f4f4f1;
+    }
+
     .workspace {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(20rem, 25rem);
       gap: 1rem;
+      min-height: 0;
+    }
+
+    .study-pane {
       min-height: 0;
     }
 
@@ -395,6 +698,57 @@ export const renderPage = (
       border-radius: 8px;
       background: #151612;
       padding: 1rem 1.125rem;
+    }
+
+    .glossary-pane {
+      min-height: 0;
+      overflow-y: auto;
+      border: 1px solid #33342f;
+      border-radius: 8px;
+      background: #151612;
+      padding: 1rem 1.125rem;
+    }
+
+    .glossary-list {
+      display: grid;
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+
+    .glossary-entry {
+      display: grid;
+      gap: 0.45rem;
+      border: 1px solid #30312d;
+      border-radius: 8px;
+      background: #1a1b18;
+      padding: 0.85rem 0.95rem;
+    }
+
+    .glossary-entry h3 {
+      margin: 0;
+      color: #fafaf8;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .glossary-entry p {
+      margin: 0;
+      color: #eeeeea;
+      line-height: 1.55;
+    }
+
+    .glossary-lesson-link,
+    .term-card-link {
+      justify-self: start;
+      border: 0;
+      background: transparent;
+      color: #9fcf86;
+      padding: 0;
+      font: inherit;
+      font-size: 0.9rem;
+      text-decoration: underline;
+      text-underline-offset: 0.2em;
+      cursor: pointer;
     }
 
     .empty-state,
@@ -512,6 +866,45 @@ export const renderPage = (
       color: #9fcf86;
       text-decoration: underline;
       text-underline-offset: 0.2em;
+    }
+
+    .term {
+      border-bottom: 1px dotted #b7dd88;
+      color: #d9f6b3;
+      cursor: help;
+    }
+
+    .term:focus {
+      border-radius: 4px;
+      outline: 2px solid #8fbf73;
+      outline-offset: 2px;
+    }
+
+    .term-card {
+      position: fixed;
+      z-index: 20;
+      width: max-content;
+      max-width: min(22rem, calc(100vw - 1.5rem));
+      border: 1px solid #4d6041;
+      border-radius: 8px;
+      background: #20231d;
+      box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 45%);
+      color: #eeeeea;
+      padding: 0.75rem 0.85rem;
+      line-height: 1.45;
+    }
+
+    .term-card-title {
+      color: #fafaf8;
+      font-weight: 600;
+    }
+
+    .term-card p {
+      margin: 0.35rem 0 0;
+    }
+
+    .term-card-link {
+      margin-top: 0.5rem;
     }
 
     .prose code {
@@ -637,6 +1030,18 @@ export const renderPage = (
         font-size: 1.25rem;
       }
 
+      header {
+        display: grid;
+      }
+
+      .view-tabs {
+        width: 100%;
+      }
+
+      .view-tab {
+        flex: 1;
+      }
+
       .lesson-pane {
         grid-template-columns: 1fr;
       }
@@ -666,19 +1071,30 @@ export const renderPage = (
   <main class="shell">
     <header>
       <h1>${escapeHtml(courseName)}</h1>
+      <nav class="view-tabs" aria-label="Study view" role="tablist">
+        <button class="view-tab active" type="button" data-view="lessons" role="tab" aria-selected="true">Lessons</button>
+        <button class="view-tab" type="button" data-view="glossary" role="tab" aria-selected="false">Glossary</button>
+      </nav>
     </header>
 
     <div class="workspace">
-      <section class="lesson-pane" aria-labelledby="lesson-heading">
-        <nav class="lesson-nav" aria-labelledby="lesson-heading">
-          <h2 id="lesson-heading">Lessons</h2>
-          <div id="lesson-list" class="lesson-list">${renderLessonTabs(
-            lessons,
-          )}</div>
-        </nav>
+      <div class="study-pane">
+        <section id="lesson-view" class="lesson-pane" aria-labelledby="lesson-heading">
+          <nav class="lesson-nav" aria-labelledby="lesson-heading">
+            <h2 id="lesson-heading">Lessons</h2>
+            <div id="lesson-list" class="lesson-list">${renderLessonTabs(
+              lessons,
+            )}</div>
+          </nav>
 
-        ${renderLessonContent(lessons)}
-      </section>
+          ${renderLessonContent(lessons)}
+        </section>
+
+        <section id="glossary-view" class="glossary-pane" aria-labelledby="glossary-heading" hidden>
+          <h2 id="glossary-heading">Glossary</h2>
+          <div id="glossary-list" class="glossary-list"></div>
+        </section>
+      </div>
 
       <aside class="chat-pane" aria-label="Chat">
         <div class="chat-header">
@@ -694,6 +1110,7 @@ export const renderPage = (
         </form>
       </aside>
     </div>
+    <div id="term-card" class="term-card" role="tooltip" hidden></div>
   </main>
 
   <script>${script}</script>

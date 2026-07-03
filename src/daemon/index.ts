@@ -16,6 +16,7 @@ import {
   getCoursePaths,
   readCourseManifest,
   readDaemonMetadata,
+  readGlossary,
   readPendingEvents,
   readTranscript,
   resolveCourseDirForWait,
@@ -23,9 +24,11 @@ import {
   writePendingEvents,
   writeTurnFile,
   type DaemonMetadata,
+  type GlossaryEntry,
   type TranscriptEntry,
   type TurnEvent,
 } from "../course";
+import { watchGlossaryFile } from "./glossary";
 import {
   readLessonSnapshot,
   watchLessonDirectory,
@@ -347,7 +350,10 @@ export const sayAgentMessage = async (
     : `Warning: ${notifyWarning}; appended agent message to transcript only.`;
 };
 
-const createSseHub = (getStatus: () => UiStatus) => {
+const createSseHub = (
+  getStatus: () => UiStatus,
+  getGlossary: () => readonly GlossaryEntry[],
+) => {
   const subscribers = new Set<ServerResponse>();
 
   const writeEvent = (
@@ -369,20 +375,34 @@ const createSseHub = (getStatus: () => UiStatus) => {
     }
   };
 
-  const broadcastMessage = (entry: TranscriptEntry): void => {
-    const renderedEntry = {
-      ...entry,
-      html: renderMarkdown(entry.text),
-    };
+  const renderTranscriptEntry = (entry: TranscriptEntry) => ({
+    ...entry,
+    html: renderMarkdown(entry.text, { glossary: getGlossary() }),
+  });
 
+  const broadcastMessage = (entry: TranscriptEntry): void => {
+    const renderedEntry = renderTranscriptEntry(entry);
     for (const subscriber of subscribers) {
       writeEvent(subscriber, "message", renderedEntry);
+    }
+  };
+
+  const broadcastTranscript = (entries: readonly TranscriptEntry[]): void => {
+    const renderedEntries = entries.map(renderTranscriptEntry);
+    for (const subscriber of subscribers) {
+      writeEvent(subscriber, "transcript", { entries: renderedEntries });
     }
   };
 
   const broadcastLesson = (event: LessonEvent): void => {
     for (const subscriber of subscribers) {
       writeEvent(subscriber, "lesson", event);
+    }
+  };
+
+  const broadcastGlossary = (entries: readonly GlossaryEntry[]): void => {
+    for (const subscriber of subscribers) {
+      writeEvent(subscriber, "glossary", { entries });
     }
   };
 
@@ -397,13 +417,21 @@ const createSseHub = (getStatus: () => UiStatus) => {
     });
     subscribers.add(response);
     writeEvent(response, "status", { status: getStatus() });
+    writeEvent(response, "glossary", { entries: getGlossary() });
 
     request.on("close", () => {
       subscribers.delete(response);
     });
   };
 
-  return { broadcastLesson, broadcastMessage, broadcastStatus, connect };
+  return {
+    broadcastGlossary,
+    broadcastLesson,
+    broadcastMessage,
+    broadcastStatus,
+    broadcastTranscript,
+    connect,
+  };
 };
 
 const createSerializer = () => {
@@ -486,15 +514,32 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   const coursePaths = getCoursePaths(courseDir);
   const coursePath = coursePaths.courseDir;
   const manifest = await readCourseManifest(coursePath);
+  let glossaryEntries = await readGlossary(coursePath);
 
   let status: UiStatus = "agent-working";
   let waiter: Waiter | undefined;
   let nextWaiterId = 1;
 
   const serialize = createSerializer();
-  const sseHub = createSseHub(() => status);
+  const sseHub = createSseHub(() => status, () => glossaryEntries);
+  const refreshGlossary = async (): Promise<void> => {
+    await serialize(async () => {
+      glossaryEntries = await readGlossary(coursePath);
+      sseHub.broadcastGlossary(glossaryEntries);
+
+      const [transcript, lessons] = await Promise.all([
+        readTranscript(coursePath),
+        readLessonSnapshot(coursePaths.lessonsDir, glossaryEntries),
+      ]);
+
+      sseHub.broadcastLesson({ action: "snapshot", snapshot: lessons });
+      sseHub.broadcastTranscript(transcript);
+    });
+  };
+
   const lessonWatcher = watchLessonDirectory({
     lessonsDir: coursePaths.lessonsDir,
+    getGlossary: () => glossaryEntries,
     emit: (event) => {
       sseHub.broadcastLesson(event);
     },
@@ -503,6 +548,17 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         error instanceof Error
           ? `Lesson watcher error: ${error.message}`
           : "Lesson watcher error.",
+      );
+    },
+  });
+  const glossaryWatcher = watchGlossaryFile({
+    glossaryJson: coursePaths.glossaryJson,
+    emit: refreshGlossary,
+    onError: (error) => {
+      console.error(
+        error instanceof Error
+          ? `Glossary watcher error: ${error.message}`
+          : "Glossary watcher error.",
       );
     },
   });
@@ -637,15 +693,19 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       );
 
       if (method === "GET" && requestUrl.pathname === "/") {
+        glossaryEntries = await readGlossary(coursePath);
         const [transcript, lessons] = await Promise.all([
           readTranscript(coursePath),
-          readLessonSnapshot(coursePaths.lessonsDir),
+          readLessonSnapshot(coursePaths.lessonsDir, glossaryEntries),
         ]);
         await sendResponse(
           response,
-          new Response(renderPage(manifest.name, transcript, lessons), {
-            headers: { "content-type": "text/html; charset=utf-8" },
-          }),
+          new Response(
+            renderPage(manifest.name, transcript, lessons, glossaryEntries),
+            {
+              headers: { "content-type": "text/html; charset=utf-8" },
+            },
+          ),
         );
         return;
       }
@@ -721,6 +781,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
 
   const cleanup = async (): Promise<void> => {
     lessonWatcher.close();
+    glossaryWatcher.close();
     server.close();
     await clearDaemonMetadata(coursePath);
   };

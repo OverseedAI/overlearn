@@ -60,6 +60,24 @@ export type TranscriptEntry = Readonly<{
   at: string;
 }>;
 
+export type GlossaryEntry = Readonly<{
+  term: string;
+  def: string;
+  lesson?: string;
+  addedAt: string;
+}>;
+
+export type GlossaryEntryInput = Readonly<{
+  term: string;
+  def: string;
+  lesson?: string;
+}>;
+
+export type GlossaryMutation = Readonly<{
+  action: "created" | "updated";
+  entry: GlossaryEntry;
+}>;
+
 type Env = Readonly<Record<string, string | undefined>>;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -209,6 +227,47 @@ const parseTranscriptEntry = (
   }
 
   return { role, text, at };
+};
+
+const parseGlossaryEntry = (
+  value: unknown,
+  filePath: string,
+  index: number,
+): GlossaryEntry => {
+  if (!isRecord(value)) {
+    throw new Error(`Invalid glossary entry in ${filePath}:${index + 1}`);
+  }
+
+  const term = value["term"];
+  const def = value["def"];
+  const lesson = value["lesson"];
+  const addedAt = value["addedAt"];
+
+  if (
+    typeof term !== "string" ||
+    term.trim().length === 0 ||
+    typeof def !== "string" ||
+    def.trim().length === 0 ||
+    typeof addedAt !== "string" ||
+    addedAt.trim().length === 0 ||
+    (lesson !== undefined &&
+      (typeof lesson !== "string" || lesson.trim().length === 0))
+  ) {
+    throw new Error(`Invalid glossary entry in ${filePath}:${index + 1}`);
+  }
+
+  return lesson === undefined
+    ? {
+        term: term.trim(),
+        def: def.trim(),
+        addedAt,
+      }
+    : {
+        term: term.trim(),
+        def: def.trim(),
+        lesson: lesson.trim(),
+        addedAt,
+      };
 };
 
 const turnNumberFromFileName = (fileName: string): number | undefined => {
@@ -427,6 +486,145 @@ export const appendAgentTranscript = async (
 
   await appendTranscriptEntry(courseDir, entry);
   return entry;
+};
+
+export const readGlossary = async (
+  courseDir: string,
+): Promise<readonly GlossaryEntry[]> => {
+  const paths = getCoursePaths(courseDir);
+  if (!(await Bun.file(paths.glossaryJson).exists())) {
+    return [];
+  }
+
+  const value = await readJson(paths.glossaryJson);
+  if (!Array.isArray(value)) {
+    throw new Error(`Invalid glossary in ${paths.glossaryJson}`);
+  }
+
+  return value.map((entry, index) =>
+    parseGlossaryEntry(entry, paths.glossaryJson, index),
+  );
+};
+
+const writeGlossary = async (
+  courseDir: string,
+  entries: readonly GlossaryEntry[],
+): Promise<void> => {
+  const paths = getCoursePaths(courseDir);
+  await writeJson(paths.glossaryJson, entries);
+};
+
+const normalizeGlossaryInput = (
+  input: GlossaryEntryInput,
+): GlossaryEntryInput => {
+  const term = input.term.trim();
+  if (term.length === 0) {
+    throw new Error("Glossary term cannot be empty.");
+  }
+
+  const def = input.def.trim();
+  if (def.length === 0) {
+    throw new Error("Glossary definition cannot be empty.");
+  }
+
+  const lesson = input.lesson?.trim();
+  if (lesson === undefined) {
+    return { term, def };
+  }
+
+  if (lesson.length === 0) {
+    throw new Error("Glossary lesson cannot be empty.");
+  }
+
+  return { term, def, lesson };
+};
+
+const glossaryTermKey = (term: string): string => term.toLocaleLowerCase();
+
+const isPlainLessonId = (lessonId: string): boolean =>
+  lessonId.length > 0 &&
+  lessonId === basename(lessonId) &&
+  !lessonId.includes("\\");
+
+const lessonExists = async (
+  courseDir: string,
+  lessonId: string,
+): Promise<boolean> => {
+  if (!isPlainLessonId(lessonId)) {
+    return false;
+  }
+
+  const paths = getCoursePaths(courseDir);
+
+  try {
+    return (await stat(join(paths.lessonsDir, `${lessonId}.md`))).isFile();
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return false;
+    }
+
+    throw error;
+  }
+};
+
+const formatGlossaryEntry = (
+  term: string,
+  def: string,
+  lesson: string | undefined,
+  addedAt: string,
+): GlossaryEntry =>
+  lesson === undefined
+    ? { term, def, addedAt }
+    : { term, def, lesson, addedAt };
+
+export const upsertGlossaryEntry = async (
+  courseDir: string,
+  input: GlossaryEntryInput,
+  now = new Date(),
+): Promise<GlossaryMutation> => {
+  const normalized = normalizeGlossaryInput(input);
+
+  if (
+    normalized.lesson !== undefined &&
+    !(await lessonExists(courseDir, normalized.lesson))
+  ) {
+    throw new Error(`Lesson does not exist: ${normalized.lesson}`);
+  }
+
+  const entries = await readGlossary(courseDir);
+  const existingIndex = entries.findIndex(
+    (entry) => glossaryTermKey(entry.term) === glossaryTermKey(normalized.term),
+  );
+
+  if (existingIndex === -1) {
+    const entry = formatGlossaryEntry(
+      normalized.term,
+      normalized.def,
+      normalized.lesson,
+      now.toISOString(),
+    );
+
+    await writeGlossary(courseDir, [...entries, entry]);
+    return { action: "created", entry };
+  }
+
+  const existing = entries[existingIndex];
+  if (existing === undefined) {
+    throw new Error("Unable to update glossary entry.");
+  }
+
+  const entry = formatGlossaryEntry(
+    normalized.term,
+    normalized.def,
+    normalized.lesson ?? existing.lesson,
+    existing.addedAt,
+  );
+  const nextEntries = entries.map((candidate, index) =>
+    index === existingIndex ? entry : candidate,
+  );
+
+  await writeGlossary(courseDir, nextEntries);
+  return { action: "updated", entry };
 };
 
 export const nextTurnNumber = async (courseDir: string): Promise<number> => {
