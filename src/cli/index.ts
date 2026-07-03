@@ -20,7 +20,9 @@ import {
 import {
   resolveCourseDirForWait,
   upsertGlossaryEntry,
+  upsertTopic,
   type GlossaryMutation,
+  type TopicMutation,
 } from "../course";
 import { parseCli, type CliResult } from "./run";
 
@@ -83,6 +85,25 @@ const resolveInstructionsCourseDir = async (
 
     throw error;
   }
+};
+
+const formatTopicEmitOutput = (
+  coursePath: string,
+  mutation: TopicMutation,
+  json: boolean,
+): string => {
+  if (json) {
+    return JSON.stringify({
+      ok: true,
+      kind: "topic",
+      action: mutation.action,
+      coursePath,
+      topic: mutation.topic,
+      topics: mutation.topics,
+    });
+  }
+
+  return `${mutation.action} topic: ${mutation.topic.path}`;
 };
 
 const main = async (): Promise<CliResult> => {
@@ -162,6 +183,15 @@ const main = async (): Promise<CliResult> => {
 
   if (command.kind === "emit") {
     const coursePath = await resolveCourseDirForWait(command.name);
+
+    if (command.emit.kind === "topic") {
+      const mutation = await upsertTopic(coursePath, command.emit);
+      return {
+        exitCode: 0,
+        stdout: formatTopicEmitOutput(coursePath, mutation, command.emit.json),
+      };
+    }
+
     const mutation = await upsertGlossaryEntry(coursePath, command.emit);
 
     return {
