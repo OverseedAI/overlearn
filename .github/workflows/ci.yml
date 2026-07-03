@@ -39,6 +39,14 @@ jobs:
         run: |
           ./dist/learn --version
           ./dist/learn instructions | head -30
+          courses_dir="$(mktemp -d)"
+          set +e
+          OVERLEARN_COURSES_DIR="${courses_dir}" OVERLEARN_NO_BROWSER=1 ./dist/learn resume does-not-exist >"${courses_dir}/resume.out" 2>"${courses_dir}/resume.err"
+          resume_exit="$?"
+          set -e
+          test "${resume_exit}" -eq 1
+          grep -q 'Cannot resume course "does-not-exist"' "${courses_dir}/resume.err"
+          grep -q "No available courses in ${courses_dir}" "${courses_dir}/resume.err"
 
   agent-e2e:
     needs: checks
@@ -73,3 +81,7 @@ jobs:
       - name: Run agent E2E
         if: ${{ env.ANTHROPIC_API_KEY != '' }}
         run: bun test/agent-e2e/run.ts
+
+      - name: Run resume agent E2E
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        run: bun test/agent-e2e/resume.ts

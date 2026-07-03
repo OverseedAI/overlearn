@@ -8,6 +8,7 @@ import {
 import {
   getCourseStatus,
   LearnCommandError,
+  resumeCourseDaemon,
   runDaemon,
   sayAgentMessage,
   startCourseDaemon,
@@ -75,6 +76,13 @@ const main = async (): Promise<CliResult> => {
     return {
       exitCode: 0,
       stdout: await startCourseDaemon(command.name),
+    };
+  }
+
+  if (command.kind === "resume") {
+    return {
+      exitCode: 0,
+      stdout: await resumeCourseDaemon(command.name),
     };
   }
 

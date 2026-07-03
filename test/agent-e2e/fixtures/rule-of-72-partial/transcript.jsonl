@@ -1,0 +1,8 @@
+{"role":"learner","text":"I want a quick mental math way to estimate investment doubling time.","at":"2026-06-30T18:01:00.000Z"}
+{"role":"agent","text":"Let's build it from one concrete case. If something grows at about 8% per year, the Rule of 72 says 72 divided by 8 gives a rough doubling time. What do you get?","at":"2026-06-30T18:01:20.000Z"}
+{"role":"learner","text":"72 divided by 8 is 9, so about 9 years.","at":"2026-06-30T18:02:00.000Z"}
+{"role":"agent","text":"Right. I captured that in lesson 01: the rule estimates doubling time, not exact year-by-year value. Now try 6% annual growth: what does 72 / 6 suggest?","at":"2026-06-30T18:02:40.000Z"}
+{"role":"learner","text":"At 6%, I think doubling takes about 12 years.","at":"2026-06-30T18:03:10.000Z"}
+{"role":"agent","text":"Yes. Lesson 02 now has the 6% example. One more check before we move on: at 9%, what estimate does the shortcut give?","at":"2026-06-30T18:03:45.000Z"}
+{"role":"learner","text":"72 divided by 9 is 8, so around 8 years.","at":"2026-06-30T18:04:20.000Z"}
+{"role":"agent","text":"Correct. You can now use the shortcut. Next time we should look at why 72 is used instead of a rounder number like 70.","at":"2026-06-30T18:04:55.000Z"}

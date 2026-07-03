@@ -9,6 +9,7 @@ export type CliResult = Readonly<{
 export type CliCommand =
   | Readonly<{ kind: "result"; result: CliResult }>
   | Readonly<{ kind: "start"; name?: string }>
+  | Readonly<{ kind: "resume"; name: string }>
   | Readonly<{ kind: "wait"; name?: string }>
   | Readonly<{ kind: "instructions"; name?: string; json: boolean }>
   | Readonly<{ kind: "status"; name?: string; json: true }>
@@ -38,6 +39,7 @@ const formatHelp = (version: string): string =>
     "",
     "Usage:",
     "  learn start [name]",
+    "  learn resume <name>",
     "  learn wait [name]",
     "  learn instructions [name] [--json]",
     "  learn status [name] --json",
@@ -79,6 +81,20 @@ const optionalNameCommand = (
   }
 
   return name === undefined ? { kind } : { kind, name };
+};
+
+const requiredNameCommand = (
+  kind: "resume",
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  const [name, extra] = args;
+
+  if (name === undefined || extra !== undefined) {
+    return result(1, formatHelp(version), `Usage: learn ${kind} <name>`);
+  }
+
+  return { kind, name };
 };
 
 const optionalNameJsonCommand = (
@@ -263,6 +279,10 @@ export const parseCli = (
 
   if (arg === "start") {
     return optionalNameCommand("start", rest, version);
+  }
+
+  if (arg === "resume") {
+    return requiredNameCommand("resume", rest, version);
   }
 
   if (arg === "wait") {
