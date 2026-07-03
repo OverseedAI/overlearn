@@ -17,6 +17,14 @@ export type CliCommand =
   | Readonly<{ kind: "instructions-eject"; toDir?: string; force: boolean }>
   | Readonly<{ kind: "status"; name?: string; json: true }>
   | Readonly<{
+      kind: "export";
+      name?: string;
+      outDir?: string;
+      includeTranscript: boolean;
+      force: boolean;
+      json: boolean;
+    }>
+  | Readonly<{
       kind: "say";
       name?: string;
       source:
@@ -76,6 +84,7 @@ const formatHelp = (version: string): string =>
     "  learn instructions [name] [--json]",
     "  learn instructions --eject [--to <dir>] [--force]",
     "  learn status [name] --json",
+    "  learn export [name] [--out <dir>] [--include-transcript] [--force] [--json]",
     "  learn say [name] --text <markdown>",
     "  learn say [name] --file <path>",
     "  learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]",
@@ -201,6 +210,9 @@ const optionalNameJsonCommand = (
 
 const instructionsUsage =
   "Usage: learn instructions [name] [--json] or learn instructions --eject [--to <dir>] [--force]";
+
+const exportUsage =
+  "Usage: learn export [name] [--out <dir>] [--include-transcript] [--force] [--json]";
 
 const instructionsCommand = (
   args: readonly string[],
@@ -744,6 +756,73 @@ const emitCommand = (args: readonly string[], version: string): CliCommand => {
   return result(1, formatHelp(version), `Unknown emit kind: ${kind}`);
 };
 
+const exportCommand = (
+  args: readonly string[],
+  version: string,
+): CliCommand => {
+  let name: string | undefined;
+  let outDir: string | undefined;
+  let includeTranscript = false;
+  let force = false;
+  let json = false;
+  let index = 0;
+
+  while (index < args.length) {
+    const arg = args[index];
+    index += 1;
+
+    if (arg === "--include-transcript") {
+      includeTranscript = true;
+      continue;
+    }
+
+    if (arg === "--force") {
+      force = true;
+      continue;
+    }
+
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg === "--out") {
+      const value = args[index];
+      index += 1;
+
+      if (value === undefined) {
+        return result(1, formatHelp(version), exportUsage);
+      }
+
+      if (value.trim().length === 0) {
+        return result(1, formatHelp(version), "Export output dir cannot be empty.");
+      }
+
+      outDir = value;
+      continue;
+    }
+
+    if (arg === undefined || arg.startsWith("-")) {
+      return result(1, formatHelp(version), `Unknown option for export: ${String(arg)}`);
+    }
+
+    if (name !== undefined) {
+      return result(1, formatHelp(version), "Too many arguments for export.");
+    }
+
+    name = arg;
+  }
+
+  return {
+    kind: "export",
+    ...(name === undefined ? {} : { name }),
+    ...(outDir === undefined ? {} : { outDir }),
+    includeTranscript,
+    force,
+    json,
+  };
+};
+
 export const parseCli = (
   args: readonly string[],
   version: string,
@@ -776,6 +855,10 @@ export const parseCli = (
 
   if (arg === "status") {
     return optionalNameJsonCommand("status", rest, version);
+  }
+
+  if (arg === "export") {
+    return exportCommand(rest, version);
   }
 
   if (arg === "say") {

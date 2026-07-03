@@ -3,6 +3,8 @@ import { isValidDemoFileName, type GlossaryEntry } from "../course";
 export type MarkdownRenderOptions = Readonly<{
   glossary?: readonly GlossaryEntry[];
   demoFiles?: ReadonlySet<string> | readonly string[];
+  resolveDemoHref?: (file: string) => string;
+  resolveLinkHref?: (href: string) => string;
 }>;
 
 const tick = String.fromCharCode(96);
@@ -236,7 +238,8 @@ export const renderDemoEmbed = (
   }
 
   const displayTitle = title ?? file;
-  const href = `/demos/${encodeURIComponent(file)}`;
+  const href =
+    options.resolveDemoHref?.(file) ?? `/demos/${encodeURIComponent(file)}`;
 
   return [
     `<article class="demo-card" data-demo-file="${escapeHtml(file)}">`,
@@ -316,15 +319,23 @@ const renderPlainInline = (text: string): string => {
   return escaped.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 };
 
-const renderLinkedInline = (text: string): string =>
+const renderLinkedInline = (
+  text: string,
+  options: MarkdownRenderOptions,
+): string =>
   text.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_match, label, href) => {
-    const safeHref = escapeHtml(sanitizeHref(String(href)));
+    const safeHref = escapeHtml(
+      options.resolveLinkHref?.(String(href)) ?? sanitizeHref(String(href)),
+    );
     return `<a href="${safeHref}" rel="noreferrer" target="_blank">${String(
       label,
     )}</a>`;
   });
 
-const renderInline = (text: string): string => {
+const renderInline = (
+  text: string,
+  options: MarkdownRenderOptions,
+): string => {
   const parts = text.split(inlineCodePattern);
 
   return parts
@@ -333,7 +344,7 @@ const renderInline = (text: string): string => {
         return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
       }
 
-      return renderLinkedInline(renderPlainInline(part));
+      return renderLinkedInline(renderPlainInline(part), options);
     })
     .join("");
 };
@@ -364,6 +375,7 @@ const isListLine = (line: string): boolean =>
 const renderTable = (
   lines: readonly string[],
   startIndex: number,
+  options: MarkdownRenderOptions,
 ): Readonly<{ html: string; nextIndex: number }> => {
   const header = splitTableRow(lines[startIndex] ?? "");
   const mutableRows: string[][] = [];
@@ -380,12 +392,15 @@ const renderTable = (
   }
 
   const headCells = header
-    .map((cell) => `<th scope="col">${renderInline(cell)}</th>`)
+    .map((cell) => `<th scope="col">${renderInline(cell, options)}</th>`)
     .join("");
   const bodyRows = mutableRows
     .map((row) => {
       const cells = header
-        .map((_cell, cellIndex) => `<td>${renderInline(row[cellIndex] ?? "")}</td>`)
+        .map(
+          (_cell, cellIndex) =>
+            `<td>${renderInline(row[cellIndex] ?? "", options)}</td>`,
+        )
         .join("");
       return `<tr>${cells}</tr>`;
     })
@@ -400,6 +415,7 @@ const renderTable = (
 const renderList = (
   lines: readonly string[],
   startIndex: number,
+  options: MarkdownRenderOptions,
 ): Readonly<{ html: string; nextIndex: number }> => {
   const firstLine = lines[startIndex] ?? "";
   const ordered = /^\s*\d+\.\s+\S/.test(firstLine);
@@ -423,7 +439,7 @@ const renderList = (
 
   return {
     html: `<${tag}>${items
-      .map((item) => `<li>${renderInline(item)}</li>`)
+      .map((item) => `<li>${renderInline(item, options)}</li>`)
       .join("")}</${tag}>`,
     nextIndex: index,
   };
@@ -432,6 +448,7 @@ const renderList = (
 const renderParagraph = (
   lines: readonly string[],
   startIndex: number,
+  options: MarkdownRenderOptions,
 ): Readonly<{ html: string; nextIndex: number }> => {
   const paragraphLines: string[] = [];
   let index = startIndex;
@@ -456,7 +473,7 @@ const renderParagraph = (
 
   return {
     html: `<p>${paragraphLines
-      .map((line) => renderInline(line))
+      .map((line) => renderInline(line, options))
       .join("<br>")}</p>`,
     nextIndex: index,
   };
@@ -517,14 +534,14 @@ export const renderMarkdown = (
 
     const nextLine = lines[index + 1] ?? "";
     if (line.includes("|") && isTableSeparator(nextLine)) {
-      const table = renderTable(lines, index);
+      const table = renderTable(lines, index, options);
       blocks.push(renderBlock(table.html, glossary));
       index = table.nextIndex;
       continue;
     }
 
     if (isListLine(line)) {
-      const list = renderList(lines, index);
+      const list = renderList(lines, index, options);
       blocks.push(renderBlock(list.html, glossary));
       index = list.nextIndex;
       continue;
@@ -535,13 +552,16 @@ export const renderMarkdown = (
       const level = Math.min(match?.[0].length ?? 1, 6);
       const text = line.replace(/^#{1,6}\s+/, "");
       blocks.push(
-        renderBlock(`<h${level}>${renderInline(text)}</h${level}>`, glossary),
+        renderBlock(
+          `<h${level}>${renderInline(text, options)}</h${level}>`,
+          glossary,
+        ),
       );
       index += 1;
       continue;
     }
 
-    const paragraph = renderParagraph(lines, index);
+    const paragraph = renderParagraph(lines, index, options);
     blocks.push(renderBlock(paragraph.html, glossary));
     index = paragraph.nextIndex;
   }
