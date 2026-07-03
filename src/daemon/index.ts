@@ -107,6 +107,7 @@ const LOCALHOST_BIND_HOST = "127.0.0.1";
 const LOCALHOST_PRINT_HOST = "localhost";
 const DAEMON_START_TIMEOUT_MS = 5_000;
 const DAEMON_START_POLL_MS = 50;
+const WAIT_RETRY_DELAY_MS = 250;
 export const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
 
 const sleep = async (milliseconds: number): Promise<void> => {
@@ -343,13 +344,21 @@ export const waitForLearnerTurn = async (
   }
 
   let response: Response;
-  try {
-    response = await fetch(formatDaemonUrl(metadata.port, "/api/wait"));
-  } catch {
-    throw new LearnCommandError(
-      2,
-      "Daemon died while waiting for learner input.",
-    );
+  for (;;) {
+    try {
+      response = await fetch(formatDaemonUrl(metadata.port, "/api/wait"));
+      break;
+    } catch {
+      // A dropped connection is not proof of death; only give up when the
+      // daemon process is actually gone.
+      if (!isPidAlive(metadata.pid)) {
+        throw new LearnCommandError(
+          2,
+          "Daemon died while waiting for learner input.",
+        );
+      }
+      await sleep(WAIT_RETRY_DELAY_MS);
+    }
   }
 
   if (!response.ok) {
@@ -1345,6 +1354,10 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       void sendResponse(response, textResponse(message, 500));
     });
   });
+
+  // /api/wait long-polls can sit idle indefinitely; Node's default
+  // requestTimeout (5 min) would destroy the socket mid-wait.
+  server.requestTimeout = 0;
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
