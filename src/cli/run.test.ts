@@ -16,6 +16,8 @@ describe("runCli", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("learn say [name] --text <markdown>");
     expect(result.stdout).toContain("learn instructions [name] [--json]");
+    expect(result.stdout).toContain("learn install <claude-code|codex>");
+    expect(result.stdout).toContain("learn uninstall <claude-code|codex>");
     expect(result.stdout).toContain("learn status [name] --json");
     expect(result.stdout).toContain("learn resume <name>");
     expect(result.stdout).toContain("learn share [name] [--json]");
@@ -142,6 +144,63 @@ describe("runCli", () => {
         exitCode: 1,
         stdout: expect.stringContaining("learn emit glossary"),
         stderr: "Glossary term cannot be empty.",
+      },
+    });
+  });
+
+  test("parses harness install and uninstall commands", () => {
+    expect(parseCli(["install", "claude-code"], "1.2.3")).toEqual({
+      kind: "install",
+      tool: "claude-code",
+      project: false,
+      force: false,
+    });
+
+    expect(
+      parseCli(["install", "codex", "--project", "--force"], "1.2.3"),
+    ).toEqual({
+      kind: "install",
+      tool: "codex",
+      project: true,
+      force: true,
+    });
+
+    expect(
+      parseCli(["uninstall", "claude-code", "--project", "--force"], "1.2.3"),
+    ).toEqual({
+      kind: "uninstall",
+      tool: "claude-code",
+      project: true,
+      force: true,
+    });
+  });
+
+  test("rejects invalid harness commands", () => {
+    expect(parseCli(["install"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn install <claude-code|codex>"),
+        stderr: "Usage: learn install <claude-code|codex> [--project] [--force]",
+      },
+    });
+
+    expect(parseCli(["install", "vim"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn install <claude-code|codex>"),
+        stderr: "Unknown tool for install: vim. Expected claude-code or codex.",
+      },
+    });
+
+    expect(parseCli(["uninstall", "codex", "--unknown"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: expect.stringContaining("learn uninstall <claude-code|codex>"),
+        stderr:
+          "Usage: learn uninstall <claude-code|codex> [--project] [--force]",
       },
     });
   });

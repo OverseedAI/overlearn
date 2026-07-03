@@ -9,6 +9,12 @@ import {
   formatInstructionsJson,
 } from "../instructions";
 import {
+  formatInstallHarnessResult,
+  formatUninstallHarnessResult,
+  installHarness,
+  uninstallHarness,
+} from "../harness";
+import {
   getCourseStatus,
   LearnCommandError,
   notifyAgentTranscriptEntry,
@@ -226,6 +232,32 @@ const main = async (): Promise<CliResult> => {
     return {
       exitCode: 0,
       stdout: formatEjectInstructionModules(modules),
+    };
+  }
+
+  if (command.kind === "install") {
+    const result = await installHarness({
+      tool: command.tool,
+      scope: command.project ? "project" : "global",
+      force: command.force,
+    });
+
+    return {
+      exitCode: 0,
+      stdout: formatInstallHarnessResult(result),
+    };
+  }
+
+  if (command.kind === "uninstall") {
+    const result = await uninstallHarness({
+      tool: command.tool,
+      scope: command.project ? "project" : "global",
+      force: command.force,
+    });
+
+    return {
+      exitCode: 0,
+      stdout: formatUninstallHarnessResult(result),
     };
   }
 
