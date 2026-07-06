@@ -1,6 +1,12 @@
 import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
+import {
+  connectMcpClient,
+  type McpJsonObject,
+  type McpServerConnection,
+} from "../../src/mcp/protocol";
+
 type Scenario =
   | "normal"
   | "permission"
@@ -20,6 +26,12 @@ type PendingPrompt = Readonly<{
   cancelled: boolean;
 }>;
 
+type FakeMcpCall = Readonly<{
+  server: string;
+  tool: string;
+  args?: unknown;
+}>;
+
 const scenario = (process.argv[2] ??
   process.env["FAKE_ACP_SCENARIO"] ??
   "normal") as Scenario;
@@ -27,8 +39,10 @@ const sessionId = "fake-session";
 const logPath = process.env["FAKE_ACP_LOG"];
 const permissionPath = process.env["FAKE_ACP_PERMISSION_PATH"] ?? "lesson.md";
 const crashMarkerPath = process.env["FAKE_ACP_CRASH_MARKER"];
+const rawMcpCall = process.env["FAKE_ACP_MCP_CALL"];
 let nextServerRequestId = 1;
 let activePrompt: PendingPrompt | undefined;
+let configuredMcpServers: readonly McpServerConnection[] = [];
 let pendingPermission:
   | ((response: Readonly<{ selectedOptionId?: string }>) => void)
   | undefined;
@@ -39,6 +53,129 @@ const sleep = async (milliseconds: number): Promise<void> => {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const wireNameValueRecord = (
+  value: unknown,
+): Readonly<Record<string, string>> | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const result: Record<string, string> = {};
+
+  for (const entry of value) {
+    if (
+      !isRecord(entry) ||
+      typeof entry["name"] !== "string" ||
+      typeof entry["value"] !== "string"
+    ) {
+      return undefined;
+    }
+
+    result[entry["name"]] = entry["value"];
+  }
+
+  return result;
+};
+
+const stringArray = (value: unknown): readonly string[] | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  return value.every((entry) => typeof entry === "string") ? value : undefined;
+};
+
+const mcpServerConnection = (
+  value: unknown,
+): McpServerConnection | undefined => {
+  if (!isRecord(value) || typeof value["name"] !== "string") {
+    return undefined;
+  }
+
+  if ("type" in value) {
+    if (value["type"] !== "http" || typeof value["url"] !== "string") {
+      return undefined;
+    }
+
+    const headers = wireNameValueRecord(value["headers"]);
+
+    if (headers === undefined) {
+      return undefined;
+    }
+
+    return {
+      name: value["name"],
+      url: value["url"],
+      headers,
+    };
+  }
+
+  if (typeof value["command"] === "string") {
+    const args = stringArray(value["args"]);
+    const env = wireNameValueRecord(value["env"]);
+
+    if (args === undefined || env === undefined) {
+      return undefined;
+    }
+
+    return {
+      name: value["name"],
+      command: value["command"],
+      args,
+      env,
+    };
+  }
+
+  return undefined;
+};
+
+const wireMcpServers = (params: unknown): readonly unknown[] => {
+  if (!isRecord(params) || !Array.isArray(params["mcpServers"])) {
+    return [];
+  }
+
+  return params["mcpServers"];
+};
+
+const mcpServerConnections = (params: unknown): readonly McpServerConnection[] => {
+  return wireMcpServers(params).map((server, index) => {
+    const parsed = mcpServerConnection(server);
+
+    if (parsed === undefined) {
+      throw new Error(`Invalid ACP MCP server wire config at index ${index}.`);
+    }
+
+    return parsed;
+  });
+};
+
+const parseMcpCall = (): FakeMcpCall | undefined => {
+  if (rawMcpCall === undefined || rawMcpCall.trim().length === 0) {
+    return undefined;
+  }
+
+  const parsed = JSON.parse(rawMcpCall) as unknown;
+
+  if (
+    !isRecord(parsed) ||
+    typeof parsed["server"] !== "string" ||
+    typeof parsed["tool"] !== "string"
+  ) {
+    throw new Error("FAKE_ACP_MCP_CALL must include server and tool strings.");
+  }
+
+  return {
+    server: parsed["server"],
+    tool: parsed["tool"],
+    ...(Object.hasOwn(parsed, "args") ? { args: parsed["args"] } : {}),
+  };
+};
+
+const fakeMcpCall = parseMcpCall();
+
+const mcpArgs = (args: unknown): McpJsonObject =>
+  isRecord(args) ? (args as McpJsonObject) : {};
 
 const send = (value: unknown): void => {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -99,7 +236,92 @@ const finishPrompt = (id: JsonRpcId, stopReason: string): void => {
   respond(id, { stopReason });
 };
 
+const runMcpTurn = async (
+  promptId: JsonRpcId,
+  call: FakeMcpCall,
+): Promise<void> => {
+  await sleep(5);
+  const toolCallId = `mcp-${call.tool}`;
+  const server = configuredMcpServers.find(
+    (candidate) => candidate.name === call.server,
+  );
+
+  update({
+    sessionUpdate: "tool_call",
+    toolCallId,
+    title: call.tool,
+    kind: "mcp",
+    status: "pending",
+    rawInput: mcpArgs(call.args),
+  });
+
+  if (server === undefined) {
+    update({
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: "failed",
+      error: `MCP server was not configured: ${call.server}`,
+    });
+    finishPrompt(promptId, "end_turn");
+    return;
+  }
+
+  let client:
+    | Awaited<ReturnType<typeof connectMcpClient>>
+    | undefined;
+
+  try {
+    client = await connectMcpClient(server, {
+      clientInfo: {
+        name: "fake-acp-agent",
+        version: "0.0.0",
+      },
+      requestTimeoutMs: 1_000,
+    });
+    const result = await client.callTool(call.tool, mcpArgs(call.args));
+
+    log({
+      event: "mcp/tools/call",
+      server: call.server,
+      tool: call.tool,
+      args: mcpArgs(call.args),
+      result,
+    });
+    update({
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: result.isError === true ? "failed" : "completed",
+      rawOutput: result,
+    });
+  } catch (error) {
+    log({
+      event: "mcp/error",
+      server: call.server,
+      tool: call.tool,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    update({
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    if (client !== undefined) {
+      await client.close();
+    }
+  }
+
+  await sleep(5);
+  finishPrompt(promptId, "end_turn");
+};
+
 const runNormalTurn = async (promptId: JsonRpcId): Promise<void> => {
+  if (fakeMcpCall !== undefined) {
+    await runMcpTurn(promptId, fakeMcpCall);
+    return;
+  }
+
   await sleep(5);
   update(textChunk("agent_thought_chunk", "considering the lesson"));
   await sleep(5);
@@ -318,9 +540,13 @@ for await (const line of input) {
   }
 
   if (message.method === "session/new") {
+    const receivedMcpServers = wireMcpServers(message.params);
+    configuredMcpServers = mcpServerConnections(message.params);
     log({
       event: "session/new",
       params: message.params,
+      mcpServers: receivedMcpServers,
+      parsedMcpServers: configuredMcpServers,
       sessionId,
     });
     respond(message.id, { sessionId });

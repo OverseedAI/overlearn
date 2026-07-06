@@ -42,7 +42,25 @@ export type PermissionPolicy = Readonly<{
   defaultReason?: string;
 }>;
 
+export type HarnessMcpStdioServerConfig = Readonly<{
+  name: string;
+  command: string;
+  args: readonly string[];
+  env: Readonly<Record<string, string>>;
+}>;
+
+export type HarnessMcpHttpServerConfig = Readonly<{
+  name: string;
+  url: string;
+  headers?: Readonly<Record<string, string>>;
+}>;
+
+export type HarnessMcpServerConfig =
+  | HarnessMcpStdioServerConfig
+  | HarnessMcpHttpServerConfig;
+
 export type HarnessSessionConfig = Readonly<{
+  mcpServers?: readonly HarnessMcpServerConfig[];
   permissionPolicy?: PermissionPolicy;
   metadata?: JsonObject;
 }>;
