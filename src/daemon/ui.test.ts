@@ -13,6 +13,7 @@ const renderEmptyPage = (
   status:
     | "waiting-for-agent"
     | "agent-working"
+    | "agent-failed"
     | "wrapping-up"
     | "session-ended" = "agent-working",
   hasSeenWait = false,
@@ -129,6 +130,15 @@ describe("renderPage", () => {
     expect(html).toContain(
       'placeholder="Session is wrapping up — the agent is writing the summary"',
     );
+  });
+
+  test("renders agent failure status with retry-ready composer", () => {
+    const html = renderEmptyPage("agent-failed", true);
+
+    expect(html).toContain("Agent failed — you can submit again");
+    expect(html).toContain('class="status-line failed"');
+    expect(html).toContain('aria-label="Message the agent…"');
+    expect(html).toContain('placeholder="Message the agent…"');
   });
 
   test("renders session-ended state without hiding transcript content", () => {

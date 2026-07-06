@@ -1,6 +1,13 @@
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
-type Scenario = "normal" | "permission" | "never" | "crash" | "malformed";
+type Scenario =
+  | "normal"
+  | "permission"
+  | "never"
+  | "crash-once"
+  | "crash-always"
+  | "malformed";
 type JsonRpcId = string | number | null;
 type JsonRpcMessage = Readonly<{
   id?: JsonRpcId;
@@ -17,6 +24,9 @@ const scenario = (process.argv[2] ??
   process.env["FAKE_ACP_SCENARIO"] ??
   "normal") as Scenario;
 const sessionId = "fake-session";
+const logPath = process.env["FAKE_ACP_LOG"];
+const permissionPath = process.env["FAKE_ACP_PERMISSION_PATH"] ?? "lesson.md";
+const crashMarkerPath = process.env["FAKE_ACP_CRASH_MARKER"];
 let nextServerRequestId = 1;
 let activePrompt: PendingPrompt | undefined;
 let pendingPermission:
@@ -32,6 +42,21 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const send = (value: unknown): void => {
   process.stdout.write(`${JSON.stringify(value)}\n`);
+};
+
+const log = (value: Record<string, unknown>): void => {
+  if (logPath === undefined) {
+    return;
+  }
+
+  appendFileSync(
+    logPath,
+    `${JSON.stringify({
+      ...value,
+      pid: process.pid,
+      scenario,
+    })}\n`,
+  );
 };
 
 const sendRaw = (value: string): void => {
@@ -128,7 +153,7 @@ const requestPermission = async (): Promise<string | undefined> => {
         toolCallId: "tool-1",
         title: "Write the generated lesson.",
         kind: "edit",
-        locations: [{ path: "lesson.md" }],
+        locations: [{ path: permissionPath }],
       },
       options: [
         {
@@ -162,7 +187,7 @@ const runPermissionTurn = async (promptId: JsonRpcId): Promise<void> => {
     title: "Write the generated lesson.",
     kind: "edit",
     status: "pending",
-    locations: [{ path: "lesson.md" }],
+    locations: [{ path: permissionPath }],
   });
 
   const optionId = await requestPermission();
@@ -192,6 +217,19 @@ const runCrashTurn = async (): Promise<void> => {
   process.exit(42);
 };
 
+const shouldCrashOnce = (): boolean => {
+  if (crashMarkerPath === undefined) {
+    return true;
+  }
+
+  if (existsSync(crashMarkerPath)) {
+    return false;
+  }
+
+  writeFileSync(crashMarkerPath, "crashed\n");
+  return true;
+};
+
 const runMalformedTurn = async (): Promise<void> => {
   await sleep(5);
   sendRaw("{malformed-json\n");
@@ -210,7 +248,16 @@ const runTurn = (promptId: JsonRpcId): void => {
     return;
   }
 
-  if (scenario === "crash") {
+  if (scenario === "crash-once") {
+    if (shouldCrashOnce()) {
+      void runCrashTurn();
+    } else {
+      void runNormalTurn(promptId);
+    }
+    return;
+  }
+
+  if (scenario === "crash-always") {
     void runCrashTurn();
     return;
   }
@@ -241,6 +288,12 @@ for await (const line of input) {
   const message = JSON.parse(line) as JsonRpcMessage;
 
   if (message.method === "initialize") {
+    log({
+      event: "initialize",
+      env: {
+        CLAUDECODE: process.env["CLAUDECODE"] ?? null,
+      },
+    });
     respond(message.id, {
       protocolVersion: 1,
       agentCapabilities: {
@@ -265,6 +318,11 @@ for await (const line of input) {
   }
 
   if (message.method === "session/new") {
+    log({
+      event: "session/new",
+      params: message.params,
+      sessionId,
+    });
     respond(message.id, { sessionId });
     continue;
   }
@@ -274,11 +332,22 @@ for await (const line of input) {
       continue;
     }
 
+    log({
+      event: "session/prompt",
+      params: message.params,
+      prompt: isRecord(message.params) ? message.params["prompt"] : undefined,
+      sessionId,
+    });
     runTurn(message.id);
     continue;
   }
 
   if (message.method === "session/cancel") {
+    log({
+      event: "session/cancel",
+      params: message.params,
+      sessionId,
+    });
     const prompt = activePrompt;
 
     if (prompt !== undefined) {

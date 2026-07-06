@@ -44,7 +44,15 @@ import {
   type TopicNode,
   type TranscriptEntry,
   type TurnEvent,
+  type TurnFile,
 } from "../course";
+import {
+  createDaemonTurnOrchestrator,
+  orchestratedTurnsEnabled,
+  resolveCourseWorkingDirectory,
+  type AgentStreamPayload,
+  type DaemonTurnOrchestrator,
+} from "./orchestrator";
 import { watchFeynmanFile } from "./feynman";
 import { watchGlossaryFile } from "./glossary";
 import { watchMasteryFile } from "./mastery";
@@ -75,12 +83,14 @@ type Env = Readonly<Record<string, string | undefined>>;
 type UiStatus =
   | "waiting-for-agent"
   | "agent-working"
+  | "agent-failed"
   | "wrapping-up"
   | "session-ended";
 
 type UiStatusPayload = Readonly<{
   status: UiStatus;
   hasSeenWait: boolean;
+  message?: string;
 }>;
 
 export type AgentMessageSource =
@@ -978,6 +988,12 @@ const createSseHub = (
     }
   };
 
+  const broadcastAgentStream = (payload: AgentStreamPayload): void => {
+    for (const subscriber of subscribers) {
+      writeEvent(subscriber, "agent-stream", payload);
+    }
+  };
+
   const connect = (
     request: IncomingMessage,
     response: ServerResponse,
@@ -1012,6 +1028,7 @@ const createSseHub = (
   };
 
   return {
+    broadcastAgentStream,
     broadcastFeynman,
     broadcastGlossary,
     broadcastLesson,
@@ -1184,9 +1201,18 @@ const sendResponse = async (
   target.end(await response.text());
 };
 
+type FlushedTurn = Readonly<{
+  turnPath: string;
+  turn: TurnFile;
+}>;
+
+const readWrittenTurnFile = async (turnPath: string): Promise<TurnFile> =>
+  JSON.parse(await readFile(turnPath, "utf8")) as TurnFile;
+
 export const runDaemon = async (courseDir: string): Promise<void> => {
   const coursePaths = getCoursePaths(courseDir);
   const coursePath = coursePaths.courseDir;
+  const orchestrated = orchestratedTurnsEnabled(process.env);
 
   // Resumed/fetched courses have no runtime dir yet; watchers below need it.
   await mkdir(coursePaths.turnsDir, { recursive: true });
@@ -1203,14 +1229,18 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   let lastRecordedFeynmanCheckIssuedAt =
     latestFeynmanCheckIssuedAt(initialTranscript);
 
-  let status: UiStatus = "agent-working";
-  let hasSeenWait = false;
+  let status: UiStatus = orchestrated ? "waiting-for-agent" : "agent-working";
+  let statusMessage: string | undefined;
+  let hasSeenWait = orchestrated;
   let waiter: Waiter | undefined;
   let nextWaiterId = 1;
 
   const serialize = createSerializer();
   const sseHub = createSseHub(
-    () => ({ status, hasSeenWait }),
+    () =>
+      statusMessage === undefined
+        ? { status, hasSeenWait }
+        : { status, hasSeenWait, message: statusMessage },
     () => glossaryEntries,
     () => topicTree,
     () => unassignedDemos,
@@ -1218,6 +1248,14 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     () => demoFileSet,
     () => activeFeynmanCheck,
   );
+  const orchestrator: DaemonTurnOrchestrator | undefined = orchestrated
+    ? createDaemonTurnOrchestrator({
+        coursePaths,
+        cwd: await resolveCourseWorkingDirectory(coursePaths),
+        env: process.env,
+        onAgentEvent: sseHub.broadcastAgentStream,
+      })
+    : undefined;
 
   await backfillLessonTranscripts(
     coursePath,
@@ -1353,8 +1391,15 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     },
   });
 
-  const setStatus = (nextStatus: UiStatus): void => {
+  const setStatus = (
+    nextStatus: UiStatus,
+    message: string | undefined = undefined,
+  ): void => {
     status = nextStatus;
+    statusMessage = message;
+    if (nextStatus === "agent-failed") {
+      hasSeenWait = true;
+    }
     sseHub.broadcastStatus();
   };
 
@@ -1363,7 +1408,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       ? "wrapping-up"
       : "agent-working";
 
-  const flushPendingTurn = async (): Promise<string | undefined> => {
+  const flushPendingTurnPath = async (): Promise<string | undefined> => {
     const events = await readPendingEvents(coursePath);
     if (events.length === 0) {
       return undefined;
@@ -1376,12 +1421,124 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     return turnPath;
   };
 
+  const flushPendingTurn = async (): Promise<FlushedTurn | undefined> => {
+    const turnPath = await flushPendingTurnPath();
+    if (turnPath === undefined) {
+      return undefined;
+    }
+
+    return {
+      turnPath,
+      turn: await readWrittenTurnFile(turnPath),
+    };
+  };
+
+  let orchestratedTurnRunning = false;
+
+  const drainOrchestratedTurns = async (): Promise<void> => {
+    if (orchestrator === undefined || orchestratedTurnRunning) {
+      return;
+    }
+
+    orchestratedTurnRunning = true;
+
+    try {
+      while (true) {
+        const flushed = await serialize(async () => {
+          const events = await readPendingEvents(coursePath);
+          if (events.length === 0) {
+            return undefined;
+          }
+
+          const turn = await flushPendingTurn();
+          if (turn === undefined) {
+            return undefined;
+          }
+
+          const finalTurn = turn.turn.events.some(
+            (event) => event.type === "session-done",
+          );
+          setStatus(finalTurn ? "wrapping-up" : "agent-working");
+
+          return { ...turn, finalTurn };
+        });
+
+        if (flushed === undefined) {
+          await serialize(async () => {
+            if (status === "agent-working") {
+              setStatus("waiting-for-agent");
+            }
+          });
+          return;
+        }
+
+        const result = await orchestrator.runTurn(
+          flushed.turnPath,
+          flushed.turn,
+          flushed.finalTurn ? "wrap-up" : "teaching",
+        );
+
+        if (!result.ok) {
+          setStatus("agent-failed", result.message);
+          return;
+        }
+
+        if (flushed.finalTurn) {
+          await orchestrator.endSession();
+          requestShutdown();
+          return;
+        }
+
+        const hasPending = await serialize(async () => {
+          const pendingEvents = await readPendingEvents(coursePath);
+          if (pendingEvents.length === 0) {
+            setStatus("waiting-for-agent");
+            return false;
+          }
+
+          return true;
+        });
+
+        if (!hasPending) {
+          return;
+        }
+      }
+    } finally {
+      orchestratedTurnRunning = false;
+      if (status !== "wrapping-up" && status !== "session-ended") {
+        const pendingEvents = await readPendingEvents(coursePath).catch(
+          () => [],
+        );
+        if (pendingEvents.length > 0) {
+          requestOrchestratedTurn();
+        }
+      }
+    }
+  };
+
+  const requestOrchestratedTurn = (): void => {
+    if (orchestrator === undefined) {
+      return;
+    }
+
+    void drainOrchestratedTurns().catch((error: unknown) => {
+      const message =
+        error instanceof Error ? error.message : "Agent orchestration failed.";
+      setStatus("agent-failed", message);
+    });
+  };
+
   const maybeResolveWaiter = async (): Promise<void> => {
+    if (orchestrated) {
+      requestOrchestratedTurn();
+      return;
+    }
+
     if (waiter === undefined) {
       return;
     }
 
-    const turnPath = await flushPendingTurn();
+    const turnPath = await flushPendingTurnPath();
     if (turnPath === undefined) {
       return;
     }
@@ -1394,11 +1551,18 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   const handleWait = async (
     onAbort: (listener: () => void) => void,
   ): Promise<Response> => {
+    if (orchestrated) {
+      return textResponse(
+        "learn wait is disabled while daemon orchestration is enabled.",
+        409,
+      );
+    }
+
     const setup = await serialize(async (): Promise<WaitSetup> => {
       hasSeenWait = true;
       setStatus("waiting-for-agent");
 
-      const immediateTurnPath = await flushPendingTurn();
+      const immediateTurnPath = await flushPendingTurnPath();
       if (immediateTurnPath !== undefined) {
         return {
           kind: "response",
@@ -1754,6 +1918,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     feynmanWatcher.close();
     sseHub.close();
     server.close();
+    await orchestrator?.endSession();
     await clearDaemonMetadata(coursePath);
   };
 

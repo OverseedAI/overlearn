@@ -14,12 +14,29 @@ export const defaultPermissionPolicy: PermissionPolicy = {
 const fieldMatches = (ruleValue: string | undefined, requestValue: string): boolean =>
   ruleValue === undefined || ruleValue === requestValue;
 
+const resourceMatches = (
+  ruleValue: string | undefined,
+  requestValue: string,
+): boolean => {
+  if (ruleValue === undefined) {
+    return true;
+  }
+
+  if (!ruleValue.endsWith("/**")) {
+    return ruleValue === requestValue;
+  }
+
+  const directory = ruleValue.slice(0, -"/**".length);
+
+  return requestValue === directory || requestValue.startsWith(`${directory}/`);
+};
+
 const ruleMatches = (
   rule: PermissionRule,
   request: PermissionRequest,
 ): boolean =>
   fieldMatches(rule.action, request.action) &&
-  fieldMatches(rule.resource, request.resource ?? "");
+  resourceMatches(rule.resource, request.resource ?? "");
 
 export const evaluatePermissionRequest = (
   request: PermissionRequest,
