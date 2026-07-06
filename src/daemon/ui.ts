@@ -20,6 +20,7 @@ type RenderedTranscriptEntry = TranscriptEntry &
 type UiRenderStatus =
   | "waiting-for-agent"
   | "agent-working"
+  | "agent-failed"
   | "wrapping-up"
   | "session-ended";
 
@@ -1123,13 +1124,15 @@ const showTermCard = (target) => {
 };
 
 const setFeynmanControls = () => {
+  const learnerReady =
+    currentStatus === "waiting-for-agent" || currentStatus === "agent-failed";
   const canSubmit =
     activeFeynman !== undefined &&
-    currentStatus === "waiting-for-agent" &&
+    learnerReady &&
     feynmanTextarea.value.trim().length > 0;
 
   feynmanTextarea.disabled =
-    activeFeynman === undefined || currentStatus !== "waiting-for-agent";
+    activeFeynman === undefined || !learnerReady;
   feynmanSubmit.disabled = !canSubmit;
 };
 
@@ -1176,6 +1179,10 @@ const statusText = (status) => {
     return "Your turn — the agent is waiting";
   }
 
+  if (status === "agent-failed") {
+    return "Agent failed — you can submit again";
+  }
+
   if (status === "wrapping-up") {
     return "Agent is writing your wrap-up";
   }
@@ -1191,6 +1198,10 @@ const statusText = (status) => {
 
 const composerLabelForStatus = (status) => {
   if (status === "waiting-for-agent") {
+    return enabledComposerLabel;
+  }
+
+  if (status === "agent-failed") {
     return enabledComposerLabel;
   }
 
@@ -1214,12 +1225,14 @@ const applyComposerLabel = (status) => {
 const applyStatus = (status, nextHasSeenWait = hasSeenWait) => {
   currentStatus = status;
   hasSeenWait = nextHasSeenWait;
-  const waiting = status === "waiting-for-agent";
+  const waiting = status === "waiting-for-agent" || status === "agent-failed";
   const ended = status === "session-ended";
+  const failed = status === "agent-failed";
   const working = status === "agent-working" || status === "wrapping-up";
   statusLine.textContent = statusText(status);
   statusIndicator.classList.toggle("working", working);
   statusIndicator.classList.toggle("ended", ended);
+  statusIndicator.classList.toggle("failed", failed);
   typingIndicator.hidden = waiting || ended;
   sessionEndedBanner.hidden = !ended;
   applyComposerLabel(status);
@@ -1526,6 +1539,9 @@ const events = new EventSource("/api/events");
 events.addEventListener("status", (event) => {
   const payload = JSON.parse(event.data);
   applyStatus(payload.status, payload.hasSeenWait ?? hasSeenWait);
+  if (payload.status === "agent-failed" && payload.message !== undefined) {
+    statusLine.textContent = payload.message;
+  }
 
   if (payload.status === "session-ended") {
     eventsClosedIntentionally = true;
@@ -2115,6 +2131,10 @@ const renderStatusText = (
     return "Your turn — the agent is waiting";
   }
 
+  if (status === "agent-failed") {
+    return "Agent failed — you can submit again";
+  }
+
   if (status === "wrapping-up") {
     return "Agent is writing your wrap-up";
   }
@@ -2130,6 +2150,10 @@ const renderStatusText = (
 
 const composerLabel = (status: UiRenderStatus): string => {
   if (status === "waiting-for-agent") {
+    return "Message the agent…";
+  }
+
+  if (status === "agent-failed") {
     return "Message the agent…";
   }
 
@@ -2159,13 +2183,18 @@ export const renderPage = (
 ): string => {
   const working = status === "agent-working" || status === "wrapping-up";
   const ended = status === "session-ended";
+  const failed = status === "agent-failed";
   const statusLineClass = [
     "status-line",
     ...(working ? ["working"] : []),
     ...(ended ? ["ended"] : []),
+    ...(failed ? ["failed"] : []),
   ].join(" ");
   const typingHidden = working ? "" : " hidden";
-  const composerDisabled = status === "waiting-for-agent" ? "" : " disabled";
+  const composerDisabled =
+    status === "waiting-for-agent" || status === "agent-failed"
+      ? ""
+      : " disabled";
   const composerPlaceholder = composerLabel(status);
   const sessionEndedHidden = ended ? "" : " hidden";
   const doneButtonDisabled =
@@ -3256,6 +3285,14 @@ export const renderPage = (
 
     .status-line.ended .status-dot {
       background: var(--disabled);
+    }
+
+    .status-line.failed {
+      color: var(--danger, #b42318);
+    }
+
+    .status-line.failed .status-dot {
+      background: var(--danger, #b42318);
     }
 
     @keyframes status-pulse {

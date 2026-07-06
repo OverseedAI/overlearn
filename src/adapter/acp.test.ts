@@ -16,7 +16,12 @@ import type {
   SessionRef,
 } from "./types";
 
-type FakeScenario = "normal" | "permission" | "never" | "crash" | "malformed";
+type FakeScenario =
+  | "normal"
+  | "permission"
+  | "never"
+  | "crash-always"
+  | "malformed";
 type LiveSession = Readonly<{
   adapter: HarnessAdapter;
   session: SessionRef;
@@ -273,6 +278,59 @@ describe("ACP harness adapter sessions", () => {
     });
   });
 
+  test("matches directory resource allow rules with /** prefix semantics", () => {
+    const policy = {
+      allow: [
+        {
+          action: "write",
+          resource: "/course/dir/**",
+          reason: "Course writes are pre-approved.",
+        },
+      ],
+      defaultDecision: "deny" as const,
+    };
+
+    expect(
+      evaluatePermissionRequest(
+        {
+          id: "permission-1",
+          action: "write",
+          resource: "/course/dir/lessons/01-foo.md",
+        },
+        policy,
+      ),
+    ).toEqual({
+      allowed: true,
+      reason: "Course writes are pre-approved.",
+    });
+    expect(
+      evaluatePermissionRequest(
+        {
+          id: "permission-2",
+          action: "write",
+          resource: "/course/dir",
+        },
+        policy,
+      ),
+    ).toEqual({
+      allowed: true,
+      reason: "Course writes are pre-approved.",
+    });
+    expect(
+      evaluatePermissionRequest(
+        {
+          id: "permission-3",
+          action: "write",
+          resource: "/course/dirX/lessons/01-foo.md",
+        },
+        policy,
+      ),
+    ).toEqual({
+      allowed: false,
+      reason: "Permission was not pre-approved by the session policy.",
+    });
+  });
+
   test("cancel resolves an active stream with a terminal event", async () => {
     const { adapter, session } = await createFakeSession("never");
     const iterator = adapter.prompt(session, "wait forever")[Symbol.asyncIterator]();
@@ -304,7 +362,7 @@ describe("ACP harness adapter sessions", () => {
   });
 
   test("subprocess crashes become terminal error events", async () => {
-    const { adapter, session } = await createFakeSession("crash");
+    const { adapter, session } = await createFakeSession("crash-always");
     const events = await collectEvents(
       adapter.prompt(session, "crash"),
       "crash events",
