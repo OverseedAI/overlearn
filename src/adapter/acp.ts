@@ -10,6 +10,7 @@ import type {
   ErrorAgentEvent,
   HarnessAdapter,
   HarnessAdapterId,
+  HarnessMcpServerConfig,
   HarnessSessionConfig,
   JsonObject,
   JsonValue,
@@ -21,6 +22,27 @@ import type {
 
 type Env = Readonly<Record<string, string | undefined>>;
 type UnknownRecord = Record<string, unknown>;
+
+type AcpMcpNameValue = Readonly<{
+  name: string;
+  value: string;
+}>;
+
+type AcpMcpStdioServer = Readonly<{
+  name: string;
+  command: string;
+  args: readonly string[];
+  env: readonly AcpMcpNameValue[];
+}>;
+
+type AcpMcpHttpServer = Readonly<{
+  type: "http";
+  name: string;
+  url: string;
+  headers: readonly AcpMcpNameValue[];
+}>;
+
+type AcpMcpServer = AcpMcpStdioServer | AcpMcpHttpServer;
 
 export type AcpAuthDetection = Readonly<{
   env?: readonly string[];
@@ -221,6 +243,33 @@ const mergeEnv = (...envs: readonly Env[]): Record<string, string> => {
 
   return merged;
 };
+
+const acpNameValueArray = (
+  values: Readonly<Record<string, string>> | undefined,
+): readonly AcpMcpNameValue[] =>
+  Object.entries(values ?? {}).map(([name, value]) => ({ name, value }));
+
+const acpMcpServer = (server: HarnessMcpServerConfig): AcpMcpServer => {
+  if ("url" in server) {
+    return {
+      type: "http",
+      name: server.name,
+      url: server.url,
+      headers: acpNameValueArray(server.headers),
+    };
+  }
+
+  return {
+    name: server.name,
+    command: server.command,
+    args: server.args,
+    env: acpNameValueArray(server.env),
+  };
+};
+
+const acpMcpServers = (
+  servers: readonly HarnessMcpServerConfig[] | undefined,
+): readonly AcpMcpServer[] => (servers ?? []).map(acpMcpServer);
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -1276,7 +1325,7 @@ export const createAcpHarnessAdapter = (
         const sessionId = normalizeSessionId(
           await rpc.request("session/new", {
             cwd,
-            mcpServers: [],
+            mcpServers: acpMcpServers(config.mcpServers),
           }),
         );
         const processId = rpc.process.pid;

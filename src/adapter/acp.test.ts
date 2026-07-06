@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  startMcpHttpServer,
+  textMcpResult,
+  type McpJsonObject,
+  type McpServerDefinition,
+} from "../mcp/protocol";
 import {
   createAcpHarnessAdapter,
   type AcpAdapterDefinition,
@@ -22,6 +28,7 @@ type FakeScenario =
   | "never"
   | "crash-always"
   | "malformed";
+type FakeEnv = Readonly<Record<string, string | undefined>>;
 type LiveSession = Readonly<{
   adapter: HarnessAdapter;
   session: SessionRef;
@@ -29,6 +36,9 @@ type LiveSession = Readonly<{
 
 const fixturePath = fileURLToPath(
   new URL("../../test/fixtures/fake-acp-agent.ts", import.meta.url),
+);
+const mcpFixturePath = fileURLToPath(
+  new URL("../../test/fixtures/fake-mcp-server.ts", import.meta.url),
 );
 const liveSessions: LiveSession[] = [];
 const tempDirs: string[] = [];
@@ -72,12 +82,14 @@ const createTempDir = (): Promise<string> =>
 const createFakeSession = async (
   scenario: FakeScenario,
   config: HarnessSessionConfig = {},
+  env: FakeEnv = {},
 ): Promise<LiveSession> => {
   const cwd = await createTempDir();
   tempDirs.push(cwd);
 
   const adapter = createAcpHarnessAdapter(fakeDefinition(scenario), {
     requestTimeoutMs: 1_000,
+    env,
   });
   const session = await withTimeout(
     adapter.newSession(cwd, config),
@@ -108,9 +120,20 @@ const collectEvents = async (
 
       return collected;
     })(),
-    1_500,
+    2_500,
     label,
   );
+
+const readJsonLog = async (
+  path: string,
+): Promise<readonly Record<string, unknown>[]> => {
+  const content = await readFile(path, "utf8");
+
+  return content
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+};
 
 const isPidAlive = (pid: number): boolean => {
   try {
@@ -169,6 +192,74 @@ describe("ACP harness adapter detection", () => {
 });
 
 describe("ACP harness adapter sessions", () => {
+  test("passes configured MCP servers through session/new", async () => {
+    const logDir = await createTempDir();
+    tempDirs.push(logDir);
+    const logPath = join(logDir, "fake-acp.jsonl");
+    const mcpServers = [
+      {
+        name: "teaching-http",
+        url: "http://127.0.0.1:9999/mcp",
+        headers: {
+          Authorization: "Bearer test",
+        },
+      },
+      {
+        name: "teaching-stdio",
+        command: process.execPath,
+        args: [mcpFixturePath],
+        env: {
+          OVERLEARN_TEST_MCP: "1",
+        },
+      },
+    ] satisfies NonNullable<HarnessSessionConfig["mcpServers"]>;
+    const expectedWireMcpServers = [
+      {
+        type: "http",
+        name: "teaching-http",
+        url: "http://127.0.0.1:9999/mcp",
+        headers: [
+          {
+            name: "Authorization",
+            value: "Bearer test",
+          },
+        ],
+      },
+      {
+        name: "teaching-stdio",
+        command: process.execPath,
+        args: [mcpFixturePath],
+        env: [
+          {
+            name: "OVERLEARN_TEST_MCP",
+            value: "1",
+          },
+        ],
+      },
+    ];
+
+    await createFakeSession(
+      "normal",
+      {
+        mcpServers,
+      },
+      {
+        FAKE_ACP_LOG: logPath,
+      },
+    );
+
+    const entries = await readJsonLog(logPath);
+    const sessionNew = entries.find((entry) => entry["event"] === "session/new");
+    const params = sessionNew?.["params"];
+
+    expect(sessionNew?.["mcpServers"]).toEqual(expectedWireMcpServers);
+    expect(
+      typeof params === "object" && params !== null && "mcpServers" in params
+        ? params.mcpServers
+        : undefined,
+    ).toEqual(expectedWireMcpServers);
+  });
+
   test("streams a full turn with stable event ordering and mappings", async () => {
     const { adapter, session } = await createFakeSession("normal");
     const events = await collectEvents(
@@ -215,6 +306,146 @@ describe("ACP harness adapter sessions", () => {
       type: "done",
       reason: "complete",
     });
+  });
+
+  test("fake agent calls a configured HTTP MCP tool", async () => {
+    const calls: McpJsonObject[] = [];
+    const definition: McpServerDefinition = {
+      name: "teaching",
+      version: "0.0.0",
+      tools: [
+        {
+          name: "upsert_topic",
+          description: "Records a topic.",
+          inputSchema: {
+            type: "object",
+            additionalProperties: true,
+          },
+          call: (args) => {
+            calls.push(args);
+            return textMcpResult(`http:${args["slug"] ?? "unknown"}`);
+          },
+        },
+      ],
+    };
+    const mcpServer = startMcpHttpServer(definition);
+
+    try {
+      const { adapter, session } = await createFakeSession(
+        "normal",
+        {
+          mcpServers: [
+            {
+              name: "teaching",
+              url: mcpServer.url,
+            },
+          ],
+        },
+        {
+          FAKE_ACP_MCP_CALL: JSON.stringify({
+            server: "teaching",
+            tool: "upsert_topic",
+            args: {
+              slug: "http-topic",
+            },
+          }),
+        },
+      );
+      const events = await collectEvents(
+        adapter.prompt(session, "call the teaching tool"),
+        "http mcp events",
+      );
+
+      expect(events).toEqual([
+        {
+          type: "tool-call",
+          id: "mcp-upsert_topic",
+          name: "upsert_topic",
+          status: "started",
+          input: {
+            slug: "http-topic",
+          },
+        },
+        {
+          type: "tool-call",
+          id: "mcp-upsert_topic",
+          status: "completed",
+          result: {
+            content: [
+              {
+                type: "text",
+                text: "http:http-topic",
+              },
+            ],
+          },
+        },
+        {
+          type: "done",
+          reason: "complete",
+        },
+      ]);
+      expect(calls).toEqual([{ slug: "http-topic" }]);
+    } finally {
+      mcpServer.stop();
+    }
+  });
+
+  test("fake agent calls a configured stdio MCP tool", async () => {
+    const { adapter, session } = await createFakeSession(
+      "normal",
+      {
+        mcpServers: [
+          {
+            name: "teaching",
+            command: process.execPath,
+            args: [mcpFixturePath],
+            env: {},
+          },
+        ],
+      },
+      {
+        FAKE_ACP_MCP_CALL: JSON.stringify({
+          server: "teaching",
+          tool: "upsert_topic",
+          args: {
+            slug: "stdio-topic",
+          },
+        }),
+      },
+    );
+    const events = await collectEvents(
+      adapter.prompt(session, "call the stdio teaching tool"),
+      "stdio mcp events",
+    );
+
+    expect(events).toEqual([
+      {
+        type: "tool-call",
+        id: "mcp-upsert_topic",
+        name: "upsert_topic",
+        status: "started",
+        input: {
+          slug: "stdio-topic",
+        },
+      },
+      {
+        type: "tool-call",
+        id: "mcp-upsert_topic",
+        status: "completed",
+        result: {
+          content: [
+            {
+              type: "text",
+              text: 'upsert_topic:{"slug":"stdio-topic"}',
+            },
+          ],
+        },
+      },
+      {
+        type: "done",
+        reason: "complete",
+      },
+    ]);
   });
 
   test("answers permission requests from the session policy and surfaces them", async () => {
