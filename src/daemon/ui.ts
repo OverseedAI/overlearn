@@ -141,6 +141,7 @@ let hasSeenWait = initialHasSeenWait;
 let topicMenuOpen = false;
 let harnessMenuOpen = false;
 let harnessBusy = false;
+let harnessSwitchNote = undefined;
 let doneConfirmOpen = false;
 let railOpen = false;
 let activeRailTab = "lesson";
@@ -291,7 +292,7 @@ const selectHarness = async (id) => {
   }
 
   setHarnessMenuOpen(false, { focusButton: true });
-  await refreshHarnesses();
+  renderHarnessSelector();
 };
 
 const setDoneConfirmOpen = (open, options = {}) => {
@@ -1332,6 +1333,7 @@ const applyAgentStream = (payload) => {
     return;
   }
 
+  harnessSwitchNote = undefined;
   lastAgentStreamTurn = payload.turn;
   lastAgentStreamSequence = payload.sequence;
 
@@ -1565,6 +1567,10 @@ const renderFeynmanPanel = () => {
 };
 
 const statusText = (status) => {
+  if (harnessSwitchNote !== undefined && agentActivitySummary() === undefined) {
+    return harnessSwitchNote;
+  }
+
   if (status === "waiting-for-agent") {
     return "Your turn — the agent is waiting";
   }
@@ -1963,6 +1969,22 @@ events.addEventListener("status", (event) => {
     eventsClosedIntentionally = true;
     events.close();
   }
+});
+events.addEventListener("harnesses", (event) => {
+  const payload = JSON.parse(event.data);
+  const nextHarnesses = Array.isArray(payload) ? payload : payload.harnesses;
+  if (!Array.isArray(nextHarnesses)) {
+    return;
+  }
+
+  harnesses = [...nextHarnesses];
+  const selected = selectedHarness();
+  if (!Array.isArray(payload) && payload.switched === true && selected !== undefined) {
+    harnessSwitchNote = "Switched to " + selected.name;
+    statusLine.textContent = harnessSwitchNote;
+  }
+
+  renderHarnessSelector();
 });
 events.addEventListener("message", (event) => {
   appendEntry(JSON.parse(event.data));

@@ -73,6 +73,12 @@ config directory). The working directory is persisted for future orchestration;
 the current daemon still runs through the existing `learn resume <course>`
 command.
 
+In orchestrated mode, changing the header harness picker mid-course takes effect
+immediately once the current turn is idle. The daemon ends the old harness
+session, starts the next turn on the new harness, and asks it to rebuild from
+the on-disk course state; lessons, transcript, glossary, mastery, and topic
+state carry over, but the old agent's in-context memory does not.
+
 ## Registry
 
 The course registry Worker lives in `registry/` and is local-first while R2 enablement is pending:

@@ -15,7 +15,7 @@ import { assembleInstructionModules, formatInstructions } from "../instructions"
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-export type TurnPromptMode = "teaching" | "wrap-up";
+export type TurnPromptMode = "teaching" | "wrap-up" | "greeting";
 
 export type TurnPromptInput = Readonly<{
   courseName: string;
@@ -48,6 +48,7 @@ export type DaemonTurnOrchestrator = Readonly<{
     mode: TurnPromptMode,
   ) => Promise<OrchestratorResult>;
   endSession: () => Promise<void>;
+  resetSession: () => Promise<boolean>;
 }>;
 
 type CreateDaemonTurnOrchestratorOptions = Readonly<{
@@ -320,6 +321,14 @@ const modePreamble = (input: TurnPromptInput): string =>
         "Mirror the protocol's Session wrap-up semantics: optionally emit final mastery for scores that are clear, then send one closing `learn say` summarizing what was covered, recorded mastery, and a suggested next session.",
         "Do not run `learn stop` and do not run `learn wait`; the daemon will end the harness session and stop after this prompt completes.",
       ].join("\n")
+    : input.mode === "greeting"
+      ? [
+          "## Harness swap greeting turn",
+          "",
+          "This turn contains a harness-swapped event. Rebuild context from disk before speaking because the previous harness session's in-context memory is gone.",
+          "Send one short continuity greeting through `learn say`: summarize what has been covered, where the course left off, and the next step.",
+          "Do not start a new teaching objective and do not run `learn wait`; the daemon will pause for the learner after this greeting.",
+        ].join("\n")
     : [
         "## Teaching turn",
         "",
@@ -480,6 +489,14 @@ export const createDaemonTurnOrchestrator = (
     }
   };
 
+  const resetSession = async (): Promise<boolean> => {
+    const hadActiveSession = activeSession !== undefined;
+    await endSession();
+    nextTurnNeedsResumeContext = true;
+
+    return hadActiveSession;
+  };
+
   const ensureSession = async (): Promise<ActiveSession> => {
     if (activeSession !== undefined) {
       return activeSession;
@@ -575,6 +592,7 @@ export const createDaemonTurnOrchestrator = (
 
   return {
     endSession,
+    resetSession,
     runTurn,
   };
 };

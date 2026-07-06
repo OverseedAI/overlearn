@@ -154,6 +154,18 @@ const waitForDaemonStopped = async (
   );
 };
 
+const waitForPidStopped = async (pid: number): Promise<void> => {
+  await withTimeout(
+    (async () => {
+      while (isPidAlive(pid)) {
+        await sleep(25);
+      }
+    })(),
+    5_000,
+    `pid ${pid} shutdown`,
+  );
+};
+
 const canBindLocalhost = async (): Promise<boolean> => {
   const server = createServer((_request, response) => {
     response.end("ok");
@@ -297,6 +309,27 @@ const harnessById = (
   }
 
   return harness;
+};
+
+const harnessPayloadHasSelected = (
+  payload: unknown,
+  id: string,
+  switched?: boolean,
+): boolean => {
+  if (!isRecord(payload) || !Array.isArray(payload["harnesses"])) {
+    return false;
+  }
+
+  if (switched !== undefined && payload["switched"] !== switched) {
+    return false;
+  }
+
+  return payload["harnesses"].some(
+    (candidate) =>
+      isRecord(candidate) &&
+      candidate["id"] === id &&
+      candidate["selected"] === true,
+  );
 };
 
 const submitMessage = async (url: string, text: string): Promise<void> => {
@@ -515,6 +548,30 @@ describe("daemon turn orchestration helpers", () => {
     expect(prompt).toContain('"type": "session-done"');
   });
 
+  test("adds continuity greeting directions for harness swap turns", () => {
+    const prompt = buildTurnPrompt({
+      courseName: "finance",
+      courseDir: "/courses/finance",
+      turnPath: "/courses/finance/.overlearn/turns/turn-8.json",
+      turn: {
+        turn: 8,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        events: [
+          { type: "harness-swapped", from: "claude-code", to: "codex" },
+        ],
+      },
+      instructions: "protocol text",
+      includeResumeContext: true,
+      mode: "greeting",
+    });
+
+    expect(prompt).toContain("## Harness swap greeting turn");
+    expect(prompt).toContain("Rebuild context from disk before speaking");
+    expect(prompt).toContain("one short continuity greeting");
+    expect(prompt).toContain('"type": "harness-swapped"');
+    expect(prompt).toContain("## Resume context required");
+  });
+
   test("builds a default-deny course permission policy", () => {
     const policy = buildCoursePermissionPolicy(
       "/courses/finance",
@@ -710,6 +767,176 @@ describe("daemon harness API", () => {
       await killDaemon(run.pid);
       await rm(run.coursesDir, { force: true, recursive: true });
       await rm(binDir, { force: true, recursive: true });
+    }
+  }, 12_000);
+
+  test("swaps an idle active session and immediately runs a continuity greeting", async () => {
+    if (!(await canBindLocalhost())) {
+      if (process.env["CI"] === "true") {
+        throw new Error("Localhost binding is unavailable; E2E cannot run.");
+      }
+
+      return;
+    }
+
+    const run = await startOrchestratedDaemon("normal");
+    const firstClient = await createSseClient(run.url);
+    const secondClient = await createSseClient(run.url);
+
+    try {
+      await submitMessage(run.url, "start on adapter A");
+      await firstClient.waitFor(
+        "agent-stream",
+        (data) =>
+          isRecord(data) &&
+          data["turn"] === 1 &&
+          isRecord(data["event"]) &&
+          data["event"]["type"] === "done",
+        "first adapter turn done",
+      );
+      await firstClient.waitFor(
+        "status",
+        (data) => isRecord(data) && data["status"] === "waiting-for-agent",
+        "idle after first turn",
+      );
+
+      const response = await fetch(`${run.url}/api/harness`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "codex" }),
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        ok: true,
+        harness: "codex",
+        swapped: true,
+      });
+
+      await expect(readCourseManifest(run.courseDir)).resolves.toMatchObject({
+        harness: "codex",
+      });
+
+      await firstClient.waitFor(
+        "harnesses",
+        (data) => harnessPayloadHasSelected(data, "codex", true),
+        "first client selected codex",
+      );
+      await secondClient.waitFor(
+        "harnesses",
+        (data) => harnessPayloadHasSelected(data, "codex", true),
+        "second client selected codex",
+      );
+      await firstClient.waitFor(
+        "agent-stream",
+        (data) =>
+          isRecord(data) &&
+          data["turn"] === 2 &&
+          isRecord(data["event"]) &&
+          data["event"]["type"] === "thinking",
+        "greeting turn started",
+      );
+      await firstClient.waitFor(
+        "agent-stream",
+        (data) =>
+          isRecord(data) &&
+          data["turn"] === 2 &&
+          isRecord(data["event"]) &&
+          data["event"]["type"] === "done",
+        "greeting turn done",
+      );
+      await firstClient.waitFor(
+        "status",
+        (data) => isRecord(data) && data["status"] === "waiting-for-agent",
+        "idle after greeting",
+      );
+
+      const logEntries = await waitForLogEntries(
+        run.logPath,
+        (entries) =>
+          entries.filter((entry) => entry["event"] === "session/new")
+            .length >= 2 &&
+          entries.filter((entry) => entry["event"] === "session/prompt")
+            .length >= 2,
+        "swap sessions and prompts",
+      );
+      const sessionNews = logEntries.filter(
+        (entry) => entry["event"] === "session/new",
+      );
+      const firstPid = sessionNews[0]?.["pid"];
+      const secondPid = sessionNews[1]?.["pid"];
+      if (typeof firstPid !== "number" || typeof secondPid !== "number") {
+        throw new Error("Expected two fake adapter process ids.");
+      }
+
+      expect(sessionNews).toHaveLength(2);
+      expect(secondPid).not.toBe(firstPid);
+      await waitForPidStopped(firstPid);
+
+      const prompts = logEntries.filter(
+        (entry) => entry["event"] === "session/prompt",
+      );
+      const swapPrompt = promptText(prompts[1] ?? {});
+      expect(swapPrompt).toContain("## Harness swap greeting turn");
+      expect(swapPrompt).toContain("## Resume context required");
+      expect(swapPrompt).toContain('"type": "harness-swapped"');
+      expect(swapPrompt).toContain('"from": "claude-code"');
+      expect(swapPrompt).toContain('"to": "codex"');
+
+      const stop = await runLearn(["stop", run.courseName], run.env);
+      expect(stop.exitCode).toBe(0);
+      await waitForDaemonStopped(run.courseDir, run.pid);
+    } finally {
+      firstClient.close();
+      secondClient.close();
+      await killDaemon(run.pid);
+      await rm(run.coursesDir, { force: true, recursive: true });
+    }
+  }, 12_000);
+
+  test("persisting a harness selection with no active session does not greet", async () => {
+    if (!(await canBindLocalhost())) {
+      if (process.env["CI"] === "true") {
+        throw new Error("Localhost binding is unavailable; E2E cannot run.");
+      }
+
+      return;
+    }
+
+    const run = await startOrchestratedDaemon("normal");
+    const sse = await createSseClient(run.url);
+
+    try {
+      const response = await fetch(`${run.url}/api/harness`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "codex" }),
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        ok: true,
+        harness: "codex",
+        swapped: false,
+      });
+
+      await sse.waitFor(
+        "harnesses",
+        (data) => harnessPayloadHasSelected(data, "codex", false),
+        "selected codex without swap",
+      );
+      await expect(readCourseManifest(run.courseDir)).resolves.toMatchObject({
+        harness: "codex",
+      });
+
+      await sleep(100);
+      expect(await readLogEntries(run.logPath)).toHaveLength(0);
+
+      const stop = await runLearn(["stop", run.courseName], run.env);
+      expect(stop.exitCode).toBe(0);
+      await waitForDaemonStopped(run.courseDir, run.pid);
+    } finally {
+      sse.close();
+      await killDaemon(run.pid);
+      await rm(run.coursesDir, { force: true, recursive: true });
     }
   }, 12_000);
 
