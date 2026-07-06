@@ -9,6 +9,7 @@ export default typescriptEslint.config(
       "coverage/**",
       ".bun-cache/**",
       ".tmp/**",
+      "src-tauri/target/**",
     ],
   },
   eslint.configs.recommended,

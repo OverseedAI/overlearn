@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Overlearn</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="toolbar" aria-label="Overlearn launcher">
+        <div>
+          <h1>Overlearn</h1>
+          <p id="configPath" class="config-path"></p>
+        </div>
+        <button id="pickCourse" type="button">Add Course</button>
+      </section>
+
+      <section id="emptyState" class="empty-state" hidden>
+        <h2>No courses selected</h2>
+        <p>Pick an existing Overlearn course directory.</p>
+      </section>
+
+      <section id="courseList" class="course-list" aria-label="Courses"></section>
+
+      <p id="statusLine" class="status-line" role="status"></p>
+    </main>
+
+    <template id="courseTemplate">
+      <article class="course-card">
+        <div class="course-main">
+          <h2 class="course-title"></h2>
+          <p class="course-path"></p>
+          <p class="working-dir"></p>
+        </div>
+        <div class="course-actions">
+          <button class="open-course" type="button">Open</button>
+          <button class="set-working-dir" type="button">Set Working Dir</button>
+          <button class="clear-working-dir secondary" type="button">Clear</button>
+          <button class="remove-course danger" type="button">Remove</button>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
