@@ -32,7 +32,58 @@ describe("renderPage", () => {
     const html = renderEmptyPage();
 
     expect(html).toContain("<title>Display Title - overlearn</title>");
-    expect(html).toContain("<h1>Display Title</h1>");
+    expect(html).toContain(
+      '<a class="wordmark" href="/" aria-label="Homepage"><strong>overlearn</strong></a>',
+    );
+    expect(html).toContain('<h1 class="course-title">Display Title</h1>');
+    expect(html).toContain(
+      '<span id="topic-title" class="topic-title-text">Display Title</span>',
+    );
+  });
+
+  test("renders topic navigation in the header dropdown with mastery progress", () => {
+    const topics: TopicNode[] = [
+      {
+        path: "intro",
+        title: "Intro",
+        current: true,
+        children: [
+          {
+            path: "intro/details",
+            title: "Details",
+            current: false,
+            children: [],
+          },
+        ],
+      },
+    ];
+    const html = renderPage(
+      "Display Title",
+      [],
+      emptyLessons,
+      [],
+      topics,
+      [],
+      [{ concept: "intro", score: 72, at: "2026-01-01T00:00:00.000Z" }],
+      new Set(),
+      undefined,
+    );
+
+    expect(html).toContain('id="topic-menu-button"');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain(
+      '<span id="topic-title" class="topic-title-text">Intro</span>',
+    );
+    expect(html).toContain(
+      '<span id="topic-progress" class="topic-progress" aria-label="Mastery progress 1/2 · 72">1/2 · 72</span>',
+    );
+    expect(html).toContain('id="topic-menu" class="topic-menu"');
+    expect(html).toContain('id="mastery-summary" class="mastery-summary"');
+    expect(html).toContain("1/2 graded");
+    expect(html).toContain("Weakest: intro (72)");
+    expect(html).toContain('id="lesson-list" class="lesson-list"');
+    expect(html).toContain('data-topic-path="intro"');
+    expect(html).not.toContain("lesson-nav");
   });
 
   test("renders initial status and composer affordance before any wait", () => {

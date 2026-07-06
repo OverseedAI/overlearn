@@ -52,10 +52,16 @@ const initialMastery = __MASTERY__;
 const initialActiveFeynman = __ACTIVE_FEYNMAN__ ?? undefined;
 const initialStatus = __STATUS__;
 const initialHasSeenWait = __HAS_SEEN_WAIT__;
+const courseDisplayTitle = __COURSE_TITLE__;
 const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
 const enabledComposerLabel = "Message the agent…";
 const disabledComposerLabel = "The agent is teaching — you can reply when it pauses";
 
+const topicSwitcher = document.querySelector("#topic-switcher");
+const topicMenuButton = document.querySelector("#topic-menu-button");
+const topicMenu = document.querySelector("#topic-menu");
+const topicTitle = document.querySelector("#topic-title");
+const topicProgress = document.querySelector("#topic-progress");
 const form = document.querySelector("#turn-form");
 const textarea = document.querySelector("#message");
 const submitButton = document.querySelector("#submit");
@@ -96,6 +102,7 @@ let activeFeynman = initialActiveFeynman;
 let submittedFeynmanConcept = undefined;
 let currentStatus = initialStatus;
 let hasSeenWait = initialHasSeenWait;
+let topicMenuOpen = false;
 let railOpen = false;
 let activeRailTab = "lesson";
 let lessonExpandedById = new Map();
@@ -105,6 +112,16 @@ let hideTermCardTimer = undefined;
 
 const scrollTranscript = () => {
   transcript.scrollTop = transcript.scrollHeight;
+};
+
+const setTopicMenuOpen = (open, options = {}) => {
+  topicMenuOpen = open;
+  topicMenu.hidden = !open;
+  topicMenuButton.setAttribute("aria-expanded", open ? "true" : "false");
+
+  if (options.focusButton === true) {
+    topicMenuButton.focus();
+  }
 };
 
 // Keep the transcript pinned to the latest message unless the learner has
@@ -322,6 +339,28 @@ const compareWeakestRecord = (left, right) => {
 const weakestTopicMastery = () =>
   topicMasteryRecords().sort(compareWeakestRecord)[0];
 
+const topicHeaderTitle = () => findCurrentTopic()?.title ?? courseDisplayTitle;
+
+const masteryProgressText = () => {
+  const total = topicCount();
+  const records = topicMasteryRecords();
+  const weakest = weakestTopicMastery();
+
+  return (
+    records.length +
+    "/" +
+    total +
+    (weakest === undefined ? "" : " · " + weakest.entry.score)
+  );
+};
+
+const updateTopicHeader = () => {
+  topicTitle.textContent = topicHeaderTitle();
+  const progress = masteryProgressText();
+  topicProgress.textContent = progress;
+  topicProgress.setAttribute("aria-label", "Mastery progress " + progress);
+};
+
 const renderMasterySummary = () => {
   masterySummary.replaceChildren();
 
@@ -351,6 +390,7 @@ const renderMasterySummary = () => {
   button.textContent = "Review weak areas";
   button.disabled = records.length === 0;
   button.addEventListener("click", () => {
+    setTopicMenuOpen(false);
     void submitNav(REVIEW_WEAK_NAV_PATH);
   });
 
@@ -399,6 +439,7 @@ const selectTopic = async (topic) => {
   }
 
   renderNavigation();
+  setTopicMenuOpen(false);
   await submitNav(topic.path);
 };
 
@@ -408,6 +449,7 @@ const selectLesson = (lessonId) => {
   selectedTopicPath = findTopicForLesson(lessonId)?.path;
   userPinnedTopic = selectedTopicPath !== undefined;
   renderNavigation();
+  setTopicMenuOpen(false);
   setActiveRailTab("lesson");
   requestAnimationFrame(() => {
     document.getElementById("rail-lesson-" + lessonId)?.scrollIntoView({
@@ -436,6 +478,7 @@ const createDemoLeaf = (demo) => {
   leaf.append(badge, label);
   // Demo leaves open standalone so they remain reachable even without a lesson directive.
   leaf.addEventListener("click", () => {
+    setTopicMenuOpen(false);
     openDemo(demo.file);
   });
 
@@ -554,6 +597,7 @@ const renderNavigation = () => {
   lessonList.replaceChildren();
   applyCurrentTopicSelection();
   renderMasterySummary();
+  updateTopicHeader();
 
   if (topics.length === 0) {
     const empty = document.createElement("p");
@@ -1192,6 +1236,30 @@ themeToggle.addEventListener("click", () => {
   }
 });
 
+topicMenuButton.addEventListener("click", () => {
+  setTopicMenuOpen(!topicMenuOpen);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !topicMenuOpen) {
+    return;
+  }
+
+  setTopicMenuOpen(false, { focusButton: true });
+});
+
+document.addEventListener("click", (event) => {
+  if (
+    !topicMenuOpen ||
+    !(event.target instanceof Node) ||
+    topicSwitcher.contains(event.target)
+  ) {
+    return;
+  }
+
+  setTopicMenuOpen(false);
+});
+
 feynmanTextarea.addEventListener("input", setFeynmanControls);
 
 textarea.addEventListener("keydown", (event) => {
@@ -1714,6 +1782,19 @@ const compareWeakestRecord = (
   return left.entry.concept.localeCompare(right.entry.concept);
 };
 
+const masteryProgressText = (
+  topics: readonly TopicNode[],
+  scores: readonly MasteryEntry[],
+): string => {
+  const total = topicCount(topics);
+  const records = topicMasteryRecords(topics, scores);
+  const weakest = [...records].sort(compareWeakestRecord)[0];
+
+  return `${records.length}/${total}${
+    weakest === undefined ? "" : ` · ${weakest.entry.score}`
+  }`;
+};
+
 const renderMasterySummary = (
   topics: readonly TopicNode[],
   scores: readonly MasteryEntry[],
@@ -1922,6 +2003,9 @@ export const renderPage = (
   const typingHidden = working ? "" : " hidden";
   const composerDisabled = status === "waiting-for-agent" ? "" : " disabled";
   const composerPlaceholder = composerLabel(status);
+  const currentHeaderTopic = currentTopic(topics);
+  const headerTopicTitle = currentHeaderTopic?.title ?? courseTitle;
+  const headerProgress = masteryProgressText(topics, masteryScores);
   const renderedTranscript = renderTranscript(
     transcript,
     glossary,
@@ -1938,6 +2022,7 @@ export const renderPage = (
     .replace("__TOPICS__", escapeScriptJson(topics))
     .replace("__UNASSIGNED_DEMOS__", escapeScriptJson(unassignedDemos))
     .replace("__MASTERY__", escapeScriptJson(masteryScores))
+    .replace("__COURSE_TITLE__", escapeScriptJson(courseTitle))
     .replace(
       "__ACTIVE_FEYNMAN__",
       escapeScriptJson(activeFeynmanCheck ?? null),
@@ -2156,7 +2241,7 @@ export const renderPage = (
       background: var(--bg);
     }
 
-    .lesson-nav,
+    .topic-menu,
     .lesson-content,
     .rail-panel,
     .rail-body,
@@ -2178,19 +2263,134 @@ export const renderPage = (
       padding: 1rem;
     }
 
-    header {
-      display: flex;
+    .app-header {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(8rem, 1fr) minmax(0, 34rem) minmax(8rem, 1fr);
       align-items: center;
-      justify-content: space-between;
       gap: 1rem;
       border-bottom: 1px solid var(--border);
       padding-bottom: 0.875rem;
     }
 
+    .header-brand {
+      display: flex;
+      align-items: center;
+      justify-self: start;
+      min-width: 0;
+    }
+
+    .wordmark {
+      color: var(--heading);
+      font-size: 1rem;
+      line-height: 1;
+      text-decoration: none;
+    }
+
+    .wordmark strong {
+      font-weight: 700;
+    }
+
+    .topic-switcher {
+      position: relative;
+      display: grid;
+      gap: 0.25rem;
+      justify-self: center;
+      width: min(100%, 34rem);
+      min-width: 0;
+    }
+
+    .course-title {
+      overflow: hidden;
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 600;
+      line-height: 1.25;
+      text-align: center;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .topic-menu-button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.45rem;
+      min-width: 0;
+      min-height: 2.5rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      padding: 0.35rem 0.45rem 0.35rem 0.75rem;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .topic-menu-button:hover {
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+    }
+
+    .topic-title-text {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--heading);
+      font-weight: 600;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .topic-progress {
+      flex: 0 0 auto;
+      border: 1px solid var(--accent-border);
+      border-radius: 999px;
+      color: var(--accent-soft-text);
+      padding: 0.12rem 0.42rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.78rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.35;
+    }
+
+    .topic-menu-chevron {
+      flex: 0 0 auto;
+      width: 1rem;
+      height: 1rem;
+      color: var(--muted);
+    }
+
+    .topic-menu-button[aria-expanded="true"] .topic-menu-chevron {
+      transform: rotate(180deg);
+    }
+
+    .topic-menu {
+      position: absolute;
+      top: calc(100% + 0.5rem);
+      left: 50%;
+      z-index: 30;
+      display: grid;
+      width: min(32rem, calc(100vw - 2rem));
+      max-height: min(34rem, calc(100dvh - 7rem));
+      overflow-y: auto;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--card);
+      box-shadow: var(--pop-shadow);
+      padding: 0.85rem;
+      transform: translateX(-50%);
+    }
+
     .header-controls {
       display: flex;
       align-items: center;
+      justify-content: flex-end;
+      justify-self: end;
       gap: 0.5rem;
+      min-width: 8rem;
     }
 
     .theme-toggle {
@@ -2244,16 +2444,9 @@ export const renderPage = (
 
     .workspace {
       display: grid;
-      grid-template-columns: minmax(11rem, 14rem) minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr) auto;
       gap: 1rem;
       min-height: 0;
-    }
-
-    .lesson-nav {
-      min-height: 0;
-      overflow-y: auto;
-      border-right: 1px solid var(--border);
-      padding-right: 1rem;
     }
 
     .lesson-list {
@@ -2265,7 +2458,7 @@ export const renderPage = (
     .mastery-summary {
       display: grid;
       gap: 0.55rem;
-      margin-top: 0.75rem;
+      margin-top: 0;
       border: 1px solid var(--border-surface);
       border-radius: 8px;
       background: var(--surface);
@@ -3431,14 +3624,6 @@ export const renderPage = (
         grid-template-columns: 1fr;
       }
 
-      .lesson-nav {
-        max-height: 18rem;
-        border-right: 0;
-        border-bottom: 1px solid var(--border);
-        padding-right: 0;
-        padding-bottom: 1rem;
-      }
-
       .stream-pane {
         min-height: 70dvh;
       }
@@ -3490,13 +3675,37 @@ export const renderPage = (
         font-size: 1.25rem;
       }
 
-      header {
-        display: grid;
+      .app-header {
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+          "brand controls"
+          "topic topic";
+        align-items: start;
+      }
+
+      .header-brand {
+        grid-area: brand;
+        min-height: 2.6rem;
       }
 
       .header-controls {
+        grid-area: controls;
+        min-width: 0;
+      }
+
+      .topic-switcher {
+        grid-area: topic;
+        justify-self: stretch;
         width: 100%;
-        justify-content: end;
+      }
+
+      .topic-menu-button {
+        width: 100%;
+      }
+
+      .topic-menu {
+        width: calc(100vw - 1.5rem);
+        max-height: min(32rem, calc(100dvh - 7.5rem));
       }
 
       .stream-header {
@@ -3540,8 +3749,32 @@ export const renderPage = (
 </head>
 <body>
   <main class="shell">
-    <header>
-      <h1>${escapeHtml(courseTitle)}</h1>
+    <header class="app-header">
+      <div class="header-brand">
+        <a class="wordmark" href="/" aria-label="Homepage"><strong>overlearn</strong></a>
+      </div>
+      <div id="topic-switcher" class="topic-switcher">
+        <h1 class="course-title">${escapeHtml(courseTitle)}</h1>
+        <button id="topic-menu-button" class="topic-menu-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="topic-menu">
+          <span id="topic-title" class="topic-title-text">${escapeHtml(headerTopicTitle)}</span>
+          <span id="topic-progress" class="topic-progress" aria-label="Mastery progress ${escapeHtml(
+            headerProgress,
+          )}">${escapeHtml(headerProgress)}</span>
+          <svg class="topic-menu-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 5 5 5-5"/></svg>
+        </button>
+        <div id="topic-menu" class="topic-menu" aria-label="Topic navigation" hidden>
+          <section id="mastery-summary" class="mastery-summary" aria-label="Mastery summary">${renderMasterySummary(
+            topics,
+            masteryScores,
+          )}</section>
+          <div id="lesson-list" class="lesson-list">${renderNavigation(
+            lessons,
+            topics,
+            unassignedDemos,
+            masteryScores,
+          )}</div>
+        </div>
+      </div>
       <div class="header-controls">
         <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle color theme" title="Toggle color theme">
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/></svg>
@@ -3551,20 +3784,6 @@ export const renderPage = (
     </header>
 
     <div class="workspace">
-      <nav class="lesson-nav" aria-labelledby="lesson-heading">
-        <h2 id="lesson-heading">Topics</h2>
-        <section id="mastery-summary" class="mastery-summary" aria-label="Mastery summary">${renderMasterySummary(
-          topics,
-          masteryScores,
-        )}</section>
-        <div id="lesson-list" class="lesson-list">${renderNavigation(
-          lessons,
-          topics,
-          unassignedDemos,
-          masteryScores,
-        )}</div>
-      </nav>
-
       <section class="stream-pane" aria-label="Teaching stream">
         <div class="stream-header">
           <h2>Teaching stream</h2>
