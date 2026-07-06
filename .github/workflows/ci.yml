@@ -39,6 +39,9 @@ jobs:
       - name: Test
         run: CI=true bun run test
 
+      - name: Check version sync
+        run: bun run check:version
+
       - name: Build
         run: bun run build
 

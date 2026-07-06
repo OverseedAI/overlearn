@@ -23,6 +23,7 @@ chmod 0755 ~/.local/bin/learn
 ```
 
 Use `learn-linux-arm64`, `learn-darwin-x64`, or `learn-darwin-arm64` for other platforms.
+Release steps and desktop artifact locations are documented in [docs/release.md](docs/release.md).
 
 Quickstart:
 
