@@ -55,6 +55,7 @@ type CreateDaemonTurnOrchestratorOptions = Readonly<{
   cwd: string;
   env?: Env;
   adapter?: HarnessAdapter;
+  getHarnessId?: () => string | undefined;
   timeoutMs?: number;
   onAgentEvent: (payload: AgentStreamPayload) => void;
 }>;
@@ -209,8 +210,11 @@ const maybeCommandOverride = (
 
 export const resolveHarnessAdapter = (
   env: Env = process.env,
+  courseHarnessId?: string,
 ): HarnessAdapter => {
-  const id = (env["OVERLEARN_HARNESS"] ?? "claude-code") as HarnessAdapterId;
+  const id = (courseHarnessId ??
+    env["OVERLEARN_HARNESS"] ??
+    "claude-code") as HarnessAdapterId;
   const commandOverride = maybeCommandOverride(env);
   const requestTimeoutMs = parsePositiveInteger(
     env["OVERLEARN_HARNESS_REQUEST_TIMEOUT_MS"],
@@ -447,13 +451,17 @@ const runPromptWithTimeout = async (
   return result;
 };
 
+type ActiveSession = Readonly<{
+  adapter: HarnessAdapter;
+  session: SessionRef;
+}>;
+
 export const createDaemonTurnOrchestrator = (
   options: CreateDaemonTurnOrchestratorOptions,
 ): DaemonTurnOrchestrator => {
   const env = options.env ?? process.env;
-  const adapter = options.adapter ?? resolveHarnessAdapter(env);
   const timeoutMs = options.timeoutMs ?? resolveTurnTimeoutMs(env);
-  let session: SessionRef | undefined;
+  let activeSession: ActiveSession | undefined;
   let nextTurnNeedsResumeContext = true;
   let sequence = 1;
 
@@ -464,20 +472,22 @@ export const createDaemonTurnOrchestrator = (
   };
 
   const endSession = async (): Promise<void> => {
-    const current = session;
-    session = undefined;
+    const current = activeSession;
+    activeSession = undefined;
 
     if (current !== undefined) {
-      await adapter.end(current).catch(() => undefined);
+      await current.adapter.end(current.session).catch(() => undefined);
     }
   };
 
-  const ensureSession = async (): Promise<SessionRef> => {
-    if (session !== undefined) {
-      return session;
+  const ensureSession = async (): Promise<ActiveSession> => {
+    if (activeSession !== undefined) {
+      return activeSession;
     }
 
-    session = await adapter.newSession(options.cwd, {
+    const adapter =
+      options.adapter ?? resolveHarnessAdapter(env, options.getHarnessId?.());
+    const session = await adapter.newSession(options.cwd, {
       permissionPolicy: buildCoursePermissionPolicy(
         options.coursePaths.courseDir,
         options.cwd,
@@ -487,8 +497,9 @@ export const createDaemonTurnOrchestrator = (
         orchestrated: true,
       },
     });
+    activeSession = { adapter, session };
 
-    return session;
+    return activeSession;
   };
 
   const runAttempt = async (
@@ -497,7 +508,7 @@ export const createDaemonTurnOrchestrator = (
     mode: TurnPromptMode,
     includeResumeContext: boolean,
   ): Promise<OrchestratorResult> => {
-    const activeSession = await ensureSession();
+    const active = await ensureSession();
     const instructions = formatInstructions(
       assembleInstructionModules({
         courseDir: options.coursePaths.courseDir,
@@ -514,8 +525,8 @@ export const createDaemonTurnOrchestrator = (
       mode,
     });
     const result = await runPromptWithTimeout(
-      adapter,
-      activeSession,
+      active.adapter,
+      active.session,
       prompt,
       turn,
       timeoutMs,

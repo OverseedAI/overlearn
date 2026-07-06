@@ -1,16 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readDaemonMetadata, type TurnFile } from "../course";
+import { readCourseManifest, readDaemonMetadata, type TurnFile } from "../course";
 import {
   buildCoursePermissionPolicy,
   buildTurnPrompt,
   nestedSessionEnvOverride,
   parseHarnessCommand,
+  resolveHarnessAdapter,
   resolveTurnTimeoutMs,
 } from "./orchestrator";
 
@@ -251,6 +252,51 @@ const startOrchestratedDaemon = async (
     url: start.stdout.trim(),
     pid: metadata.pid,
   };
+};
+
+const createFakeHarnessPath = async (): Promise<string> => {
+  const binDir = await mkdtemp(join(tmpdir(), "overlearn-harness-bin-"));
+  const commands = ["claude-code-acp", "codex-acp", "gemini"];
+
+  await Promise.all(
+    commands.map(async (command) => {
+      const path = join(binDir, command);
+      await writeFile(
+        path,
+        [
+          "#!/bin/sh",
+          "if [ \"$1\" = \"--version\" ]; then",
+          `  echo "${command} 9.9.9"`,
+          "  exit 0",
+          "fi",
+          "exit 0",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      await chmod(path, 0o755);
+    }),
+  );
+
+  return binDir;
+};
+
+const harnessById = (
+  harnesses: unknown,
+  id: string,
+): Record<string, unknown> => {
+  if (!Array.isArray(harnesses)) {
+    throw new Error("Expected harness list.");
+  }
+
+  const harness = harnesses.find(
+    (candidate) => isRecord(candidate) && candidate["id"] === id,
+  );
+  if (!isRecord(harness)) {
+    throw new Error(`Missing harness ${id}.`);
+  }
+
+  return harness;
 };
 
 const submitMessage = async (url: string, text: string): Promise<void> => {
@@ -523,9 +569,244 @@ describe("daemon turn orchestration helpers", () => {
     expect(resolveTurnTimeoutMs({})).toBe(600_000);
     expect(resolveTurnTimeoutMs({ OVERLEARN_TURN_TIMEOUT_MS: "25" })).toBe(25);
   });
+
+  test("prefers course harness selection over env selection", () => {
+    expect(
+      resolveHarnessAdapter({ OVERLEARN_HARNESS: "gemini" }, "codex").id,
+    ).toBe("codex");
+    expect(resolveHarnessAdapter({ OVERLEARN_HARNESS: "gemini" }).id).toBe(
+      "gemini",
+    );
+    expect(resolveHarnessAdapter({}).id).toBe("claude-code");
+    expect(() => resolveHarnessAdapter({}, "missing")).toThrow(
+      "Unknown harness adapter: missing",
+    );
+  });
+});
+
+describe("daemon harness API", () => {
+  test("lists cached harness detection state and exposes orchestrated health", async () => {
+    if (!(await canBindLocalhost())) {
+      if (process.env["CI"] === "true") {
+        throw new Error("Localhost binding is unavailable; E2E cannot run.");
+      }
+
+      return;
+    }
+
+    const binDir = await createFakeHarnessPath();
+    const run = await startOrchestratedDaemon("normal", {
+      PATH: binDir,
+      OVERLEARN_HARNESS: "codex",
+      ANTHROPIC_API_KEY: "test-anthropic",
+      OPENAI_API_KEY: "test-openai",
+      GEMINI_API_KEY: "test-gemini",
+    });
+
+    try {
+      const health = (await (await fetch(`${run.url}/api/health`)).json()) as {
+        orchestrated: boolean;
+      };
+      expect(health.orchestrated).toBe(true);
+
+      const response = await fetch(`${run.url}/api/harnesses`);
+      expect(response.status).toBe(200);
+      const harnesses = (await response.json()) as unknown;
+      const claude = harnessById(harnesses, "claude-code");
+      const codex = harnessById(harnesses, "codex");
+      const gemini = harnessById(harnesses, "gemini");
+
+      expect(claude).toMatchObject({
+        id: "claude-code",
+        name: "Claude Code",
+        installed: true,
+        authenticated: true,
+        selected: false,
+        version: "claude-code-acp 9.9.9",
+      });
+      expect(codex).toMatchObject({
+        id: "codex",
+        name: "Codex",
+        installed: true,
+        authenticated: true,
+        selected: true,
+        version: "codex-acp 9.9.9",
+      });
+      expect(gemini).toMatchObject({
+        id: "gemini",
+        name: "Gemini",
+        installed: true,
+        authenticated: true,
+        selected: false,
+        version: "gemini 9.9.9",
+      });
+
+      const stop = await runLearn(["stop", run.courseName], run.env);
+      expect(stop.exitCode).toBe(0);
+      await waitForDaemonStopped(run.courseDir, run.pid);
+    } finally {
+      await killDaemon(run.pid);
+      await rm(run.coursesDir, { force: true, recursive: true });
+      await rm(binDir, { force: true, recursive: true });
+    }
+  }, 12_000);
+
+  test("persists course harness selection, validates ids, and lets course beat env", async () => {
+    if (!(await canBindLocalhost())) {
+      if (process.env["CI"] === "true") {
+        throw new Error("Localhost binding is unavailable; E2E cannot run.");
+      }
+
+      return;
+    }
+
+    const binDir = await createFakeHarnessPath();
+    const run = await startOrchestratedDaemon("normal", {
+      PATH: binDir,
+      OVERLEARN_HARNESS: "gemini",
+      ANTHROPIC_API_KEY: "test-anthropic",
+      OPENAI_API_KEY: "test-openai",
+      GEMINI_API_KEY: "test-gemini",
+    });
+
+    try {
+      const invalid = await fetch(`${run.url}/api/harness`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "missing" }),
+      });
+      expect(invalid.status).toBe(400);
+      await expect(invalid.text()).resolves.toContain(
+        "Unknown harness adapter: missing",
+      );
+
+      const selectedFromEnv = await (await fetch(`${run.url}/api/harnesses`)).json();
+      expect(harnessById(selectedFromEnv, "gemini")["selected"]).toBe(true);
+
+      const response = await fetch(`${run.url}/api/harness`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "codex" }),
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        ok: true,
+        harness: "codex",
+      });
+      await expect(readCourseManifest(run.courseDir)).resolves.toMatchObject({
+        harness: "codex",
+      });
+
+      const selectedFromCourse = await (
+        await fetch(`${run.url}/api/harnesses?refresh=1`)
+      ).json();
+      expect(harnessById(selectedFromCourse, "codex")["selected"]).toBe(true);
+      expect(harnessById(selectedFromCourse, "gemini")["selected"]).toBe(false);
+
+      const stop = await runLearn(["stop", run.courseName], run.env);
+      expect(stop.exitCode).toBe(0);
+      await waitForDaemonStopped(run.courseDir, run.pid);
+    } finally {
+      await killDaemon(run.pid);
+      await rm(run.coursesDir, { force: true, recursive: true });
+      await rm(binDir, { force: true, recursive: true });
+    }
+  }, 12_000);
+
+  test("rejects harness changes while an orchestrated turn is running", async () => {
+    if (!(await canBindLocalhost())) {
+      if (process.env["CI"] === "true") {
+        throw new Error("Localhost binding is unavailable; E2E cannot run.");
+      }
+
+      return;
+    }
+
+    const run = await startOrchestratedDaemon("never");
+    const sse = await createSseClient(run.url);
+
+    try {
+      await submitMessage(run.url, "keep working");
+      await sse.waitFor(
+        "agent-stream",
+        (data) =>
+          isRecord(data) &&
+          isRecord(data["event"]) &&
+          data["event"]["type"] === "thinking",
+        "running turn thinking",
+      );
+
+      const response = await fetch(`${run.url}/api/harness`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "codex" }),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.text()).resolves.toContain(
+        "Cannot change harness while a turn is running",
+      );
+    } finally {
+      sse.close();
+      await killDaemon(run.pid);
+      await rm(run.coursesDir, { force: true, recursive: true });
+    }
+  }, 12_000);
 });
 
 describe("daemon orchestrated turns", () => {
+  test("replays buffered agent-stream events to clients that connect mid-turn", async () => {
+    if (!(await canBindLocalhost())) {
+      if (process.env["CI"] === "true") {
+        throw new Error("Localhost binding is unavailable; E2E cannot run.");
+      }
+
+      return;
+    }
+
+    const run = await startOrchestratedDaemon("never");
+    const first = await createSseClient(run.url);
+    let second:
+      | Awaited<ReturnType<typeof createSseClient>>
+      | undefined;
+
+    try {
+      await submitMessage(run.url, "stream for a while");
+      const streamed = await first.waitFor(
+        "agent-stream",
+        (data) =>
+          isRecord(data) &&
+          data["turn"] === 1 &&
+          isRecord(data["event"]) &&
+          data["event"]["type"] === "thinking" &&
+          data["event"]["text"] === "waiting forever",
+        "first client thinking event",
+      );
+      expect(streamed.data).toMatchObject({
+        turn: 1,
+        sequence: 1,
+        event: { type: "thinking", text: "waiting forever" },
+      });
+
+      second = await createSseClient(run.url);
+      const replayed = await second.waitFor(
+        "agent-stream",
+        (data) =>
+          isRecord(data) &&
+          data["turn"] === 1 &&
+          data["sequence"] === 1 &&
+          isRecord(data["event"]) &&
+          data["event"]["type"] === "thinking",
+        "replayed thinking event",
+      );
+      expect(replayed.data).toEqual(streamed.data);
+    } finally {
+      first.close();
+      second?.close();
+      await killDaemon(run.pid);
+      await rm(run.coursesDir, { force: true, recursive: true });
+    }
+  }, 12_000);
+
   test("submits learner turns to one reused harness session and streams agent events", async () => {
     if (!(await canBindLocalhost())) {
       if (process.env["CI"] === "true") {

@@ -33,6 +33,7 @@ import {
   upsertGlossaryEntry,
   upsertTopic,
   upsertTopicTree,
+  writeCourseHarness,
   writePendingEvents,
 } from "./index";
 
@@ -476,6 +477,52 @@ describe("topic storage", () => {
       await expect(readCourseManifest(paths.courseDir)).rejects.toThrow(
         "legacy flat topic arrays are no longer supported",
       );
+    } finally {
+      await rm(coursesDir, { force: true, recursive: true });
+    }
+  });
+});
+
+describe("course harness selection", () => {
+  test("persists harness on course.json while preserving unknown manifest fields", async () => {
+    const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-harness-"));
+    const env = { OVERLEARN_COURSES_DIR: coursesDir };
+
+    try {
+      const paths = await ensureCourseScaffold("harness", env);
+      await writeFile(
+        paths.courseJson,
+        JSON.stringify(
+          {
+            formatVersion: 1,
+            name: "harness",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            title: "Harness Course",
+            workingDirectory: "../repo",
+            topics: [],
+            unassignedDemos: [],
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+
+      await expect(writeCourseHarness(paths.courseDir, "codex")).resolves.toMatchObject({
+        harness: "codex",
+      });
+      await expect(readCourseManifest(paths.courseDir)).resolves.toMatchObject({
+        harness: "codex",
+      });
+
+      const stored = JSON.parse(await readFile(paths.courseJson, "utf8")) as {
+        title?: string;
+        workingDirectory?: string;
+        harness?: string;
+      };
+      expect(stored.title).toBe("Harness Course");
+      expect(stored.workingDirectory).toBe("../repo");
+      expect(stored.harness).toBe("codex");
     } finally {
       await rm(coursesDir, { force: true, recursive: true });
     }

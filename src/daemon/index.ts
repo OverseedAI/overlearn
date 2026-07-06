@@ -7,6 +7,8 @@ import {
 } from "node:http";
 import { join, resolve } from "node:path";
 
+import { getHarnessAdapter, listHarnessAdapters } from "../adapter/registry";
+import type { AdapterDetection } from "../adapter/types";
 import {
   appendAgentTranscript,
   appendFeynmanAnswerTranscript,
@@ -32,6 +34,7 @@ import {
   readTranscript,
   resolveCourseDirForWait,
   selectWeakestTopicConcepts,
+  writeCourseHarness,
   writeDaemonMetadata,
   writePendingEvents,
   writeTurnFile,
@@ -110,6 +113,16 @@ type DaemonHealth = Readonly<{
   coursePath: string;
   waitPending: boolean;
   hasSeenWait: boolean;
+  orchestrated: boolean;
+}>;
+
+type HarnessSummary = Readonly<{
+  id: string;
+  name: string;
+  installed: boolean;
+  authenticated: boolean;
+  version?: string;
+  selected: boolean;
 }>;
 
 export class LearnCommandError extends Error {
@@ -129,6 +142,8 @@ const DAEMON_START_POLL_MS = 50;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
 const DAEMON_STOP_POLL_MS = 50;
 const WAIT_RETRY_DELAY_MS = 250;
+const DEFAULT_HARNESS_ID = "claude-code";
+const MAX_AGENT_STREAM_REPLAY = 200;
 export const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
 
 const sleep = async (milliseconds: number): Promise<void> => {
@@ -197,6 +212,7 @@ const readDaemonHealth = async (
       coursePath: body["coursePath"],
       waitPending: body["waitPending"] === true,
       hasSeenWait: body["hasSeenWait"] === true,
+      orchestrated: body["orchestrated"] === true,
     };
   } catch {
     return undefined;
@@ -895,6 +911,7 @@ const createSseHub = (
   getMasteryScores: () => readonly MasteryEntry[],
   getDemoFiles: () => ReadonlySet<string>,
   getActiveFeynmanCheck: () => ActiveFeynmanCheck | undefined,
+  getAgentStreamReplay: () => readonly AgentStreamPayload[],
 ) => {
   const subscribers = new Set<ServerResponse>();
 
@@ -1014,6 +1031,9 @@ const createSseHub = (
     writeEvent(response, "feynman", {
       activeCheck: getActiveFeynmanCheck() ?? null,
     });
+    for (const payload of getAgentStreamReplay()) {
+      writeEvent(response, "agent-stream", payload);
+    }
 
     request.on("close", () => {
       subscribers.delete(response);
@@ -1174,6 +1194,20 @@ const parseAgentMessage = (bodyText: string): TranscriptEntry => {
   return { role, text, at };
 };
 
+const parseHarnessSelection = (bodyText: string): string => {
+  const body = JSON.parse(bodyText) as unknown;
+  if (!isRecord(body) || typeof body["id"] !== "string") {
+    throw new Error("Expected JSON body with an id field.");
+  }
+
+  const id = body["id"].trim();
+  if (id.length === 0) {
+    throw new Error("Harness id cannot be empty.");
+  }
+
+  return id;
+};
+
 const readRequestBody = async (request: IncomingMessage): Promise<string> => {
   const chunks: string[] = [];
 
@@ -1234,6 +1268,47 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   let hasSeenWait = orchestrated;
   let waiter: Waiter | undefined;
   let nextWaiterId = 1;
+  let harnessDetectionCache:
+    | ReadonlyMap<string, AdapterDetection>
+    | undefined;
+  const agentStreamReplay: AgentStreamPayload[] = [];
+
+  const selectedHarnessId = (): string =>
+    manifest.harness ?? process.env["OVERLEARN_HARNESS"] ?? DEFAULT_HARNESS_ID;
+
+  const detectHarnesses = (): ReadonlyMap<string, AdapterDetection> => {
+    const detections = new Map<string, AdapterDetection>();
+
+    for (const adapter of listHarnessAdapters()) {
+      detections.set(adapter.id, adapter.detect());
+    }
+
+    return detections;
+  };
+
+  const harnessSummaries = (refresh = false): readonly HarnessSummary[] => {
+    const adapters = listHarnessAdapters();
+    if (harnessDetectionCache === undefined || refresh) {
+      harnessDetectionCache = detectHarnesses();
+    }
+
+    const selected = selectedHarnessId();
+    return adapters.map((adapter) => {
+      const detection = harnessDetectionCache?.get(adapter.id) ?? {
+        installed: false,
+        authenticated: false,
+      };
+
+      return {
+        id: adapter.id,
+        name: adapter.name,
+        installed: detection.installed,
+        authenticated: detection.authenticated,
+        ...(detection.version === undefined ? {} : { version: detection.version }),
+        selected: adapter.id === selected,
+      };
+    });
+  };
 
   const serialize = createSerializer();
   const sseHub = createSseHub(
@@ -1247,13 +1322,30 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     () => masteryScores,
     () => demoFileSet,
     () => activeFeynmanCheck,
+    () => agentStreamReplay,
   );
+  const rememberAgentStream = (payload: AgentStreamPayload): void => {
+    agentStreamReplay.push(payload);
+    if (agentStreamReplay.length > MAX_AGENT_STREAM_REPLAY) {
+      agentStreamReplay.splice(
+        0,
+        agentStreamReplay.length - MAX_AGENT_STREAM_REPLAY,
+      );
+    }
+
+    sseHub.broadcastAgentStream(payload);
+
+    if (payload.event.type === "done" || payload.event.type === "error") {
+      agentStreamReplay.splice(0);
+    }
+  };
   const orchestrator: DaemonTurnOrchestrator | undefined = orchestrated
     ? createDaemonTurnOrchestrator({
         coursePaths,
         cwd: await resolveCourseWorkingDirectory(coursePaths),
         env: process.env,
-        onAgentEvent: sseHub.broadcastAgentStream,
+        getHarnessId: selectedHarnessId,
+        onAgentEvent: rememberAgentStream,
       })
     : undefined;
 
@@ -1763,6 +1855,49 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     return jsonResponse({ ok: true });
   };
 
+  const handleHarnessSelection = async (bodyText: string): Promise<Response> => {
+    let id: string;
+    try {
+      id = parseHarnessSelection(bodyText);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Invalid harness request.";
+      return textResponse(message, 400);
+    }
+
+    if (getHarnessAdapter(id) === undefined) {
+      return textResponse(`Unknown harness adapter: ${id}`, 400);
+    }
+
+    let selectionResponse: Response = jsonResponse({ ok: true });
+
+    await serialize(async () => {
+      if (
+        orchestrated &&
+        (orchestratedTurnRunning ||
+          status === "agent-working" ||
+          status === "wrapping-up")
+      ) {
+        selectionResponse = textResponse(
+          "Cannot change harness while a turn is running. Try again after the agent stops.",
+          409,
+        );
+        return;
+      }
+
+      manifest = await writeCourseHarness(coursePath, id);
+      topicTree = manifest.topics;
+      unassignedDemos = manifest.unassignedDemos;
+      sseHub.broadcastTopics(topicTree, unassignedDemos);
+      selectionResponse = jsonResponse({
+        ok: true,
+        harness: manifest.harness,
+      });
+    });
+
+    return selectionResponse;
+  };
+
   const server = createServer((request, response) => {
     void (async () => {
       const method = request.method ?? "GET";
@@ -1815,6 +1950,10 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
               activeFeynmanCheck,
               status,
               hasSeenWait,
+              {
+                orchestrated,
+                harnesses: harnessSummaries(false),
+              },
             ),
             {
               headers: { "content-type": "text/html; charset=utf-8" },
@@ -1833,8 +1972,17 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
             name: manifest.name,
             waitPending: waiter !== undefined,
             hasSeenWait,
+            orchestrated,
           }),
         );
+        return;
+      }
+
+      if (method === "GET" && requestUrl.pathname === "/api/harnesses") {
+        const refresh =
+          requestUrl.searchParams.get("refresh") === "1" ||
+          requestUrl.searchParams.get("refresh") === "true";
+        await sendResponse(response, jsonResponse(harnessSummaries(refresh)));
         return;
       }
 
@@ -1879,6 +2027,12 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       if (method === "POST" && requestUrl.pathname === "/api/agent-message") {
         const bodyText = await readRequestBody(request);
         await sendResponse(response, await handleAgentMessage(bodyText));
+        return;
+      }
+
+      if (method === "POST" && requestUrl.pathname === "/api/harness") {
+        const bodyText = await readRequestBody(request);
+        await sendResponse(response, await handleHarnessSelection(bodyText));
         return;
       }
 

@@ -16,6 +16,7 @@ export type CourseManifest = Readonly<{
   formatVersion: typeof COURSE_FORMAT_VERSION;
   name: string;
   createdAt: string;
+  harness?: string;
   topics: readonly TopicNode[];
   unassignedDemos: readonly DemoEntry[];
 }>;
@@ -535,12 +536,15 @@ const parseCourseManifest = (
 
   const name = value["name"];
   const createdAt = value["createdAt"];
+  const harness = value["harness"];
   const topics = value["topics"];
   const unassignedDemos = value["unassignedDemos"];
 
   if (
     typeof name !== "string" ||
     typeof createdAt !== "string" ||
+    (harness !== undefined &&
+      (typeof harness !== "string" || harness.trim().length === 0)) ||
     (unassignedDemos !== undefined && !Array.isArray(unassignedDemos))
   ) {
     throw new Error(`Invalid course manifest in ${filePath}`);
@@ -550,6 +554,7 @@ const parseCourseManifest = (
     formatVersion,
     name,
     createdAt,
+    ...(harness === undefined ? {} : { harness: harness.trim() }),
     topics: parseTopicTree(topics, filePath),
     unassignedDemos: parseDemoEntries(
       unassignedDemos,
@@ -1011,6 +1016,33 @@ export const readCourseManifest = async (
 ): Promise<CourseManifest> => {
   const paths = getCoursePaths(courseDir);
   return parseCourseManifest(await readJson(paths.courseJson), paths.courseJson);
+};
+
+export const writeCourseHarness = async (
+  courseDir: string,
+  harness: string,
+): Promise<CourseManifest> => {
+  const normalizedHarness = harness.trim();
+  if (normalizedHarness.length === 0) {
+    throw new Error("Harness id cannot be empty.");
+  }
+
+  const paths = getCoursePaths(courseDir);
+  const raw = await readJson(paths.courseJson);
+  const manifest = parseCourseManifest(raw, paths.courseJson);
+  const preserved = isRecord(raw) ? raw : {};
+  const next = {
+    ...preserved,
+    formatVersion: manifest.formatVersion,
+    name: manifest.name,
+    createdAt: manifest.createdAt,
+    harness: normalizedHarness,
+    topics: manifest.topics,
+    unassignedDemos: manifest.unassignedDemos,
+  };
+
+  await writeJsonAtomic(paths.courseJson, next);
+  return parseCourseManifest(next, paths.courseJson);
 };
 
 const writeCourseManifest = async (

@@ -24,6 +24,20 @@ type UiRenderStatus =
   | "wrapping-up"
   | "session-ended";
 
+type HarnessUiOption = Readonly<{
+  id: string;
+  name: string;
+  installed: boolean;
+  authenticated: boolean;
+  version?: string;
+  selected: boolean;
+}>;
+
+type RenderPageOptions = Readonly<{
+  orchestrated?: boolean;
+  harnesses?: readonly HarnessUiOption[];
+}>;
+
 const escapeHtml = (value: string): string =>
   value
     .replaceAll("&", "&amp;")
@@ -57,6 +71,8 @@ const initialMastery = __MASTERY__;
 const initialActiveFeynman = __ACTIVE_FEYNMAN__ ?? undefined;
 const initialStatus = __STATUS__;
 const initialHasSeenWait = __HAS_SEEN_WAIT__;
+const initialOrchestrated = __ORCHESTRATED__;
+const initialHarnesses = __HARNESSES__;
 const courseDisplayTitle = __COURSE_TITLE__;
 const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
 const enabledComposerLabel = "Message the agent…";
@@ -69,6 +85,11 @@ const topicMenuButton = document.querySelector("#topic-menu-button");
 const topicMenu = document.querySelector("#topic-menu");
 const topicTitle = document.querySelector("#topic-title");
 const topicProgress = document.querySelector("#topic-progress");
+const harnessSelector = document.querySelector("#harness-selector");
+const harnessMenuButton = document.querySelector("#harness-menu-button");
+const harnessMenu = document.querySelector("#harness-menu");
+const harnessSelectedName = document.querySelector("#harness-selected-name");
+const harnessSelectedState = document.querySelector("#harness-selected-state");
 const form = document.querySelector("#turn-form");
 const textarea = document.querySelector("#message");
 const submitButton = document.querySelector("#submit");
@@ -99,6 +120,7 @@ const railBody = document.querySelector("#rail-body");
 const railLessonDocument = document.querySelector("#rail-lesson-document");
 const glossaryList = document.querySelector("#glossary-list");
 const termCard = document.querySelector("#term-card");
+const agentActivityElement = document.querySelector("#agent-activity");
 const railTabs = [...document.querySelectorAll("[data-rail-tab]")];
 
 let lessons = [...initialLessons.lessons];
@@ -111,11 +133,14 @@ let userPinnedTopic = false;
 let userPinnedLesson = false;
 let transcriptEntries = [...initialTranscript];
 let glossary = [...initialGlossary];
+let harnesses = [...initialHarnesses];
 let activeFeynman = initialActiveFeynman;
 let submittedFeynmanConcept = undefined;
 let currentStatus = initialStatus;
 let hasSeenWait = initialHasSeenWait;
 let topicMenuOpen = false;
+let harnessMenuOpen = false;
+let harnessBusy = false;
 let doneConfirmOpen = false;
 let railOpen = false;
 let activeRailTab = "lesson";
@@ -124,6 +149,9 @@ let glossaryHighlightTimer = undefined;
 let currentTermElement = undefined;
 let hideTermCardTimer = undefined;
 let eventsClosedIntentionally = false;
+let lastAgentStreamTurn = undefined;
+let lastAgentStreamSequence = undefined;
+let agentActivityState = undefined;
 
 const scrollTranscript = () => {
   transcript.scrollTop = transcript.scrollHeight;
@@ -137,6 +165,133 @@ const setTopicMenuOpen = (open, options = {}) => {
   if (options.focusButton === true) {
     topicMenuButton.focus();
   }
+};
+
+const selectedHarness = () =>
+  harnesses.find((harness) => harness.selected === true) ?? harnesses[0];
+
+const harnessReady = (harness) =>
+  harness.installed === true && harness.authenticated === true;
+
+const harnessStateText = (harness) => {
+  if (harness === undefined) {
+    return "No harness";
+  }
+
+  if (!harness.installed) {
+    return "not installed";
+  }
+
+  if (!harness.authenticated) {
+    return "not logged in";
+  }
+
+  return harness.version === undefined ? "ready" : harness.version;
+};
+
+const harnessOptionLabel = (harness) => {
+  if (harnessReady(harness)) {
+    return harness.name + " ✓";
+  }
+
+  return harness.name + " — " + harnessStateText(harness);
+};
+
+const setHarnessMenuOpen = (open, options = {}) => {
+  if (harnessMenu === null || harnessMenuButton === null) {
+    return;
+  }
+
+  harnessMenuOpen = open;
+  harnessMenu.hidden = !open;
+  harnessMenuButton.setAttribute("aria-expanded", open ? "true" : "false");
+
+  if (options.focusButton === true) {
+    harnessMenuButton.focus();
+  }
+};
+
+const renderHarnessSelector = () => {
+  if (
+    harnessSelector === null ||
+    harnessMenu === null ||
+    harnessSelectedName === null ||
+    harnessSelectedState === null
+  ) {
+    return;
+  }
+
+  harnessSelector.hidden = !initialOrchestrated;
+  const selected = selectedHarness();
+  harnessSelectedName.textContent = selected?.name ?? "Harness";
+  harnessSelectedState.textContent = harnessStateText(selected);
+  harnessMenu.replaceChildren();
+
+  for (const harness of harnesses) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "harness-option" + (harness.selected ? " selected" : "");
+    button.dataset.harnessId = harness.id;
+    button.disabled = harnessBusy || !harnessReady(harness);
+    button.title = harnessReady(harness)
+      ? harness.name
+      : !harness.installed
+        ? harness.name + " is not installed."
+        : "Log in to " + harness.name + " from your terminal.";
+
+    const label = document.createElement("span");
+    label.className = "harness-option-label";
+    label.textContent = harnessOptionLabel(harness);
+
+    const state = document.createElement("span");
+    state.className = "harness-option-state";
+    state.textContent = harness.selected ? "selected" : harnessStateText(harness);
+
+    button.append(label, state);
+    button.addEventListener("click", () => {
+      void selectHarness(harness.id);
+    });
+    harnessMenu.append(button);
+  }
+};
+
+const refreshHarnesses = async (refresh = false) => {
+  if (!initialOrchestrated) {
+    return;
+  }
+
+  const response = await fetch("/api/harnesses" + (refresh ? "?refresh=1" : ""));
+  if (!response.ok) {
+    return;
+  }
+
+  harnesses = [...await response.json()];
+  renderHarnessSelector();
+};
+
+const selectHarness = async (id) => {
+  if (harnessBusy) {
+    return;
+  }
+
+  harnessBusy = true;
+  renderHarnessSelector();
+
+  const response = await fetch("/api/harness", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+
+  harnessBusy = false;
+  if (!response.ok) {
+    statusLine.textContent = await response.text();
+    renderHarnessSelector();
+    return;
+  }
+
+  setHarnessMenuOpen(false, { focusButton: true });
+  await refreshHarnesses();
 };
 
 const setDoneConfirmOpen = (open, options = {}) => {
@@ -1016,12 +1171,247 @@ const createEntryElement = (entry, latestLessonId = latestLessonEntryId()) => {
   return createMessageElement(entry);
 };
 
+const truncateInline = (value, maxLength = 84) => {
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  return collapsed.length <= maxLength
+    ? collapsed
+    : collapsed.slice(0, maxLength - 1).trimEnd() + "…";
+};
+
+const ensureAgentActivity = (turn) => {
+  if (agentActivityState === undefined || agentActivityState.turn !== turn) {
+    agentActivityState = {
+      turn,
+      thinking: "",
+      text: "",
+      tools: new Map(),
+      permissions: [],
+      latest: undefined,
+    };
+  }
+
+  return agentActivityState;
+};
+
+const clearAgentActivity = () => {
+  agentActivityState = undefined;
+  renderAgentActivity();
+};
+
+const toolStatusLabel = (status) => {
+  if (status === "delta") {
+    return "running";
+  }
+
+  return status;
+};
+
+const agentActivitySummary = () => {
+  if (agentActivityState === undefined) {
+    return undefined;
+  }
+
+  return agentActivityState.latest;
+};
+
+const createAgentActivityLine = (className, labelText, detailText) => {
+  const line = document.createElement("div");
+  line.className = className;
+
+  const label = document.createElement("span");
+  label.className = "activity-line-label";
+  label.textContent = labelText;
+
+  const detail = document.createElement("span");
+  detail.className = "activity-line-detail";
+  detail.textContent = detailText;
+
+  line.append(label, detail);
+  return line;
+};
+
+const renderAgentActivity = () => {
+  if (agentActivityElement === null) {
+    return;
+  }
+
+  agentActivityElement.replaceChildren();
+  const state = agentActivityState;
+  if (state === undefined) {
+    agentActivityElement.hidden = true;
+    statusLine.textContent = statusText(currentStatus);
+    return;
+  }
+
+  agentActivityElement.hidden = false;
+  agentActivityElement.className = "entry agent-activity";
+
+  const header = document.createElement("div");
+  header.className = "agent-activity-header";
+
+  const title = document.createElement("div");
+  title.className = "agent-activity-title";
+  title.textContent = "Agent activity";
+
+  const meta = document.createElement("div");
+  meta.className = "agent-activity-meta";
+  meta.textContent = "turn " + state.turn;
+
+  header.append(title, meta);
+  agentActivityElement.append(header);
+
+  if (state.thinking.length > 0) {
+    const details = document.createElement("details");
+    details.className = "activity-thinking";
+
+    const summary = document.createElement("summary");
+    summary.textContent = "Thinking · " + truncateInline(state.thinking, 72);
+
+    const body = document.createElement("pre");
+    body.textContent = state.thinking;
+
+    details.append(summary, body);
+    agentActivityElement.append(details);
+  }
+
+  if (state.text.length > 0) {
+    const bubble = document.createElement("div");
+    bubble.className = "activity-message";
+    bubble.textContent = state.text;
+    agentActivityElement.append(bubble);
+  }
+
+  if (state.tools.size > 0) {
+    const list = document.createElement("div");
+    list.className = "activity-lines";
+    for (const tool of state.tools.values()) {
+      const name = tool.name ?? tool.id;
+      const detail =
+        tool.text === undefined || tool.text.length === 0
+          ? toolStatusLabel(tool.status)
+          : toolStatusLabel(tool.status) + " · " + truncateInline(tool.text, 64);
+      list.append(createAgentActivityLine("activity-line tool", name, detail));
+    }
+    agentActivityElement.append(list);
+  }
+
+  if (state.permissions.length > 0) {
+    const list = document.createElement("div");
+    list.className = "activity-lines";
+    for (const permission of state.permissions) {
+      const decision = permission.decision.allowed ? "allowed" : "denied";
+      const resource =
+        permission.request.resource === undefined
+          ? "no resource"
+          : permission.request.resource;
+      list.append(
+        createAgentActivityLine(
+          "activity-line permission",
+          permission.request.action,
+          resource + " · " + decision,
+        ),
+      );
+    }
+    agentActivityElement.append(list);
+  }
+
+  statusLine.textContent = statusText(currentStatus);
+};
+
+const applyAgentStream = (payload) => {
+  if (typeof payload.turn !== "number" || typeof payload.sequence !== "number") {
+    return;
+  }
+
+  if (
+    lastAgentStreamTurn !== undefined &&
+    (payload.turn < lastAgentStreamTurn ||
+      (payload.turn === lastAgentStreamTurn &&
+        payload.sequence <= lastAgentStreamSequence))
+  ) {
+    return;
+  }
+
+  lastAgentStreamTurn = payload.turn;
+  lastAgentStreamSequence = payload.sequence;
+
+  const event = payload.event;
+  if (event === undefined || typeof event.type !== "string") {
+    return;
+  }
+
+  if (event.type === "done" || event.type === "error") {
+    clearAgentActivity();
+    return;
+  }
+
+  const stick = transcriptNearBottom();
+  const state = ensureAgentActivity(payload.turn);
+
+  if (event.type === "thinking" && typeof event.text === "string") {
+    state.thinking += event.text;
+    state.latest = "thinking: " + truncateInline(event.text);
+  }
+
+  if (event.type === "text" && typeof event.text === "string") {
+    state.text += event.text;
+    state.latest = truncateInline(event.text);
+  }
+
+  if (event.type === "tool-call" && typeof event.id === "string") {
+    const existing = state.tools.get(event.id) ?? {
+      id: event.id,
+      name: undefined,
+      status: "started",
+      text: "",
+    };
+    const text =
+      typeof event.text === "string" && event.text.length > 0
+        ? event.text
+        : existing.text;
+    const tool = {
+      id: event.id,
+      name: typeof event.name === "string" ? event.name : existing.name,
+      status: event.status ?? existing.status,
+      text,
+    };
+    state.tools.set(event.id, tool);
+    state.latest =
+      "tool: " + (tool.name ?? tool.id) + " " + toolStatusLabel(tool.status);
+  }
+
+  if (
+    event.type === "permission-request" &&
+    event.request !== undefined &&
+    event.decision !== undefined
+  ) {
+    state.permissions.push({
+      request: event.request,
+      decision: event.decision,
+    });
+    state.latest =
+      "permission: " +
+      event.request.action +
+      " " +
+      (event.decision.allowed ? "allowed" : "denied");
+  }
+
+  renderAgentActivity();
+  if (stick) {
+    scrollTranscript();
+  }
+};
+
 const renderTranscript = (options = {}) => {
   hideTermCard();
   transcript.replaceChildren();
   const latestLessonId = latestLessonEntryId();
   for (const entry of transcriptEntries) {
     transcript.append(createEntryElement(entry, latestLessonId));
+  }
+  if (agentActivityElement !== null) {
+    transcript.append(agentActivityElement);
+    renderAgentActivity();
   }
   if (options.stick !== false) {
     scrollTranscript();
@@ -1191,9 +1581,12 @@ const statusText = (status) => {
     return endedComposerLabel;
   }
 
-  return hasSeenWait
-    ? "Agent is working…"
-    : "Waiting for the agent to start teaching";
+  const activity = agentActivitySummary();
+  if (activity !== undefined && activity.length > 0) {
+    return "Agent is working… " + activity;
+  }
+
+  return hasSeenWait ? "Agent is working…" : "Waiting for the agent to start teaching";
 };
 
 const composerLabelForStatus = (status) => {
@@ -1322,6 +1715,8 @@ const submitFeynmanAnswer = async () => {
   renderFeynmanPanel();
 };
 
+renderHarnessSelector();
+void refreshHarnesses();
 renderNavigation();
 renderGlossaryList();
 renderRail();
@@ -1365,6 +1760,10 @@ topicMenuButton.addEventListener("click", () => {
   setTopicMenuOpen(!topicMenuOpen);
 });
 
+harnessMenuButton?.addEventListener("click", () => {
+  setHarnessMenuOpen(!harnessMenuOpen);
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") {
     return;
@@ -1372,6 +1771,10 @@ document.addEventListener("keydown", (event) => {
 
   if (topicMenuOpen) {
     setTopicMenuOpen(false, { focusButton: true });
+  }
+
+  if (harnessMenuOpen) {
+    setHarnessMenuOpen(false, { focusButton: true });
   }
 
   if (doneConfirmOpen) {
@@ -1389,6 +1792,19 @@ document.addEventListener("click", (event) => {
   }
 
   setTopicMenuOpen(false);
+});
+
+document.addEventListener("click", (event) => {
+  if (
+    !harnessMenuOpen ||
+    harnessSelector === null ||
+    !(event.target instanceof Node) ||
+    harnessSelector.contains(event.target)
+  ) {
+    return;
+  }
+
+  setHarnessMenuOpen(false);
 });
 
 document.addEventListener("click", (event) => {
@@ -1594,6 +2010,9 @@ events.addEventListener("transcript", (event) => {
   const stick = transcriptNearBottom();
   transcriptEntries = [...JSON.parse(event.data).entries];
   renderTranscript({ stick });
+});
+events.addEventListener("agent-stream", (event) => {
+  applyAgentStream(JSON.parse(event.data));
 });
 events.addEventListener("error", () => {
   if (eventsClosedIntentionally || currentStatus === "session-ended") {
@@ -2123,6 +2542,62 @@ const renderGlossaryList = (glossary: readonly GlossaryEntry[]): string => {
     .join("");
 };
 
+const selectedHarness = (
+  harnesses: readonly HarnessUiOption[],
+): HarnessUiOption | undefined =>
+  harnesses.find((harness) => harness.selected) ?? harnesses[0];
+
+const harnessReady = (harness: HarnessUiOption): boolean =>
+  harness.installed && harness.authenticated;
+
+const harnessStateText = (harness: HarnessUiOption | undefined): string => {
+  if (harness === undefined) {
+    return "No harness";
+  }
+
+  if (!harness.installed) {
+    return "not installed";
+  }
+
+  if (!harness.authenticated) {
+    return "not logged in";
+  }
+
+  return harness.version ?? "ready";
+};
+
+const harnessOptionLabel = (harness: HarnessUiOption): string =>
+  harnessReady(harness)
+    ? `${harness.name} ✓`
+    : `${harness.name} — ${harnessStateText(harness)}`;
+
+const harnessOptionTitle = (harness: HarnessUiOption): string => {
+  if (harnessReady(harness)) {
+    return harness.name;
+  }
+
+  return harness.installed
+    ? `Log in to ${harness.name} from your terminal.`
+    : `${harness.name} is not installed.`;
+};
+
+const renderHarnessOptions = (harnesses: readonly HarnessUiOption[]): string =>
+  harnesses
+    .map((harness) => {
+      const selectedClass = harness.selected ? " selected" : "";
+      const disabled = harnessReady(harness) ? "" : " disabled";
+      const state = harness.selected ? "selected" : harnessStateText(harness);
+
+      return `<button class="harness-option${selectedClass}" type="button" data-harness-id="${escapeHtml(
+        harness.id,
+      )}" title="${escapeHtml(harnessOptionTitle(harness))}"${disabled}><span class="harness-option-label">${escapeHtml(
+        harnessOptionLabel(harness),
+      )}</span><span class="harness-option-state">${escapeHtml(
+        state,
+      )}</span></button>`;
+    })
+    .join("");
+
 const renderStatusText = (
   status: UiRenderStatus,
   hasSeenWait: boolean,
@@ -2180,6 +2655,7 @@ export const renderPage = (
   activeFeynmanCheck: ActiveFeynmanCheck | undefined,
   status: UiRenderStatus = "agent-working",
   hasSeenWait = false,
+  options: RenderPageOptions = {},
 ): string => {
   const working = status === "agent-working" || status === "wrapping-up";
   const ended = status === "session-ended";
@@ -2205,6 +2681,13 @@ export const renderPage = (
       : status === "session-ended"
         ? "Session ended"
         : "Done Learning";
+  const orchestrated = options.orchestrated === true;
+  const harnesses = options.harnesses ?? [];
+  const selectedHarnessOption = selectedHarness(harnesses);
+  const harnessHidden = orchestrated ? "" : " hidden";
+  const agentActivitySkeleton = orchestrated
+    ? '<article id="agent-activity" class="entry agent-activity" hidden></article>'
+    : "";
   const currentHeaderTopic = currentTopic(topics);
   const headerTopicTitle = currentHeaderTopic?.title ?? courseTitle;
   const headerProgress = masteryProgressText(topics, masteryScores);
@@ -2230,7 +2713,9 @@ export const renderPage = (
       escapeScriptJson(activeFeynmanCheck ?? null),
     )
     .replace("__STATUS__", escapeScriptJson(status))
-    .replace("__HAS_SEEN_WAIT__", escapeScriptJson(hasSeenWait));
+    .replace("__HAS_SEEN_WAIT__", escapeScriptJson(hasSeenWait))
+    .replace("__ORCHESTRATED__", escapeScriptJson(options.orchestrated === true))
+    .replace("__HARNESSES__", escapeScriptJson(options.harnesses ?? []));
 
   return `<!doctype html>
 <html lang="en">
@@ -2593,6 +3078,130 @@ export const renderPage = (
       justify-self: end;
       gap: 0.5rem;
       min-width: 8rem;
+    }
+
+    .harness-selector {
+      position: relative;
+      display: flex;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .harness-menu-button {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      column-gap: 0.45rem;
+      min-height: 2.6rem;
+      max-width: 13rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--secondary);
+      padding: 0.28rem 0.45rem 0.28rem 0.65rem;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .harness-menu-button:hover {
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+      color: var(--text);
+    }
+
+    .harness-selected {
+      display: grid;
+      min-width: 0;
+      text-align: left;
+    }
+
+    .harness-selected-name {
+      overflow: hidden;
+      color: var(--heading);
+      font-size: 0.86rem;
+      font-weight: 600;
+      line-height: 1.2;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .harness-selected-state {
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 0.72rem;
+      line-height: 1.2;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .harness-menu-chevron {
+      width: 0.95rem;
+      height: 0.95rem;
+      color: var(--muted);
+    }
+
+    .harness-menu-button[aria-expanded="true"] .harness-menu-chevron {
+      transform: rotate(180deg);
+    }
+
+    .harness-menu {
+      position: absolute;
+      top: calc(100% + 0.45rem);
+      right: 0;
+      z-index: 35;
+      display: grid;
+      gap: 0.35rem;
+      width: min(18rem, calc(100vw - 1.5rem));
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--card);
+      box-shadow: var(--pop-shadow);
+      padding: 0.45rem;
+    }
+
+    .harness-option {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.6rem;
+      min-height: 2.35rem;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--secondary);
+      padding: 0.4rem 0.5rem;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .harness-option:hover,
+    .harness-option.selected {
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+      color: var(--text);
+    }
+
+    .harness-option:disabled {
+      border-color: transparent;
+      background: transparent;
+      color: var(--disabled);
+      cursor: not-allowed;
+    }
+
+    .harness-option-label {
+      min-width: 0;
+      overflow: hidden;
+      font-size: 0.88rem;
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .harness-option-state {
+      color: var(--muted);
+      font-size: 0.72rem;
+      white-space: nowrap;
     }
 
     .done-learning-control {
@@ -3515,6 +4124,104 @@ export const renderPage = (
       padding: 0.75rem 0.875rem;
     }
 
+    .agent-activity {
+      border: 1px dashed var(--border-strong);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--surface) 78%, transparent);
+      padding: 0.75rem;
+    }
+
+    .agent-activity-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.6rem;
+    }
+
+    .agent-activity-title {
+      color: var(--heading);
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    .agent-activity-meta {
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.78rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .activity-thinking {
+      margin: 0 0 0.6rem;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .activity-thinking summary {
+      cursor: pointer;
+      overflow-wrap: anywhere;
+    }
+
+    .activity-thinking pre {
+      margin: 0.5rem 0 0;
+      overflow-x: auto;
+      border-left: 3px solid var(--border-strong);
+      color: var(--muted);
+      padding: 0.25rem 0 0.25rem 0.65rem;
+      font: inherit;
+      white-space: pre-wrap;
+    }
+
+    .activity-message {
+      width: min(100%, 44rem);
+      margin-bottom: 0.6rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px 8px 8px 2px;
+      background: var(--card);
+      color: var(--body-text);
+      padding: 0.65rem 0.75rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .activity-lines {
+      display: grid;
+      gap: 0.35rem;
+      margin-top: 0.45rem;
+    }
+
+    .activity-line {
+      display: grid;
+      grid-template-columns: minmax(6rem, auto) minmax(0, 1fr);
+      align-items: center;
+      gap: 0.65rem;
+      min-height: 1.8rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      padding: 0.25rem 0.5rem;
+      color: var(--secondary);
+      font-size: 0.84rem;
+    }
+
+    .activity-line-label {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--heading);
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .activity-line-detail {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--muted);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .learner .message-body {
       border-color: var(--accent-border);
       background: var(--accent-hover-bg);
@@ -4011,6 +4718,21 @@ export const renderPage = (
       .header-controls {
         grid-area: controls;
         min-width: 0;
+        gap: 0.35rem;
+      }
+
+      .harness-menu-button {
+        max-width: 8.5rem;
+        min-height: 2.4rem;
+        padding-left: 0.55rem;
+      }
+
+      .harness-selected-name {
+        font-size: 0.78rem;
+      }
+
+      .harness-selected-state {
+        display: none;
       }
 
       .done-learning {
@@ -4109,6 +4831,22 @@ export const renderPage = (
         </div>
       </div>
       <div class="header-controls">
+        <div id="harness-selector" class="harness-selector"${harnessHidden}>
+          <button id="harness-menu-button" class="harness-menu-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="harness-menu">
+            <span class="harness-selected">
+              <span id="harness-selected-name" class="harness-selected-name">${escapeHtml(
+                selectedHarnessOption?.name ?? "Harness",
+              )}</span>
+              <span id="harness-selected-state" class="harness-selected-state">${escapeHtml(
+                harnessStateText(selectedHarnessOption),
+              )}</span>
+            </span>
+            <svg class="harness-menu-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 5 5 5-5"/></svg>
+          </button>
+          <div id="harness-menu" class="harness-menu" aria-label="Harness selection" hidden>${renderHarnessOptions(
+            harnesses,
+          )}</div>
+        </div>
         <div id="done-learning-control" class="done-learning-control">
           <button id="done-learning" class="done-learning" type="button" aria-label="${escapeHtml(
             doneButtonLabel,
@@ -4139,7 +4877,7 @@ export const renderPage = (
 
         <section id="transcript" aria-live="polite">${renderTranscriptHtml(
           renderedTranscript,
-        )}</section>
+        )}${agentActivitySkeleton}</section>
 
         <div class="stream-dock">
           <p id="session-ended" class="session-ended"${sessionEndedHidden}>Session ended — the daemon has stopped.</p>
