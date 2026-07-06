@@ -125,6 +125,11 @@ type HarnessSummary = Readonly<{
   selected: boolean;
 }>;
 
+type HarnessesPayload = Readonly<{
+  harnesses: readonly HarnessSummary[];
+  switched: boolean;
+}>;
+
 export class LearnCommandError extends Error {
   readonly exitCode: 1 | 2;
 
@@ -905,6 +910,7 @@ export const notifyAgentTranscriptEntry = async (
 
 const createSseHub = (
   getStatus: () => UiStatusPayload,
+  getHarnesses: () => HarnessesPayload,
   getGlossary: () => readonly GlossaryEntry[],
   getTopics: () => readonly TopicNode[],
   getUnassignedDemos: () => readonly DemoEntry[],
@@ -932,6 +938,12 @@ const createSseHub = (
     const payload = getStatus();
     for (const subscriber of subscribers) {
       writeEvent(subscriber, "status", payload);
+    }
+  };
+
+  const broadcastHarnesses = (payload: HarnessesPayload): void => {
+    for (const subscriber of subscribers) {
+      writeEvent(subscriber, "harnesses", payload);
     }
   };
 
@@ -1022,6 +1034,7 @@ const createSseHub = (
     });
     subscribers.add(response);
     writeEvent(response, "status", getStatus());
+    writeEvent(response, "harnesses", getHarnesses());
     writeEvent(response, "glossary", { entries: getGlossary() });
     writeEvent(response, "topics", {
       topics: getTopics(),
@@ -1051,6 +1064,7 @@ const createSseHub = (
     broadcastAgentStream,
     broadcastFeynman,
     broadcastGlossary,
+    broadcastHarnesses,
     broadcastLesson,
     broadcastMastery,
     broadcastMessage,
@@ -1311,11 +1325,16 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   };
 
   const serialize = createSerializer();
+  const harnessesPayload = (switched: boolean): HarnessesPayload => ({
+    harnesses: harnessSummaries(false),
+    switched,
+  });
   const sseHub = createSseHub(
     () =>
       statusMessage === undefined
         ? { status, hasSeenWait }
         : { status, hasSeenWait, message: statusMessage },
+    () => harnessesPayload(false),
     () => glossaryEntries,
     () => topicTree,
     () => unassignedDemos,
@@ -1550,9 +1569,12 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
           const finalTurn = turn.turn.events.some(
             (event) => event.type === "session-done",
           );
+          const greetingTurn = turn.turn.events.some(
+            (event) => event.type === "harness-swapped",
+          );
           setStatus(finalTurn ? "wrapping-up" : "agent-working");
 
-          return { ...turn, finalTurn };
+          return { ...turn, finalTurn, greetingTurn };
         });
 
         if (flushed === undefined) {
@@ -1567,7 +1589,11 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         const result = await orchestrator.runTurn(
           flushed.turnPath,
           flushed.turn,
-          flushed.finalTurn ? "wrap-up" : "teaching",
+          flushed.finalTurn
+            ? "wrap-up"
+            : flushed.greetingTurn
+              ? "greeting"
+              : "teaching",
         );
 
         if (!result.ok) {
@@ -1870,6 +1896,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     }
 
     let selectionResponse: Response = jsonResponse({ ok: true });
+    let shouldRunSwapGreeting = false;
 
     await serialize(async () => {
       if (
@@ -1885,15 +1912,39 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         return;
       }
 
+      const previousHarnessId = selectedHarnessId();
+      const selectionChanged = previousHarnessId !== id;
+
       manifest = await writeCourseHarness(coursePath, id);
       topicTree = manifest.topics;
       unassignedDemos = manifest.unassignedDemos;
       sseHub.broadcastTopics(topicTree, unassignedDemos);
+
+      const swappedActiveSession =
+        selectionChanged && orchestrator !== undefined
+          ? await orchestrator.resetSession()
+          : false;
+
+      if (swappedActiveSession) {
+        const pendingEvents = await readPendingEvents(coursePath);
+        await writePendingEvents(coursePath, [
+          ...pendingEvents,
+          { type: "harness-swapped", from: previousHarnessId, to: id },
+        ]);
+      }
+
+      sseHub.broadcastHarnesses(harnessesPayload(swappedActiveSession));
+      shouldRunSwapGreeting = swappedActiveSession;
       selectionResponse = jsonResponse({
         ok: true,
         harness: manifest.harness,
+        swapped: swappedActiveSession,
       });
     });
+
+    if (shouldRunSwapGreeting) {
+      requestOrchestratedTurn();
+    }
 
     return selectionResponse;
   };

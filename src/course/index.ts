@@ -80,6 +80,12 @@ export type SessionDoneTurnEvent = Readonly<{
   type: "session-done";
 }>;
 
+export type HarnessSwappedTurnEvent = Readonly<{
+  type: "harness-swapped";
+  from: string;
+  to: string;
+}>;
+
 export type FeynmanAnswerTurnEvent = Readonly<{
   type: "feynman-answer";
   concept: string;
@@ -92,6 +98,7 @@ export type TurnEvent =
   | NavTurnEvent
   | ReviewWeakTurnEvent
   | SessionDoneTurnEvent
+  | HarnessSwappedTurnEvent
   | FeynmanAnswerTurnEvent;
 
 export type TurnFile = Readonly<{
@@ -756,6 +763,21 @@ const parseTurnEvent = (value: unknown, filePath: string): TurnEvent => {
 
   if (type === "session-done") {
     return { type };
+  }
+
+  if (type === "harness-swapped") {
+    const from = value["from"];
+    const to = value["to"];
+    if (
+      typeof from !== "string" ||
+      from.trim().length === 0 ||
+      typeof to !== "string" ||
+      to.trim().length === 0
+    ) {
+      throw new Error(`Invalid pending event in ${filePath}`);
+    }
+
+    return { type, from: from.trim(), to: to.trim() };
   }
 
   if (type === "feynman-answer") {
