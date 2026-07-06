@@ -86,4 +86,43 @@ describe("renderPage", () => {
     expect(html).toContain('rel="icon"');
     expect(html).toContain("data:image/svg+xml,");
   });
+
+  test("skips timeline entry kinds the current transcript UI does not render", () => {
+    const html = renderPage(
+      "Display Title",
+      [
+        {
+          role: "agent",
+          kind: "lesson",
+          lesson: "01-intro",
+          at: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          role: "agent",
+          kind: "feynman-check",
+          concept: "rule-of-72",
+          prompt: "Explain why 72 works.",
+          at: "2026-01-01T00:01:00.000Z",
+        },
+        {
+          role: "learner",
+          kind: "feynman-answer",
+          concept: "rule-of-72",
+          text: "It estimates doubling time.",
+          at: "2026-01-01T00:02:00.000Z",
+        },
+      ],
+      emptyLessons,
+      [],
+      [],
+      [],
+      [],
+      new Set(),
+      undefined,
+    );
+
+    expect(html).not.toContain("01-intro");
+    expect(html).not.toContain("Explain why 72 works.");
+    expect(html).not.toContain("It estimates doubling time.");
+  });
 });

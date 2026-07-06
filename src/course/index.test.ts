@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  appendAgentDemoTranscript,
+  appendAgentTranscript,
+  appendFeynmanAnswerTranscript,
+  appendFeynmanCheckTranscript,
+  appendLessonTranscript,
+  appendLearnerTranscript,
   appendMasteryScore,
   clearActiveFeynmanCheck,
   ensureCourseScaffold,
@@ -17,6 +23,7 @@ import {
   readCourseManifest,
   readMastery,
   readPendingEvents,
+  readTranscript,
   registerFeynmanCheck,
   registerDemo,
   requireCourse,
@@ -76,6 +83,116 @@ describe("course resolution", () => {
           `Available courses in ${coursesDir}: alpha, beta.`,
         ].join("\n"),
       );
+    } finally {
+      await rm(coursesDir, { force: true, recursive: true });
+    }
+  });
+});
+
+describe("transcript storage", () => {
+  test("round-trips text, demo, lesson, and Feynman transcript entries", async () => {
+    const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-transcript-"));
+    const env = { OVERLEARN_COURSES_DIR: coursesDir };
+
+    try {
+      const paths = await ensureCourseScaffold("transcript", env);
+
+      const learner = await appendLearnerTranscript(
+        paths.courseDir,
+        "learner reply",
+        "2026-01-01T00:00:00.000Z",
+      );
+      const agent = await appendAgentTranscript(
+        paths.courseDir,
+        "agent reply",
+        "2026-01-01T00:01:00.000Z",
+      );
+      const demo = await appendAgentDemoTranscript(
+        paths.courseDir,
+        "growth.html",
+        "Growth curve",
+        "2026-01-01T00:02:00.000Z",
+      );
+      const lesson = await appendLessonTranscript(
+        paths.courseDir,
+        "01-intro",
+        "2026-01-01T00:03:00.000Z",
+      );
+      const feynmanCheck = await appendFeynmanCheckTranscript(
+        paths.courseDir,
+        "rule-of-72",
+        "Explain why 72 works.",
+        "2026-01-01T00:04:00.000Z",
+      );
+      const feynmanAnswer = await appendFeynmanAnswerTranscript(
+        paths.courseDir,
+        "rule-of-72",
+        "It approximates doubling time from the growth rate.",
+        "2026-01-01T00:05:00.000Z",
+      );
+
+      await expect(readTranscript(paths.courseDir)).resolves.toEqual([
+        learner,
+        agent,
+        demo,
+        lesson,
+        feynmanCheck,
+        feynmanAnswer,
+      ]);
+    } finally {
+      await rm(coursesDir, { force: true, recursive: true });
+    }
+  });
+
+  test("rejects malformed lesson and Feynman transcript entries", async () => {
+    const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-transcript-"));
+    const env = { OVERLEARN_COURSES_DIR: coursesDir };
+
+    try {
+      const paths = await ensureCourseScaffold("transcript", env);
+      const invalidEntries = [
+        {
+          role: "agent",
+          kind: "lesson",
+          lesson: "",
+          at: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          role: "agent",
+          kind: "feynman-check",
+          concept: "Rule-of-72",
+          prompt: "Explain it.",
+          at: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          role: "agent",
+          kind: "feynman-check",
+          concept: "rule-of-72",
+          prompt: " ",
+          at: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          role: "agent",
+          kind: "feynman-answer",
+          concept: "rule-of-72",
+          text: "answer",
+          at: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          role: "learner",
+          kind: "feynman-answer",
+          concept: "rule-of-72",
+          text: " ",
+          at: "2026-01-01T00:00:00.000Z",
+        },
+      ];
+
+      for (const entry of invalidEntries) {
+        await writeFile(paths.transcriptJsonl, `${JSON.stringify(entry)}\n`);
+        await expect(readTranscript(paths.courseDir)).rejects.toThrow(
+          "Invalid transcript entry",
+        );
+      }
     } finally {
       await rm(coursesDir, { force: true, recursive: true });
     }

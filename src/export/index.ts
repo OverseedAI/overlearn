@@ -1531,7 +1531,7 @@ const renderTranscriptEntry = (
   fromPageDir: string,
   glossary: readonly GlossaryEntry[],
   demoFiles: ReadonlySet<string>,
-): string => {
+): string | undefined => {
   const markdownOptions = staticMarkdownOptions(
     outDir,
     fromPageDir,
@@ -1542,7 +1542,13 @@ const renderTranscriptEntry = (
   const body =
     entry.kind === "demo"
       ? renderDemoEmbed(entry.file, entry.title, markdownOptions)
-      : renderMarkdown(entry.text, markdownOptions);
+      : entry.kind === undefined || entry.kind === "text"
+        ? renderMarkdown(entry.text, markdownOptions)
+        : undefined;
+
+  if (body === undefined) {
+    return undefined;
+  }
 
   return `<article class="transcript-entry ${escapeHtml(
     entry.role,
@@ -1564,9 +1570,16 @@ const renderTranscriptContent = (
   }
 
   return `<section class="content-panel"><h1>Transcript</h1><div class="transcript-list">${transcript
-    .map((entry) =>
-      renderTranscriptEntry(entry, outDir, fromPageDir, glossary, demoFiles),
-    )
+    .flatMap((entry) => {
+      const renderedEntry = renderTranscriptEntry(
+        entry,
+        outDir,
+        fromPageDir,
+        glossary,
+        demoFiles,
+      );
+      return renderedEntry === undefined ? [] : [renderedEntry];
+    })
     .join("")}</div></section>`;
 };
 

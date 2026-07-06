@@ -610,6 +610,10 @@ const applyLessonEvent = (event) => {
 };
 
 const createEntryElement = (entry) => {
+  if (entry.kind !== undefined && entry.kind !== "text" && entry.kind !== "demo") {
+    return undefined;
+  }
+
   const article = document.createElement("article");
   article.className = "entry " + entry.role + " " + (entry.kind ?? "text");
 
@@ -629,7 +633,10 @@ const renderTranscript = () => {
   hideTermCard();
   transcript.replaceChildren();
   for (const entry of transcriptEntries) {
-    transcript.append(createEntryElement(entry));
+    const element = createEntryElement(entry);
+    if (element !== undefined) {
+      transcript.append(element);
+    }
   }
   scrollTranscript();
 };
@@ -637,7 +644,12 @@ const renderTranscript = () => {
 const appendEntry = (entry) => {
   const stick = entry.role === "learner" || transcriptNearBottom();
   transcriptEntries.push(entry);
-  transcript.append(createEntryElement(entry));
+  const element = createEntryElement(entry);
+  if (element === undefined) {
+    return;
+  }
+
+  transcript.append(element);
   if (stick) {
     scrollTranscript();
   }
@@ -1049,18 +1061,37 @@ events.addEventListener("transcript", (event) => {
 });
 `;
 
+const renderTranscriptEntry = (
+  entry: TranscriptEntry,
+  glossary: readonly GlossaryEntry[],
+  demoFiles: ReadonlySet<string>,
+): RenderedTranscriptEntry | undefined => {
+  if (entry.kind === "demo") {
+    return {
+      ...entry,
+      html: renderDemoEmbed(entry.file, entry.title, { demoFiles }),
+    };
+  }
+
+  if (entry.kind === undefined || entry.kind === "text") {
+    return {
+      ...entry,
+      html: renderMarkdown(entry.text, { glossary, demoFiles }),
+    };
+  }
+
+  return undefined;
+};
+
 const renderTranscript = (
   transcript: readonly TranscriptEntry[],
   glossary: readonly GlossaryEntry[],
   demoFiles: ReadonlySet<string>,
 ): readonly RenderedTranscriptEntry[] =>
-  transcript.map((entry) => ({
-    ...entry,
-    html:
-      entry.kind === "demo"
-        ? renderDemoEmbed(entry.file, entry.title, { demoFiles })
-        : renderMarkdown(entry.text, { glossary, demoFiles }),
-  }));
+  transcript.flatMap((entry) => {
+    const renderedEntry = renderTranscriptEntry(entry, glossary, demoFiles);
+    return renderedEntry === undefined ? [] : [renderedEntry];
+  });
 
 const walkTopicTree = (
   topics: readonly TopicNode[],

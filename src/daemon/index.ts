@@ -9,6 +9,9 @@ import { join, resolve } from "node:path";
 
 import {
   appendAgentTranscript,
+  appendFeynmanAnswerTranscript,
+  appendFeynmanCheckTranscript,
+  appendLessonTranscript,
   appendLearnerTranscript,
   clearActiveFeynmanCheck,
   clearDaemonMetadata,
@@ -47,6 +50,8 @@ import { watchGlossaryFile } from "./glossary";
 import { watchMasteryFile } from "./mastery";
 import {
   readLessonSnapshot,
+  isLessonFileName,
+  lessonIdFromFileName,
   watchLessonDirectory,
   type LessonEvent,
 } from "./lessons";
@@ -145,6 +150,9 @@ const formatDaemonUrl = (port: number, path: string): string =>
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const hasErrorCode = (error: unknown, code: string): boolean =>
+  isRecord(error) && error["code"] === code;
 
 const isPidAlive = (pid: number): boolean => {
   try {
@@ -480,6 +488,202 @@ const readDemoFileSet = async (
   );
 };
 
+type TranscriptBroadcaster = (entry: TranscriptEntry) => void;
+
+const noopBroadcastTranscriptEntry: TranscriptBroadcaster = () => undefined;
+
+type LessonFileReference = Readonly<{
+  id: string;
+  modifiedAtMs: number;
+}>;
+
+export const lessonTranscriptIds = (
+  transcript: readonly TranscriptEntry[],
+): Set<string> =>
+  new Set(
+    transcript.flatMap((entry) =>
+      entry.kind === "lesson" ? [entry.lesson] : [],
+    ),
+  );
+
+export const latestFeynmanCheckIssuedAt = (
+  transcript: readonly TranscriptEntry[],
+): string | undefined =>
+  transcript.reduce<string | undefined>(
+    (latest, entry) =>
+      entry.kind === "feynman-check" ? entry.at : latest,
+    undefined,
+  );
+
+const lessonIdsFromEvent = (event: LessonEvent): readonly string[] => {
+  if (event.action === "upsert") {
+    return [event.lesson.id];
+  }
+
+  if (event.action === "snapshot") {
+    return event.snapshot.lessons.map((lesson) => lesson.id);
+  }
+
+  return [];
+};
+
+export const appendFirstSeenLessonTranscripts = async (
+  courseDir: string,
+  seenLessonIds: Set<string>,
+  event: LessonEvent,
+  broadcastTranscriptEntry: TranscriptBroadcaster =
+    noopBroadcastTranscriptEntry,
+): Promise<readonly TranscriptEntry[]> => {
+  const entries: TranscriptEntry[] = [];
+
+  for (const lessonId of lessonIdsFromEvent(event)) {
+    if (seenLessonIds.has(lessonId)) {
+      continue;
+    }
+
+    const entry = await appendLessonTranscript(
+      courseDir,
+      lessonId,
+      new Date().toISOString(),
+    );
+    seenLessonIds.add(lessonId);
+    entries.push(entry);
+    broadcastTranscriptEntry(entry);
+  }
+
+  return entries;
+};
+
+const readLessonFileReference = async (
+  lessonsDir: string,
+  fileName: string,
+): Promise<LessonFileReference | undefined> => {
+  if (!isLessonFileName(fileName)) {
+    return undefined;
+  }
+
+  try {
+    const fileStat = await stat(join(lessonsDir, fileName));
+    return fileStat.isFile()
+      ? {
+          id: lessonIdFromFileName(fileName),
+          modifiedAtMs: fileStat.mtimeMs,
+        }
+      : undefined;
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return undefined;
+    }
+
+    throw error;
+  }
+};
+
+const readLessonFileReferences = async (
+  lessonsDir: string,
+): Promise<readonly LessonFileReference[]> => {
+  let fileNames: string[];
+  try {
+    fileNames = await readdir(lessonsDir);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return [];
+    }
+
+    throw error;
+  }
+
+  const references = await Promise.all(
+    fileNames.map((fileName) => readLessonFileReference(lessonsDir, fileName)),
+  );
+
+  return references
+    .flatMap((reference) => (reference === undefined ? [] : [reference]))
+    .sort((left, right) => {
+      const mtimeCompare = left.modifiedAtMs - right.modifiedAtMs;
+      return mtimeCompare === 0 ? left.id.localeCompare(right.id) : mtimeCompare;
+    });
+};
+
+export const backfillLessonTranscripts = async (
+  courseDir: string,
+  lessonsDir: string,
+  seenLessonIds: Set<string>,
+  broadcastTranscriptEntry: TranscriptBroadcaster =
+    noopBroadcastTranscriptEntry,
+): Promise<readonly TranscriptEntry[]> => {
+  const entries: TranscriptEntry[] = [];
+
+  for (const reference of await readLessonFileReferences(lessonsDir)) {
+    if (seenLessonIds.has(reference.id)) {
+      continue;
+    }
+
+    const entry = await appendLessonTranscript(
+      courseDir,
+      reference.id,
+      new Date(reference.modifiedAtMs).toISOString(),
+    );
+    seenLessonIds.add(reference.id);
+    entries.push(entry);
+    broadcastTranscriptEntry(entry);
+  }
+
+  return entries;
+};
+
+export const appendNewFeynmanCheckTranscript = async (
+  courseDir: string,
+  activeCheck: ActiveFeynmanCheck | undefined,
+  lastRecordedIssuedAt: string | undefined,
+  broadcastTranscriptEntry: TranscriptBroadcaster =
+    noopBroadcastTranscriptEntry,
+): Promise<
+  Readonly<{
+    entry: TranscriptEntry | undefined;
+    lastRecordedIssuedAt: string | undefined;
+  }>
+> => {
+  if (
+    activeCheck === undefined ||
+    activeCheck.issuedAt === lastRecordedIssuedAt
+  ) {
+    return { entry: undefined, lastRecordedIssuedAt };
+  }
+
+  const entry = await appendFeynmanCheckTranscript(
+    courseDir,
+    activeCheck.concept,
+    activeCheck.prompt,
+    activeCheck.issuedAt,
+  );
+  broadcastTranscriptEntry(entry);
+
+  return {
+    entry,
+    lastRecordedIssuedAt: activeCheck.issuedAt,
+  };
+};
+
+export const appendFeynmanAnswerTimelineEntry = async (
+  courseDir: string,
+  concept: string,
+  text: string,
+  at: string,
+  broadcastTranscriptEntry: TranscriptBroadcaster =
+    noopBroadcastTranscriptEntry,
+): Promise<TranscriptEntry> => {
+  const entry = await appendFeynmanAnswerTranscript(
+    courseDir,
+    concept,
+    text,
+    at,
+  );
+  broadcastTranscriptEntry(entry);
+
+  return entry;
+};
+
 const demoFileFromPath = (pathName: string): string | undefined => {
   if (!pathName.startsWith("/demos/")) {
     return undefined;
@@ -633,18 +837,21 @@ const createSseHub = (
     }
   };
 
-  const renderTranscriptEntry = (entry: TranscriptEntry) => ({
-    ...entry,
-    html:
+  const renderTranscriptEntry = (entry: TranscriptEntry) => {
+    const html =
       entry.kind === "demo"
         ? renderDemoEmbed(entry.file, entry.title, {
             demoFiles: getDemoFiles(),
           })
-        : renderMarkdown(entry.text, {
-            glossary: getGlossary(),
-            demoFiles: getDemoFiles(),
-          }),
-  });
+        : entry.kind === undefined || entry.kind === "text"
+          ? renderMarkdown(entry.text, {
+              glossary: getGlossary(),
+              demoFiles: getDemoFiles(),
+            })
+          : "";
+
+    return { ...entry, html };
+  };
 
   const broadcastMessage = (entry: TranscriptEntry): void => {
     const renderedEntry = renderTranscriptEntry(entry);
@@ -907,6 +1114,10 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   let masteryScores = latestMasteryScores(await readMastery(coursePath));
   let demoFileSet = await readDemoFileSet(coursePaths.demosDir);
   let activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
+  const initialTranscript = await readTranscript(coursePath);
+  const seenLessonIds = lessonTranscriptIds(initialTranscript);
+  let lastRecordedFeynmanCheckIssuedAt =
+    latestFeynmanCheckIssuedAt(initialTranscript);
 
   let status: UiStatus = "agent-working";
   let hasSeenWait = false;
@@ -923,6 +1134,22 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     () => demoFileSet,
     () => activeFeynmanCheck,
   );
+
+  await backfillLessonTranscripts(
+    coursePath,
+    coursePaths.lessonsDir,
+    seenLessonIds,
+    sseHub.broadcastMessage,
+  );
+  const bootFeynmanResult = await appendNewFeynmanCheckTranscript(
+    coursePath,
+    activeFeynmanCheck,
+    lastRecordedFeynmanCheckIssuedAt,
+    sseHub.broadcastMessage,
+  );
+  lastRecordedFeynmanCheckIssuedAt =
+    bootFeynmanResult.lastRecordedIssuedAt;
+
   const refreshGlossary = async (): Promise<void> => {
     await serialize(async () => {
       glossaryEntries = await readGlossary(coursePath);
@@ -960,6 +1187,13 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   const refreshFeynman = async (): Promise<void> => {
     await serialize(async () => {
       activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
+      const result = await appendNewFeynmanCheckTranscript(
+        coursePath,
+        activeFeynmanCheck,
+        lastRecordedFeynmanCheckIssuedAt,
+        sseHub.broadcastMessage,
+      );
+      lastRecordedFeynmanCheckIssuedAt = result.lastRecordedIssuedAt;
       sseHub.broadcastFeynman(activeFeynmanCheck);
     });
   };
@@ -968,8 +1202,19 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     lessonsDir: coursePaths.lessonsDir,
     getGlossary: () => glossaryEntries,
     getDemoFiles: () => demoFileSet,
-    emit: (event) => {
-      sseHub.broadcastLesson(event);
+    emit: async (event) => {
+      await serialize(async () => {
+        const entries = await appendFirstSeenLessonTranscripts(
+          coursePath,
+          seenLessonIds,
+          event,
+        );
+
+        sseHub.broadcastLesson(event);
+        for (const entry of entries) {
+          sseHub.broadcastMessage(entry);
+        }
+      });
     },
     onError: (error) => {
       console.error(
@@ -1204,8 +1449,24 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         keyPoints: active.keyPoints,
       };
       const pendingEvents = await readPendingEvents(coursePath);
+      const at = new Date().toISOString();
 
       await writePendingEvents(coursePath, [...pendingEvents, event]);
+      const checkResult = await appendNewFeynmanCheckTranscript(
+        coursePath,
+        active,
+        lastRecordedFeynmanCheckIssuedAt,
+        sseHub.broadcastMessage,
+      );
+      lastRecordedFeynmanCheckIssuedAt =
+        checkResult.lastRecordedIssuedAt;
+      await appendFeynmanAnswerTimelineEntry(
+        coursePath,
+        active.concept,
+        answer.text,
+        at,
+        sseHub.broadcastMessage,
+      );
       await clearActiveFeynmanCheck(coursePath);
       activeFeynmanCheck = undefined;
       sseHub.broadcastFeynman(activeFeynmanCheck);
