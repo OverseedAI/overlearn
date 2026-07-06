@@ -10,7 +10,11 @@ const emptyLessons: LessonSnapshot = {
 };
 
 const renderEmptyPage = (
-  status: "waiting-for-agent" | "agent-working" = "agent-working",
+  status:
+    | "waiting-for-agent"
+    | "agent-working"
+    | "wrapping-up"
+    | "session-ended" = "agent-working",
   hasSeenWait = false,
 ): string =>
   renderPage(
@@ -104,6 +108,54 @@ describe("renderPage", () => {
     expect(html).toContain("Your turn — the agent is waiting");
     expect(html).toContain('aria-label="Message the agent…"');
     expect(html).toContain('placeholder="Message the agent…"');
+  });
+
+  test("renders the done learning control before the theme toggle", () => {
+    const html = renderEmptyPage("waiting-for-agent", true);
+
+    expect(html.indexOf('id="done-learning"')).toBeLessThan(
+      html.indexOf('id="theme-toggle"'),
+    );
+    expect(html).toContain(">Done Learning</button>");
+    expect(html).toContain('id="done-confirm"');
+    expect(html).toContain("End session?");
+  });
+
+  test("renders wrapping-up status with disabled composer", () => {
+    const html = renderEmptyPage("wrapping-up", true);
+
+    expect(html).toContain("Agent is writing your wrap-up");
+    expect(html).toContain(">Wrapping up…</button>");
+    expect(html).toContain(
+      'placeholder="Session is wrapping up — the agent is writing the summary"',
+    );
+  });
+
+  test("renders session-ended state without hiding transcript content", () => {
+    const html = renderPage(
+      "Display Title",
+      [
+        {
+          role: "agent",
+          text: "Final wrap-up is visible.",
+          at: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      emptyLessons,
+      [],
+      [],
+      [],
+      [],
+      new Set(),
+      undefined,
+      "session-ended",
+      true,
+    );
+
+    expect(html).toContain("Session ended — the daemon has stopped");
+    expect(html).toContain('id="session-ended" class="session-ended"');
+    expect(html).toContain("Final wrap-up is visible.");
+    expect(html).toContain(">Session ended</button>");
   });
 
   test("renders ungraded mastery chips as muted em dashes", () => {

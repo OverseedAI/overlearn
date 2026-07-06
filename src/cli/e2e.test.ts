@@ -157,6 +157,22 @@ const killDaemon = async (pid: number): Promise<void> => {
   liveDaemonPids.delete(pid);
 };
 
+const waitForDaemonStopped = async (
+  courseDir: string,
+  pid: number,
+): Promise<void> => {
+  await withTimeout(
+    (async () => {
+      while (isPidAlive(pid) || (await readDaemonMetadata(courseDir)) !== undefined) {
+        await sleep(25);
+      }
+      liveDaemonPids.delete(pid);
+    })(),
+    5_000,
+    "daemon shutdown",
+  );
+};
+
 const canBindLocalhost = async (): Promise<boolean> => {
   const server = createServer((_request, response) => {
     response.end("ok");
@@ -196,6 +212,12 @@ const submitNav = async (url: string, path: string): Promise<void> => {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path }),
   });
+
+  expect(response.status).toBe(200);
+};
+
+const submitDone = async (url: string): Promise<void> => {
+  const response = await fetch(`${url}/api/done`, { method: "POST" });
 
   expect(response.status).toBe(200);
 };
@@ -1064,4 +1086,89 @@ describe("learn start/wait browser round trip", () => {
       await rm(coursesDir, { force: true, recursive: true });
     }
   }, 15_000);
+
+  test("queues session-done and shuts down cleanly through learn stop", async () => {
+    if (!(await canBindLocalhost())) {
+      if (process.env["CI"] === "true") {
+        throw new Error("Localhost binding is unavailable; E2E cannot run.");
+      }
+
+      return;
+    }
+
+    const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-done-"));
+    const env = testEnv(coursesDir);
+    const courseName = "done-flow";
+    const courseDir = join(coursesDir, courseName);
+
+    try {
+      const start = await runLearn(["start", courseName], env);
+      expect(start.exitCode).toBe(0);
+      expect(start.stderr).toBe("");
+      const url = start.stdout.trim();
+
+      const daemon = await readDaemonMetadata(courseDir);
+      expect(daemon).not.toBeUndefined();
+      if (daemon === undefined) {
+        throw new Error("Daemon metadata was not written.");
+      }
+      liveDaemonPids.add(daemon.pid);
+
+      const sse = await fetch(`${url}/api/events`);
+      const reader = sse.body?.getReader();
+      if (reader === undefined) {
+        throw new Error("SSE stream did not open.");
+      }
+      const probe = createSseProbe(reader);
+
+      const wait = spawnLearn(["wait", courseName], env);
+      await probe.waitForStatus("waiting-for-agent");
+      await submitDone(url);
+      await probe.waitForStatus("wrapping-up");
+
+      const waitResult = await collectProcess(wait, "learn wait session done");
+      expect(waitResult.exitCode).toBe(0);
+      expectWaitGuidance(waitResult.stderr, courseName);
+
+      const turnPath = waitResult.stdout.trim();
+      expect(turnPath).toBe(join(courseDir, ".overlearn", "turns", "turn-1.json"));
+      const turn = JSON.parse(await readFile(turnPath, "utf8")) as TurnFile;
+      expect(turn).toEqual({
+        turn: 1,
+        createdAt: expect.any(String),
+        events: [{ type: "session-done" }],
+      });
+
+      const wrapUp = "Final wrap-up: covered the basics and next steps.";
+      const say = await runLearn(["say", courseName, "--text", wrapUp], env);
+      expect(say.exitCode).toBe(0);
+      expect(say.stdout).toBe("");
+      expect(say.stderr).toBe("");
+      await probe.waitForText(wrapUp, "SSE wrap-up message");
+
+      const endedStatus = probe.waitForStatus("session-ended");
+      const stop = await runLearn(["stop", courseName], env);
+      expect(stop.exitCode).toBe(0);
+      expect(stop.stderr).toBe("");
+      expect(stop.stdout.trim()).toBe(`Stopped daemon for course: ${courseDir}`);
+      await endedStatus;
+      await waitForDaemonStopped(courseDir, daemon.pid);
+
+      const stoppedStatus = await runLearn(["status", courseName, "--json"], env);
+      expect(JSON.parse(stoppedStatus.stdout)).toEqual({
+        daemonAlive: false,
+        waitPending: false,
+        courseDir,
+      });
+
+      const secondStop = await runLearn(["done", courseName], env);
+      expect(secondStop.exitCode).toBe(0);
+      expect(secondStop.stderr).toBe("");
+      expect(secondStop.stdout.trim()).toBe(
+        `No daemon is running for course: ${courseDir}`,
+      );
+    } finally {
+      await rm(coursesDir, { force: true, recursive: true });
+    }
+  }, 10_000);
 });

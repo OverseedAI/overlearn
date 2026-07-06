@@ -20,6 +20,8 @@ describe("runCli", () => {
     expect(result.stdout).toContain("learn uninstall <claude-code|codex>");
     expect(result.stdout).toContain("learn status [name] --json");
     expect(result.stdout).toContain("learn resume <name>");
+    expect(result.stdout).toContain("learn stop [name]");
+    expect(result.stdout).toContain("learn done [name]");
     expect(result.stdout).toContain("learn share [name] [--json]");
     expect(result.stdout).toContain("learn unpublish [name-or-slug] [--json]");
     expect(result.stdout).toContain("learn fetch <slug-or-url>");
@@ -44,6 +46,15 @@ describe("runCli", () => {
 
     expect(parseCli(["wait"], "1.2.3")).toEqual({
       kind: "wait",
+    });
+
+    expect(parseCli(["stop", "demo"], "1.2.3")).toEqual({
+      kind: "stop",
+      name: "demo",
+    });
+
+    expect(parseCli(["done"], "1.2.3")).toEqual({
+      kind: "stop",
     });
 
     expect(parseCli(["say", "demo", "--text", "**hello**"], "1.2.3")).toEqual({

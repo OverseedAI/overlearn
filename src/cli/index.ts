@@ -24,6 +24,7 @@ import {
   runDaemon,
   sayAgentMessage,
   startCourseDaemon,
+  stopCourseDaemon,
   waitForLearnerTurn,
 } from "../daemon";
 import {
@@ -215,10 +216,18 @@ const main = async (): Promise<CliResult> => {
       exitCode: 0,
       stdout: turn.turnPath,
       stderr: [
-        `Act on every event in the printed turn.json, then immediately re-enter \`learn wait ${course}\` —`,
+        `Act on every event in the printed turn.json. If any event is \`session-done\`, send the final wrap-up, run \`learn stop ${course}\`, and exit the loop.`,
+        `Otherwise immediately re-enter \`learn wait ${course}\` —`,
         "as a background task on Claude Code, or as a foreground blocking command on Codex.",
-        "Never end the session without a pending wait unless the learner said goodbye.",
+        "Never end the session without a pending wait unless the learner ended the session.",
       ].join("\n"),
+    };
+  }
+
+  if (command.kind === "stop") {
+    return {
+      exitCode: 0,
+      stdout: await stopCourseDaemon(command.name),
     };
   }
 
