@@ -109,7 +109,35 @@ export type DemoTranscriptEntry = Readonly<{
   at: string;
 }>;
 
-export type TranscriptEntry = TextTranscriptEntry | DemoTranscriptEntry;
+export type LessonTranscriptEntry = Readonly<{
+  role: "agent";
+  kind: "lesson";
+  lesson: string;
+  at: string;
+}>;
+
+export type FeynmanCheckTranscriptEntry = Readonly<{
+  role: "agent";
+  kind: "feynman-check";
+  concept: string;
+  prompt: string;
+  at: string;
+}>;
+
+export type FeynmanAnswerTranscriptEntry = Readonly<{
+  role: "learner";
+  kind: "feynman-answer";
+  concept: string;
+  text: string;
+  at: string;
+}>;
+
+export type TranscriptEntry =
+  | TextTranscriptEntry
+  | DemoTranscriptEntry
+  | LessonTranscriptEntry
+  | FeynmanCheckTranscriptEntry
+  | FeynmanAnswerTranscriptEntry;
 
 export type GlossaryEntry = Readonly<{
   term: string;
@@ -272,6 +300,9 @@ export const isValidCourseName = (name: string): boolean =>
   name !== ".." &&
   !name.includes("/") &&
   !name.includes("\\");
+
+export const isValidLessonId = (lesson: string): boolean =>
+  isValidCourseName(lesson);
 
 export const isValidTopicPath = (path: string): boolean =>
   path.length > 0 &&
@@ -755,6 +786,9 @@ const parseTranscriptEntry = (
   const text = value["text"];
   const file = value["file"];
   const title = value["title"];
+  const lesson = value["lesson"];
+  const concept = value["concept"];
+  const prompt = value["prompt"];
   const at = value["at"];
 
   if (
@@ -771,6 +805,57 @@ const parseTranscriptEntry = (
       kind,
       file,
       ...(title === undefined ? {} : { title: title.trim() }),
+      at,
+    };
+  }
+
+  if (
+    kind === "lesson" &&
+    role === "agent" &&
+    typeof lesson === "string" &&
+    isValidLessonId(lesson) &&
+    typeof at === "string"
+  ) {
+    return {
+      role,
+      kind,
+      lesson,
+      at,
+    };
+  }
+
+  if (
+    kind === "feynman-check" &&
+    role === "agent" &&
+    typeof concept === "string" &&
+    isValidConceptId(concept) &&
+    typeof prompt === "string" &&
+    prompt.trim().length > 0 &&
+    typeof at === "string"
+  ) {
+    return {
+      role,
+      kind,
+      concept,
+      prompt: prompt.trim(),
+      at,
+    };
+  }
+
+  if (
+    kind === "feynman-answer" &&
+    role === "learner" &&
+    typeof concept === "string" &&
+    isValidConceptId(concept) &&
+    typeof text === "string" &&
+    text.trim().length > 0 &&
+    typeof at === "string"
+  ) {
+    return {
+      role,
+      kind,
+      concept,
+      text: text.trim(),
       at,
     };
   }
@@ -1358,8 +1443,8 @@ export const appendAgentDemoTranscript = async (
   file: string,
   title: string | undefined,
   at: string,
-): Promise<TranscriptEntry> => {
-  const entry: TranscriptEntry =
+): Promise<DemoTranscriptEntry> => {
+  const entry: DemoTranscriptEntry =
     title === undefined
       ? {
           role: "agent",
@@ -1374,6 +1459,58 @@ export const appendAgentDemoTranscript = async (
           title,
           at,
         };
+
+  await appendTranscriptEntry(courseDir, entry);
+  return entry;
+};
+
+export const appendLessonTranscript = async (
+  courseDir: string,
+  lesson: string,
+  at: string,
+): Promise<LessonTranscriptEntry> => {
+  const entry: LessonTranscriptEntry = {
+    role: "agent",
+    kind: "lesson",
+    lesson,
+    at,
+  };
+
+  await appendTranscriptEntry(courseDir, entry);
+  return entry;
+};
+
+export const appendFeynmanCheckTranscript = async (
+  courseDir: string,
+  concept: string,
+  prompt: string,
+  at: string,
+): Promise<FeynmanCheckTranscriptEntry> => {
+  const entry: FeynmanCheckTranscriptEntry = {
+    role: "agent",
+    kind: "feynman-check",
+    concept,
+    prompt,
+    at,
+  };
+
+  await appendTranscriptEntry(courseDir, entry);
+  return entry;
+};
+
+export const appendFeynmanAnswerTranscript = async (
+  courseDir: string,
+  concept: string,
+  text: string,
+  at: string,
+): Promise<FeynmanAnswerTranscriptEntry> => {
+  const entry: FeynmanAnswerTranscriptEntry = {
+    role: "learner",
+    kind: "feynman-answer",
+    concept,
+    text,
+    at,
+  };
 
   await appendTranscriptEntry(courseDir, entry);
   return entry;

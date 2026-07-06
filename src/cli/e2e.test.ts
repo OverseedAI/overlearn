@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readDaemonMetadata, type TurnFile } from "../course";
+import {
+  readDaemonMetadata,
+  type TranscriptEntry,
+  type TurnFile,
+} from "../course";
 import { REVIEW_WEAK_NAV_PATH } from "../daemon";
 
 type ProcessResult = Readonly<{
@@ -105,6 +109,18 @@ const runLearn = async (
   args: readonly string[],
   env: Record<string, string>,
 ): Promise<ProcessResult> => collectProcess(spawnLearn(args, env), args.join(" "));
+
+const readTranscriptJsonl = async (
+  courseDir: string,
+): Promise<readonly TranscriptEntry[]> => {
+  const contents = await readFile(join(courseDir, "transcript.jsonl"), "utf8");
+
+  return contents
+    .trim()
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as TranscriptEntry);
+};
 
 const expectWaitGuidance = (stderr: string, course: string): void => {
   expect(stderr).toContain(`learn wait ${course}`);
@@ -931,29 +947,61 @@ describe("learn start/wait browser round trip", () => {
       await firstProbe.waitForText("Agent **reply**", "SSE agent markdown");
       firstSseAbort.abort();
 
-      const transcriptLines = (
-        await readFile(join(courseDir, "transcript.jsonl"), "utf8")
-      )
-        .trim()
-        .split("\n");
-      expect(transcriptLines).toHaveLength(3);
-      expect(JSON.parse(transcriptLines[0] ?? "{}")).toEqual({
-        role: "learner",
-        text: "hello from the browser",
-        at: expect.any(String),
-      });
-      expect(JSON.parse(transcriptLines[1] ?? "{}")).toEqual({
-        role: "agent",
-        kind: "demo",
-        file: "growth.html",
-        title: "Growth curve",
-        at: expect.any(String),
-      });
-      expect(JSON.parse(transcriptLines[2] ?? "{}")).toEqual({
-        role: "agent",
-        text: agentText,
-        at: expect.any(String),
-      });
+      const transcriptEntries = await readTranscriptJsonl(courseDir);
+      expect(transcriptEntries.map((entry) => entry.kind ?? "text")).toEqual([
+        "lesson",
+        "text",
+        "feynman-check",
+        "feynman-answer",
+        "demo",
+        "lesson",
+        "text",
+      ]);
+      expect(transcriptEntries).toEqual([
+        {
+          role: "agent",
+          kind: "lesson",
+          lesson: "01-intro",
+          at: expect.any(String),
+        },
+        {
+          role: "learner",
+          text: "hello from the browser",
+          at: expect.any(String),
+        },
+        {
+          role: "agent",
+          kind: "feynman-check",
+          concept: "gradient-basics",
+          prompt: "Explain what a gradient tells you and how you would use it.",
+          at: expect.any(String),
+        },
+        {
+          role: "learner",
+          kind: "feynman-answer",
+          concept: "gradient-basics",
+          text: "A gradient points in the direction where the output rises fastest, and its size tells the local rate of change.",
+          at: expect.any(String),
+        },
+        {
+          role: "agent",
+          kind: "demo",
+          file: "growth.html",
+          title: "Growth curve",
+          at: expect.any(String),
+        },
+        {
+          role: "agent",
+          kind: "lesson",
+          lesson: "02-demo",
+          at: expect.any(String),
+        },
+        {
+          role: "agent",
+          text: agentText,
+          at: expect.any(String),
+        },
+      ]);
 
       const reloadedPage = await fetch(url);
       expect(reloadedPage.status).toBe(200);
