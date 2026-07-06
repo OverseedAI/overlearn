@@ -838,17 +838,22 @@ const createSseHub = (
   };
 
   const renderTranscriptEntry = (entry: TranscriptEntry) => {
+    const markdownOptions = {
+      glossary: getGlossary(),
+      demoFiles: getDemoFiles(),
+    };
     const html =
       entry.kind === "demo"
         ? renderDemoEmbed(entry.file, entry.title, {
             demoFiles: getDemoFiles(),
           })
         : entry.kind === undefined || entry.kind === "text"
-          ? renderMarkdown(entry.text, {
-              glossary: getGlossary(),
-              demoFiles: getDemoFiles(),
-            })
-          : "";
+          ? renderMarkdown(entry.text, markdownOptions)
+          : entry.kind === "feynman-check"
+            ? renderMarkdown(entry.prompt, markdownOptions)
+            : entry.kind === "feynman-answer"
+              ? renderMarkdown(entry.text, markdownOptions)
+              : "";
 
     return { ...entry, html };
   };

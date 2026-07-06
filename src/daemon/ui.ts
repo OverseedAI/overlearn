@@ -13,6 +13,8 @@ import { renderDemoEmbed, renderMarkdown } from "./markdown";
 type RenderedTranscriptEntry = TranscriptEntry &
   Readonly<{
     html: string;
+    title?: string;
+    lessonMissing?: boolean;
   }>;
 
 type UiRenderStatus = "waiting-for-agent" | "agent-working";
@@ -72,12 +74,13 @@ const feynmanStatus = document.querySelector("#feynman-status");
 const transcript = document.querySelector("#transcript");
 const masterySummary = document.querySelector("#mastery-summary");
 const lessonList = document.querySelector("#lesson-list");
-const lessonContent = document.querySelector("#lesson-content");
-const lessonView = document.querySelector("#lesson-view");
-const glossaryView = document.querySelector("#glossary-view");
+const studyRail = document.querySelector("#study-rail");
+const railToggle = document.querySelector("#rail-toggle");
+const railBody = document.querySelector("#rail-body");
+const railLessonDocument = document.querySelector("#rail-lesson-document");
 const glossaryList = document.querySelector("#glossary-list");
 const termCard = document.querySelector("#term-card");
-const viewTabs = [...document.querySelectorAll("[data-view]")];
+const railTabs = [...document.querySelectorAll("[data-rail-tab]")];
 
 let lessons = [...initialLessons.lessons];
 let selectedLessonId = initialLessons.selectedLessonId;
@@ -93,7 +96,10 @@ let activeFeynman = initialActiveFeynman;
 let submittedFeynmanConcept = undefined;
 let currentStatus = initialStatus;
 let hasSeenWait = initialHasSeenWait;
-let activeView = "lessons";
+let railOpen = false;
+let activeRailTab = "lesson";
+let lessonExpandedById = new Map();
+let glossaryHighlightTimer = undefined;
 let currentTermElement = undefined;
 let hideTermCardTimer = undefined;
 
@@ -122,20 +128,93 @@ const glossaryEntryForTerm = (term) =>
 const sortedGlossary = () =>
   [...glossary].sort((left, right) => left.term.localeCompare(right.term));
 
-const renderViewTabs = () => {
-  for (const tab of viewTabs) {
-    const selected = tab.dataset.view === activeView;
+const sortedLessons = () =>
+  [...lessons].sort((left, right) => left.id.localeCompare(right.id));
+
+const lessonForId = (lessonId) =>
+  lessons.find((lesson) => lesson.id === lessonId);
+
+const lessonTitleFromHtml = (html, fallback) => {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const heading = template.content.querySelector("h1, h2");
+  const title = heading?.textContent?.trim();
+  return title === undefined || title.length === 0 ? fallback : title;
+};
+
+const hideDerivedLessonHeading = (content) => {
+  const heading = content.querySelector("h1, h2");
+  if (heading instanceof HTMLElement) {
+    heading.classList.add("lesson-card-derived-title");
+    heading.setAttribute("aria-hidden", "true");
+  }
+};
+
+const lessonTitleForId = (lessonId) => {
+  const lesson = lessonForId(lessonId);
+  return lesson === undefined
+    ? lessonId
+    : lessonTitleFromHtml(lesson.html, lesson.id);
+};
+
+const latestLessonEntryId = () => {
+  let latest = undefined;
+  for (const entry of transcriptEntries) {
+    if (entry.kind === "lesson") {
+      latest = entry.lesson;
+    }
+  }
+  return latest;
+};
+
+const lessonExpanded = (lessonId, latestLessonId = latestLessonEntryId()) =>
+  lessonExpandedById.has(lessonId)
+    ? lessonExpandedById.get(lessonId) === true
+    : lessonId === latestLessonId;
+
+const setLessonCardExpanded = (card, expanded) => {
+  card.classList.toggle("collapsed", !expanded);
+  card.classList.toggle("expanded", expanded);
+  const toggle = card.querySelector("[data-lesson-toggle]");
+  const body = card.querySelector(".lesson-card-body");
+  if (toggle instanceof HTMLElement) {
+    toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+  }
+  if (body instanceof HTMLElement) {
+    body.hidden = !expanded;
+  }
+};
+
+const renderRail = () => {
+  studyRail.classList.toggle("open", railOpen);
+  studyRail.classList.toggle("collapsed", !railOpen);
+  railToggle.setAttribute("aria-expanded", railOpen ? "true" : "false");
+  railToggle.setAttribute(
+    "aria-label",
+    railOpen ? "Collapse review rail" : "Open review rail",
+  );
+  railBody.hidden = !railOpen;
+
+  for (const tab of railTabs) {
+    const selected = tab.dataset.railTab === activeRailTab;
     tab.classList.toggle("active", selected);
     tab.setAttribute("aria-selected", selected ? "true" : "false");
   }
 
-  lessonView.hidden = activeView !== "lessons";
-  glossaryView.hidden = activeView !== "glossary";
+  for (const panel of railBody.querySelectorAll("[data-rail-panel]")) {
+    panel.hidden = panel.dataset.railPanel !== activeRailTab;
+  }
 };
 
-const setActiveView = (view) => {
-  activeView = view;
-  renderViewTabs();
+const setRailOpen = (open) => {
+  railOpen = open;
+  renderRail();
+};
+
+const setActiveRailTab = (tab) => {
+  activeRailTab = tab;
+  railOpen = true;
+  renderRail();
 };
 
 const walkTopics = (nodes, visit) => {
@@ -319,9 +398,7 @@ const selectTopic = async (topic) => {
     userPinnedLesson = true;
   }
 
-  activeView = "lessons";
   renderNavigation();
-  renderViewTabs();
   await submitNav(topic.path);
 };
 
@@ -330,9 +407,13 @@ const selectLesson = (lessonId) => {
   selectedLessonId = lessonId;
   selectedTopicPath = findTopicForLesson(lessonId)?.path;
   userPinnedTopic = selectedTopicPath !== undefined;
-  activeView = "lessons";
   renderNavigation();
-  renderViewTabs();
+  setActiveRailTab("lesson");
+  requestAnimationFrame(() => {
+    document.getElementById("rail-lesson-" + lessonId)?.scrollIntoView({
+      block: "start",
+    });
+  });
 };
 
 const openDemo = (file) => {
@@ -440,26 +521,36 @@ const createTopicList = (nodes, nested = false) => {
   return list;
 };
 
-const renderLessonContent = () => {
-  let selected = lessons.find((lesson) => lesson.id === selectedLessonId);
-  if (selected === undefined) {
-    selected = latestLesson() ?? lessons[0];
-    selectedLessonId = selected?.id;
-  }
+const renderRailLessonDocument = () => {
+  railLessonDocument.replaceChildren();
+  const entries = sortedLessons();
 
-  if (selected === undefined) {
-    lessonContent.className = "lesson-content empty-lesson";
-    lessonContent.textContent = "No lesson selected.";
+  if (entries.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No lessons yet.";
+    railLessonDocument.append(empty);
     return;
   }
 
-  lessonContent.className = "lesson-content prose";
-  lessonContent.innerHTML = selected.html;
+  for (const lesson of entries) {
+    const section = document.createElement("section");
+    section.className = "rail-lesson-section";
+    section.id = "rail-lesson-" + lesson.id;
+    section.dataset.lessonId = lesson.id;
+
+    const content = document.createElement("div");
+    content.className = "lesson-content rail-lesson-content prose";
+    content.innerHTML = lesson.html;
+
+    section.append(content);
+    railLessonDocument.append(section);
+  }
 };
 
 const renderNavigation = () => {
   hideTermCard();
-  lessons.sort((left, right) => left.id.localeCompare(right.id));
+  lessons = sortedLessons();
   lessonList.replaceChildren();
   applyCurrentTopicSelection();
   renderMasterySummary();
@@ -516,7 +607,7 @@ const renderNavigation = () => {
     lessonList.append(section);
   }
 
-  renderLessonContent();
+  renderRailLessonDocument();
 };
 
 const renderGlossaryList = () => {
@@ -534,6 +625,7 @@ const renderGlossaryList = () => {
   for (const entry of entries) {
     const article = document.createElement("article");
     article.className = "glossary-entry";
+    article.dataset.termKey = glossaryKey(entry.term);
 
     const title = document.createElement("h3");
     title.textContent = entry.term;
@@ -556,6 +648,36 @@ const renderGlossaryList = () => {
 
     glossaryList.append(article);
   }
+};
+
+const highlightGlossaryEntry = (term) => {
+  if (glossaryHighlightTimer !== undefined) {
+    clearTimeout(glossaryHighlightTimer);
+    glossaryHighlightTimer = undefined;
+  }
+
+  const key = glossaryKey(term);
+  const entry = [...glossaryList.querySelectorAll(".glossary-entry")].find(
+    (candidate) =>
+      candidate instanceof HTMLElement && candidate.dataset.termKey === key,
+  );
+
+  if (!(entry instanceof HTMLElement)) {
+    return;
+  }
+
+  entry.scrollIntoView({ block: "center" });
+  entry.classList.add("highlight");
+  glossaryHighlightTimer = setTimeout(() => {
+    entry.classList.remove("highlight");
+    glossaryHighlightTimer = undefined;
+  }, 1400);
+};
+
+const openGlossaryTerm = (term) => {
+  hideTermCard();
+  setActiveRailTab("glossary");
+  requestAnimationFrame(() => highlightGlossaryEntry(term));
 };
 
 const upsertLesson = (lesson) => {
@@ -588,13 +710,23 @@ const deleteLesson = (id) => {
 };
 
 const applyLessonEvent = (event) => {
+  const stick = transcriptNearBottom();
+
   if (event.action === "upsert") {
     upsertLesson(event.lesson);
+    updateLessonCards(event.lesson.id);
+    if (stick) {
+      scrollTranscript();
+    }
     return;
   }
 
   if (event.action === "delete") {
     deleteLesson(event.id);
+    updateLessonCards(event.id);
+    if (stick) {
+      scrollTranscript();
+    }
     return;
   }
 
@@ -606,50 +738,219 @@ const applyLessonEvent = (event) => {
       selectedLessonId = event.snapshot.selectedLessonId;
     }
     renderNavigation();
+    updateAllLessonCards();
+    if (stick) {
+      scrollTranscript();
+    }
   }
 };
 
-const createEntryElement = (entry) => {
-  if (entry.kind !== undefined && entry.kind !== "text" && entry.kind !== "demo") {
-    return undefined;
+const createLessonContentElement = (lessonId) => {
+  const lesson = lessonForId(lessonId);
+  if (lesson === undefined) {
+    const removed = document.createElement("p");
+    removed.className = "lesson-removed";
+    removed.textContent = "Section removed. " + lessonId + " is no longer available.";
+    return removed;
   }
 
+  const content = document.createElement("div");
+  content.className = "lesson-content prose";
+  content.innerHTML = lesson.html;
+  hideDerivedLessonHeading(content);
+  return content;
+};
+
+const updateLessonCards = (lessonId) => {
+  for (const card of transcript.querySelectorAll(".lesson-card")) {
+    if (!(card instanceof HTMLElement) || card.dataset.lessonId !== lessonId) {
+      continue;
+    }
+
+    const lessonMissing = lessonForId(lessonId) === undefined;
+    const title = card.querySelector(".lesson-card-title");
+    const body = card.querySelector(".lesson-card-body");
+
+    card.classList.toggle("removed", lessonMissing);
+    if (title instanceof HTMLElement) {
+      title.textContent = lessonTitleForId(lessonId);
+    }
+    if (body instanceof HTMLElement) {
+      body.replaceChildren(createLessonContentElement(lessonId));
+    }
+  }
+};
+
+const updateAllLessonCards = () => {
+  const lessonIds = new Set();
+  for (const entry of transcriptEntries) {
+    if (entry.kind === "lesson") {
+      lessonIds.add(entry.lesson);
+    }
+  }
+  for (const lessonId of lessonIds) {
+    updateLessonCards(lessonId);
+  }
+};
+
+const createLessonCardElement = (entry, latestLessonId) => {
   const article = document.createElement("article");
-  article.className = "entry " + entry.role + " " + (entry.kind ?? "text");
+  article.className = "entry lesson-card";
+  article.dataset.lessonId = entry.lesson;
+  const expanded = lessonExpanded(entry.lesson, latestLessonId);
+  const lessonMissing = lessonForId(entry.lesson) === undefined;
+  article.classList.toggle("removed", lessonMissing);
+
+  const header = document.createElement("button");
+  header.type = "button";
+  header.className = "lesson-card-header";
+  header.dataset.lessonToggle = entry.lesson;
+
+  const headerText = document.createElement("span");
+  headerText.className = "lesson-card-header-text";
+
+  const kicker = document.createElement("span");
+  kicker.className = "lesson-card-kicker";
+  kicker.textContent = lessonMissing ? "Lesson section removed" : "Lesson section";
+
+  const title = document.createElement("span");
+  title.className = "lesson-card-title";
+  title.textContent = lessonTitleForId(entry.lesson);
+
+  headerText.append(kicker, title);
+
+  const chevron = document.createElement("span");
+  chevron.className = "lesson-card-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "⌄";
+
+  header.append(headerText, chevron);
+
+  const body = document.createElement("div");
+  body.className = "lesson-card-body";
+  body.append(createLessonContentElement(entry.lesson));
+
+  header.addEventListener("click", () => {
+    const nextExpanded = article.classList.contains("collapsed");
+    lessonExpandedById.set(entry.lesson, nextExpanded);
+    setLessonCardExpanded(article, nextExpanded);
+  });
+
+  article.append(header, body);
+  setLessonCardExpanded(article, expanded);
+  return article;
+};
+
+const createFeynmanCheckElement = (entry) => {
+  const article = document.createElement("article");
+  article.className = "entry feynman-check-entry";
+
+  const marker = document.createElement("div");
+  marker.className = "feynman-marker";
+
+  const heading = document.createElement("div");
+  heading.className = "feynman-marker-heading";
+
+  const title = document.createElement("div");
+  title.className = "feynman-kicker";
+  title.textContent = "Feynman check";
+
+  const chip = document.createElement("span");
+  chip.className = "concept-chip";
+  chip.textContent = entry.concept;
+
+  heading.append(title, chip);
+
+  const prompt = document.createElement("div");
+  prompt.className = "feynman-marker-prompt prose";
+  if (entry.html !== undefined && entry.html.length > 0) {
+    prompt.innerHTML = entry.html;
+  } else {
+    prompt.textContent = entry.prompt;
+  }
+
+  marker.append(heading, prompt);
+  article.append(marker);
+  return article;
+};
+
+const createMessageElement = (entry) => {
+  const kind = entry.kind ?? "text";
+  const article = document.createElement("article");
+  const kindClass =
+    kind === "feynman-answer"
+      ? "feynman-answer-entry"
+      : kind === "demo"
+        ? "demo"
+        : "text";
+  article.className = "entry " + entry.role + " " + kindClass;
 
   const meta = document.createElement("div");
   meta.className = "entry-meta";
-  meta.textContent = entry.role === "agent" ? "Agent" : "You";
+  meta.textContent =
+    kind === "feynman-answer"
+      ? "You · Check answer"
+      : entry.role === "agent"
+        ? "Agent"
+        : "You";
 
   const body = document.createElement("div");
-  body.className = "message-body prose" + (entry.kind === "demo" ? " demo-message-body" : "");
-  body.innerHTML = entry.html;
+  body.className =
+    "message-body prose" +
+    (kind === "demo" ? " demo-message-body" : "") +
+    (kind === "feynman-answer" ? " check-answer-body" : "");
+  if (entry.html !== undefined && entry.html.length > 0) {
+    body.innerHTML = entry.html;
+  } else if ("text" in entry) {
+    body.textContent = entry.text;
+  }
 
   article.append(meta, body);
   return article;
 };
 
-const renderTranscript = () => {
+const createEntryElement = (entry, latestLessonId = latestLessonEntryId()) => {
+  if (entry.kind === "lesson") {
+    return createLessonCardElement(entry, latestLessonId);
+  }
+
+  if (entry.kind === "feynman-check") {
+    return createFeynmanCheckElement(entry);
+  }
+
+  return createMessageElement(entry);
+};
+
+const renderTranscript = (options = {}) => {
   hideTermCard();
   transcript.replaceChildren();
+  const latestLessonId = latestLessonEntryId();
   for (const entry of transcriptEntries) {
-    const element = createEntryElement(entry);
-    if (element !== undefined) {
-      transcript.append(element);
-    }
+    transcript.append(createEntryElement(entry, latestLessonId));
   }
-  scrollTranscript();
+  if (options.stick !== false) {
+    scrollTranscript();
+  }
 };
 
 const appendEntry = (entry) => {
   const stick = entry.role === "learner" || transcriptNearBottom();
+  const previousLatestLessonId = latestLessonEntryId();
   transcriptEntries.push(entry);
-  const element = createEntryElement(entry);
-  if (element === undefined) {
-    return;
+
+  if (entry.kind === "lesson") {
+    for (const card of transcript.querySelectorAll(".lesson-card")) {
+      if (
+        card instanceof HTMLElement &&
+        card.dataset.lessonId === previousLatestLessonId &&
+        !lessonExpandedById.has(card.dataset.lessonId)
+      ) {
+        setLessonCardExpanded(card, false);
+      }
+    }
   }
 
-  transcript.append(element);
+  transcript.append(createEntryElement(entry, latestLessonEntryId()));
   if (stick) {
     scrollTranscript();
   }
@@ -870,7 +1171,7 @@ const submitFeynmanAnswer = async () => {
 
 renderNavigation();
 renderGlossaryList();
-renderViewTabs();
+renderRail();
 renderFeynmanPanel();
 renderTranscript();
 applyStatus(currentStatus, hasSeenWait);
@@ -927,14 +1228,29 @@ document.addEventListener("click", (event) => {
   }
 });
 
-for (const tab of viewTabs) {
+railToggle.addEventListener("click", () => {
+  setRailOpen(!railOpen);
+});
+
+for (const tab of railTabs) {
   tab.addEventListener("click", () => {
-    const view = tab.dataset.view;
-    if (view !== undefined) {
-      setActiveView(view);
+    const railTab = tab.dataset.railTab;
+    if (railTab !== undefined) {
+      setActiveRailTab(railTab);
     }
   });
 }
+
+document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+
+  const term = event.target.closest(".term");
+  if (term instanceof HTMLElement && term.dataset.term !== undefined) {
+    openGlossaryTerm(term.dataset.term);
+  }
+});
 
 document.addEventListener("mouseover", (event) => {
   if (!(event.target instanceof Element)) {
@@ -1056,16 +1372,85 @@ events.addEventListener("feynman", (event) => {
   renderFeynmanPanel();
 });
 events.addEventListener("transcript", (event) => {
+  const stick = transcriptNearBottom();
   transcriptEntries = [...JSON.parse(event.data).entries];
-  renderTranscript();
+  renderTranscript({ stick });
 });
 `;
+
+const decodeBasicEntities = (value: string): string =>
+  value
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'");
+
+const titleFromLessonHtml = (
+  html: string,
+  fallback: string,
+): string => {
+  const match = /<h[12](?:\s[^>]*)?>([\s\S]*?)<\/h[12]>/i.exec(html);
+  if (match === null) {
+    return fallback;
+  }
+
+  const title = decodeBasicEntities(
+    match[1]?.replaceAll(/<[^>]*>/g, "").trim() ?? "",
+  );
+  return title.length === 0 ? fallback : title;
+};
+
+const addClassToTag = (tag: string, className: string): string => {
+  if (/\sclass=/.test(tag)) {
+    return tag.replace(
+      /\sclass=(["'])(.*?)\1/i,
+      (_match, quote: string, classes: string) =>
+        ` class=${quote}${classes} ${className}${quote}`,
+    );
+  }
+
+  return tag.replace(/>$/, ` class="${className}">`);
+};
+
+const addAttributeToTag = (
+  tag: string,
+  name: string,
+  value: string,
+): string => {
+  if (new RegExp(`\\s${name}=`).test(tag)) {
+    return tag;
+  }
+
+  return tag.replace(/>$/, ` ${name}="${escapeHtml(value)}">`);
+};
+
+const suppressDerivedLessonHeading = (html: string): string =>
+  html.replace(/<h[12](?:\s[^>]*)?>/i, (tag) =>
+    addAttributeToTag(
+      addClassToTag(tag, "lesson-card-derived-title"),
+      "aria-hidden",
+      "true",
+    ),
+  );
+
+const findLesson = (
+  snapshot: LessonSnapshot,
+  lessonId: string,
+): RenderedLesson | undefined =>
+  snapshot.lessons.find((lesson) => lesson.id === lessonId);
+
+const removedLessonHtml = (lessonId: string): string =>
+  `<p class="lesson-removed">Section removed. ${escapeHtml(
+    lessonId,
+  )} is no longer available.</p>`;
 
 const renderTranscriptEntry = (
   entry: TranscriptEntry,
   glossary: readonly GlossaryEntry[],
   demoFiles: ReadonlySet<string>,
-): RenderedTranscriptEntry | undefined => {
+  lessons: LessonSnapshot,
+): RenderedTranscriptEntry => {
   if (entry.kind === "demo") {
     return {
       ...entry,
@@ -1080,18 +1465,127 @@ const renderTranscriptEntry = (
     };
   }
 
-  return undefined;
+  if (entry.kind === "lesson") {
+    const lesson = findLesson(lessons, entry.lesson);
+    return lesson === undefined
+      ? {
+          ...entry,
+          html: removedLessonHtml(entry.lesson),
+          title: entry.lesson,
+          lessonMissing: true,
+        }
+      : {
+          ...entry,
+          html: lesson.html,
+          title: titleFromLessonHtml(lesson.html, lesson.id),
+          lessonMissing: false,
+        };
+  }
+
+  if (entry.kind === "feynman-check") {
+    return {
+      ...entry,
+      html: renderMarkdown(entry.prompt, { glossary, demoFiles }),
+    };
+  }
+
+  return {
+    ...entry,
+    html: renderMarkdown(entry.text, { glossary, demoFiles }),
+  };
 };
 
 const renderTranscript = (
   transcript: readonly TranscriptEntry[],
   glossary: readonly GlossaryEntry[],
   demoFiles: ReadonlySet<string>,
+  lessons: LessonSnapshot,
 ): readonly RenderedTranscriptEntry[] =>
-  transcript.flatMap((entry) => {
-    const renderedEntry = renderTranscriptEntry(entry, glossary, demoFiles);
-    return renderedEntry === undefined ? [] : [renderedEntry];
-  });
+  transcript.map((entry) =>
+    renderTranscriptEntry(entry, glossary, demoFiles, lessons),
+  );
+
+const renderLessonCardEntry = (
+  entry: RenderedTranscriptEntry,
+  expanded: boolean,
+): string => {
+  if (entry.kind !== "lesson") {
+    return "";
+  }
+
+  const collapsedClass = expanded ? " expanded" : " collapsed";
+  const removedClass = entry.lessonMissing ? " removed" : "";
+  const hidden = expanded ? "" : " hidden";
+  const expandedAttr = expanded ? "true" : "false";
+  const kicker = entry.lessonMissing
+    ? "Lesson section removed"
+    : "Lesson section";
+  const bodyHtml = entry.lessonMissing
+    ? entry.html
+    : suppressDerivedLessonHeading(entry.html);
+
+  return `<article class="entry lesson-card${collapsedClass}${removedClass}" data-lesson-id="${escapeHtml(
+    entry.lesson,
+  )}"><button class="lesson-card-header" type="button" data-lesson-toggle="${escapeHtml(
+    entry.lesson,
+  )}" aria-expanded="${expandedAttr}"><span class="lesson-card-header-text"><span class="lesson-card-kicker">${kicker}</span><span class="lesson-card-title">${escapeHtml(
+    entry.title ?? entry.lesson,
+  )}</span></span><span class="lesson-card-chevron" aria-hidden="true">⌄</span></button><div class="lesson-card-body"${hidden}><div class="lesson-content prose">${bodyHtml}</div></div></article>`;
+};
+
+const renderFeynmanCheckEntry = (entry: RenderedTranscriptEntry): string => {
+  if (entry.kind !== "feynman-check") {
+    return "";
+  }
+
+  return `<article class="entry feynman-check-entry"><div class="feynman-marker"><div class="feynman-marker-heading"><div class="feynman-kicker">Feynman check</div><span class="concept-chip">${escapeHtml(
+    entry.concept,
+  )}</span></div><div class="feynman-marker-prompt prose">${entry.html}</div></div></article>`;
+};
+
+const renderMessageEntry = (entry: RenderedTranscriptEntry): string => {
+  const kind = entry.kind ?? "text";
+  const kindClass =
+    kind === "feynman-answer"
+      ? "feynman-answer-entry"
+      : kind === "demo"
+        ? "demo"
+        : "text";
+  const meta =
+    kind === "feynman-answer"
+      ? "You · Check answer"
+      : entry.role === "agent"
+        ? "Agent"
+        : "You";
+  const bodyClass = `message-body prose${
+    kind === "demo" ? " demo-message-body" : ""
+  }${kind === "feynman-answer" ? " check-answer-body" : ""}`;
+
+  return `<article class="entry ${entry.role} ${kindClass}"><div class="entry-meta">${meta}</div><div class="${bodyClass}">${entry.html}</div></article>`;
+};
+
+const renderTranscriptHtml = (
+  entries: readonly RenderedTranscriptEntry[],
+): string => {
+  const latestLessonIndex = entries.reduce(
+    (latest, entry, index) => (entry.kind === "lesson" ? index : latest),
+    -1,
+  );
+
+  return entries
+    .map((entry, index) => {
+      if (entry.kind === "lesson") {
+        return renderLessonCardEntry(entry, index === latestLessonIndex);
+      }
+
+      if (entry.kind === "feynman-check") {
+        return renderFeynmanCheckEntry(entry);
+      }
+
+      return renderMessageEntry(entry);
+    })
+    .join("");
+};
 
 const walkTopicTree = (
   topics: readonly TopicNode[],
@@ -1347,16 +1841,49 @@ const renderNavigation = (
   )}${renderUnassignedDemos(unassignedDemos)}`;
 };
 
-const renderLessonContent = (
-  snapshot: LessonSnapshot,
-  topics: readonly TopicNode[],
-): string => {
-  const lesson = selectedLesson(snapshot, topics);
-  if (lesson === undefined) {
-    return '<div id="lesson-content" class="lesson-content empty-lesson" aria-live="polite">No lesson selected.</div>';
+const renderRailLessonDocument = (snapshot: LessonSnapshot): string => {
+  if (snapshot.lessons.length === 0) {
+    return '<p class="empty-state">No lessons yet.</p>';
   }
 
-  return `<div id="lesson-content" class="lesson-content prose" aria-live="polite">${lesson.html}</div>`;
+  return [...snapshot.lessons]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map(
+      (lesson) =>
+        `<section id="rail-lesson-${escapeHtml(
+          lesson.id,
+        )}" class="rail-lesson-section" data-lesson-id="${escapeHtml(
+          lesson.id,
+        )}"><div class="lesson-content rail-lesson-content prose">${lesson.html}</div></section>`,
+    )
+    .join("");
+};
+
+const renderGlossaryList = (glossary: readonly GlossaryEntry[]): string => {
+  const entries = [...glossary].sort((left, right) =>
+    left.term.localeCompare(right.term),
+  );
+
+  if (entries.length === 0) {
+    return '<p class="empty-state">No glossary terms yet.</p>';
+  }
+
+  return entries
+    .map((entry) => {
+      const lessonLink =
+        entry.lesson === undefined
+          ? ""
+          : `<button class="glossary-lesson-link" type="button">first taught in ${escapeHtml(
+              entry.lesson,
+            )}</button>`;
+
+      return `<article class="glossary-entry" data-term-key="${escapeHtml(
+        entry.term.toLocaleLowerCase(),
+      )}"><h3>${escapeHtml(entry.term)}</h3><p>${escapeHtml(
+        entry.def,
+      )}</p>${lessonLink}</article>`;
+    })
+    .join("");
 };
 
 const renderStatusText = (
@@ -1395,10 +1922,16 @@ export const renderPage = (
   const typingHidden = working ? "" : " hidden";
   const composerDisabled = status === "waiting-for-agent" ? "" : " disabled";
   const composerPlaceholder = composerLabel(status);
+  const renderedTranscript = renderTranscript(
+    transcript,
+    glossary,
+    demoFiles,
+    lessons,
+  );
   const script = clientScript
     .replace(
       "__TRANSCRIPT__",
-      escapeScriptJson(renderTranscript(transcript, glossary, demoFiles)),
+      escapeScriptJson(renderedTranscript),
     )
     .replace("__LESSONS__", escapeScriptJson(lessons))
     .replace("__GLOSSARY__", escapeScriptJson(glossary))
@@ -1625,7 +2158,8 @@ export const renderPage = (
 
     .lesson-nav,
     .lesson-content,
-    .glossary-pane,
+    .rail-panel,
+    .rail-body,
     #transcript,
     textarea,
     .prose pre,
@@ -1708,48 +2242,9 @@ export const renderPage = (
       font-size: 1rem;
     }
 
-    .view-tabs {
-      display: flex;
-      gap: 0.35rem;
-      border: 1px solid var(--border-surface);
-      border-radius: 8px;
-      background: var(--surface);
-      padding: 0.25rem;
-    }
-
-    .view-tab {
-      min-height: 2rem;
-      border: 0;
-      border-radius: 6px;
-      background: transparent;
-      color: var(--secondary);
-      padding: 0 0.75rem;
-      font: inherit;
-      cursor: pointer;
-    }
-
-    .view-tab:hover,
-    .view-tab.active {
-      background: var(--accent-active-bg);
-      color: var(--text);
-    }
-
     .workspace {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(20rem, 25rem);
-      gap: 1rem;
-      min-height: 0;
-    }
-
-    .study-pane {
-      display: grid;
-      grid-template-rows: minmax(0, 1fr);
-      min-height: 0;
-    }
-
-    .lesson-pane {
-      display: grid;
-      grid-template-columns: minmax(11rem, 14rem) minmax(0, 1fr);
+      grid-template-columns: minmax(11rem, 14rem) minmax(0, 1fr) auto;
       gap: 1rem;
       min-height: 0;
     }
@@ -2058,27 +2553,37 @@ export const renderPage = (
       color: var(--text);
     }
 
-    .lesson-content {
-      min-height: 0;
-      overflow-y: auto;
-      border: 1px solid var(--border-surface);
-      border-radius: 8px;
-      background: var(--surface);
-      padding: 1rem 1.125rem;
-    }
-
     .lesson-content.prose {
       width: min(100%, 70ch);
       max-width: 70ch;
     }
 
-    .glossary-pane {
+    .rail-lesson-document {
+      display: grid;
+      gap: 1.25rem;
+    }
+
+    .rail-lesson-section {
+      display: grid;
+      gap: 0.65rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1.1rem;
+    }
+
+    .rail-lesson-section:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .rail-lesson-content.lesson-content.prose {
+      width: 100%;
+      max-width: none;
+    }
+
+    .rail-panel {
       min-height: 0;
       overflow-y: auto;
-      border: 1px solid var(--border-surface);
-      border-radius: 8px;
-      background: var(--surface);
-      padding: 1rem 1.125rem;
+      padding-right: 0.15rem;
     }
 
     .glossary-list {
@@ -2094,6 +2599,11 @@ export const renderPage = (
       border-radius: 8px;
       background: var(--card);
       padding: 0.85rem 0.95rem;
+    }
+
+    .glossary-entry.highlight {
+      border-color: var(--accent-border-strong);
+      background: var(--accent-hover-bg);
     }
 
     .glossary-entry h3 {
@@ -2131,25 +2641,123 @@ export const renderPage = (
       line-height: 1.5;
     }
 
-    .chat-pane {
+    .stream-pane {
       display: flex;
       flex-direction: column;
       gap: 0.75rem;
+      min-width: 0;
       min-height: 0;
-      border-left: 1px solid var(--border);
-      padding-left: 1rem;
     }
 
-    .chat-pane > * {
+    .stream-pane > * {
       flex: 0 0 auto;
     }
 
-    .chat-header {
+    .stream-header,
+    .stream-dock {
+      width: min(100%, 54rem);
+      margin: 0 auto;
+    }
+
+    .stream-header {
       display: flex;
       align-items: baseline;
       justify-content: space-between;
       gap: 0.75rem;
       min-width: 0;
+    }
+
+    .stream-dock {
+      display: grid;
+      gap: 0.75rem;
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+      padding-top: 0.75rem;
+    }
+
+    .study-rail {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 0.75rem;
+      width: 22rem;
+      min-height: 0;
+      border-left: 1px solid var(--border);
+      padding-left: 1rem;
+    }
+
+    .study-rail.collapsed {
+      grid-template-columns: auto;
+      width: 3rem;
+      padding-left: 0;
+    }
+
+    .rail-toggle {
+      align-self: start;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.75rem;
+      min-height: 2.75rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--secondary);
+      padding: 0;
+      cursor: pointer;
+    }
+
+    .rail-toggle:hover {
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+      color: var(--text);
+    }
+
+    .rail-toggle svg {
+      width: 1.1rem;
+      height: 1.1rem;
+    }
+
+    .study-rail.open .rail-toggle svg {
+      transform: rotate(180deg);
+    }
+
+    .rail-body {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 0.85rem;
+      min-width: 0;
+      min-height: 0;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 0.85rem;
+    }
+
+    .rail-tabs {
+      display: flex;
+      gap: 0.35rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--card);
+      padding: 0.25rem;
+    }
+
+    .rail-tab {
+      flex: 1;
+      min-height: 2rem;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--secondary);
+      padding: 0 0.65rem;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .rail-tab:hover,
+    .rail-tab.active {
+      background: var(--accent-active-bg);
+      color: var(--text);
     }
 
     .status-line {
@@ -2201,9 +2809,11 @@ export const renderPage = (
 
     #transcript {
       flex: 1 1 0;
+      width: min(100%, 54rem);
       min-height: 0;
+      margin: 0 auto;
       overflow-y: auto;
-      padding: 0.25rem 0.125rem 0.5rem;
+      padding: 0.25rem 0.125rem 0.75rem;
     }
 
     #transcript:empty::before {
@@ -2372,7 +2982,7 @@ export const renderPage = (
     .entry {
       display: grid;
       gap: 0.35rem;
-      margin: 0 0 1rem;
+      margin: 0 0 1.1rem;
     }
 
     .entry.learner {
@@ -2402,6 +3012,121 @@ export const renderPage = (
       border: 0;
       background: transparent;
       padding: 0;
+    }
+
+    .check-answer-body {
+      border-color: var(--feynman-answer-border);
+      background: var(--feynman-answer-bg);
+    }
+
+    .lesson-card {
+      overflow: hidden;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .lesson-card.removed {
+      border-style: dashed;
+    }
+
+    .lesson-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.85rem;
+      width: 100%;
+      border: 0;
+      border-bottom: 1px solid var(--border-surface);
+      background: var(--card);
+      color: var(--text);
+      padding: 0.85rem 1rem;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .lesson-card.collapsed .lesson-card-header {
+      border-bottom: 0;
+    }
+
+    .lesson-card-header:hover {
+      background: var(--accent-hover-bg);
+    }
+
+    .lesson-card-header-text {
+      display: grid;
+      gap: 0.18rem;
+      min-width: 0;
+    }
+
+    .lesson-card-kicker {
+      color: var(--accent-soft-text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .lesson-card-title {
+      color: var(--heading);
+      font-size: 1.08rem;
+      font-weight: 600;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .lesson-card-chevron {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 1.25rem;
+      line-height: 1;
+    }
+
+    .lesson-card.expanded .lesson-card-chevron {
+      transform: rotate(180deg);
+    }
+
+    .lesson-card-body {
+      display: flex;
+      justify-content: center;
+      padding: 1.2rem;
+    }
+
+    .lesson-card-body .lesson-content {
+      width: min(100%, 70ch);
+    }
+
+    .lesson-card-body .lesson-card-derived-title {
+      display: none;
+    }
+
+    .lesson-removed {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .feynman-marker {
+      display: grid;
+      gap: 0.65rem;
+      border: 1px solid var(--feynman-border);
+      border-radius: 8px;
+      background: var(--feynman-bg);
+      padding: 0.85rem 0.95rem;
+    }
+
+    .feynman-marker-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      min-width: 0;
+    }
+
+    .feynman-marker-prompt {
+      color: var(--feynman-prompt);
     }
 
     .demo-card {
@@ -2645,8 +3370,6 @@ export const renderPage = (
       display: flex;
       align-items: flex-end;
       gap: 0.5rem;
-      border-top: 1px solid var(--border);
-      padding-top: 0.75rem;
     }
 
     textarea {
@@ -2708,16 +3431,53 @@ export const renderPage = (
         grid-template-columns: 1fr;
       }
 
-      .chat-pane {
+      .lesson-nav {
+        max-height: 18rem;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+        padding-right: 0;
+        padding-bottom: 1rem;
+      }
+
+      .stream-pane {
+        min-height: 70dvh;
+      }
+
+      .study-rail {
+        position: fixed;
+        top: 0.75rem;
+        right: 0.75rem;
+        bottom: 0.75rem;
+        z-index: 15;
+        width: min(22rem, calc(100vw - 1.5rem));
         border-left: 0;
-        border-top: 1px solid var(--border);
-        padding-top: 1rem;
         padding-left: 0;
       }
 
+      .study-rail.collapsed {
+        bottom: auto;
+        width: 2.75rem;
+      }
+
+      .study-rail.open {
+        grid-template-columns: auto minmax(0, 1fr);
+      }
+
+      .rail-body {
+        box-shadow: var(--pop-shadow);
+      }
+
+      .stream-dock {
+        position: sticky;
+        bottom: 0;
+        z-index: 4;
+        margin-bottom: -1rem;
+        padding-bottom: 1rem;
+      }
+
       #transcript {
-        min-height: 10rem;
-        max-height: 60dvh;
+        min-height: 20rem;
+        max-height: 65dvh;
       }
     }
 
@@ -2736,28 +3496,10 @@ export const renderPage = (
 
       .header-controls {
         width: 100%;
+        justify-content: end;
       }
 
-      .view-tabs {
-        flex: 1;
-      }
-
-      .view-tab {
-        flex: 1;
-      }
-
-      .lesson-pane {
-        grid-template-columns: 1fr;
-      }
-
-      .lesson-nav {
-        border-right: 0;
-        border-bottom: 1px solid var(--border);
-        padding-right: 0;
-        padding-bottom: 0.75rem;
-      }
-
-      .chat-header {
+      .stream-header {
         display: grid;
       }
 
@@ -2765,7 +3507,16 @@ export const renderPage = (
         white-space: normal;
       }
 
-      .feynman-heading {
+      .lesson-card-header {
+        align-items: start;
+      }
+
+      .lesson-card-body {
+        padding: 1rem;
+      }
+
+      .feynman-heading,
+      .feynman-marker-heading {
         display: grid;
       }
 
@@ -2776,6 +3527,14 @@ export const renderPage = (
       .feynman-submit {
         width: 100%;
       }
+
+      .composer {
+        display: grid;
+      }
+
+      .send-button {
+        width: 100%;
+      }
     }
   </style>
 </head>
@@ -2784,10 +3543,6 @@ export const renderPage = (
     <header>
       <h1>${escapeHtml(courseTitle)}</h1>
       <div class="header-controls">
-        <nav class="view-tabs" aria-label="Study view" role="tablist">
-          <button class="view-tab active" type="button" data-view="lessons" role="tab" aria-selected="true">Lessons</button>
-          <button class="view-tab" type="button" data-view="glossary" role="tab" aria-selected="false">Glossary</button>
-        </nav>
         <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle color theme" title="Toggle color theme">
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/></svg>
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
@@ -2796,66 +3551,81 @@ export const renderPage = (
     </header>
 
     <div class="workspace">
-      <div class="study-pane">
-        <section id="lesson-view" class="lesson-pane" aria-labelledby="lesson-heading">
-          <nav class="lesson-nav" aria-labelledby="lesson-heading">
-            <h2 id="lesson-heading">Topics</h2>
-            <section id="mastery-summary" class="mastery-summary" aria-label="Mastery summary">${renderMasterySummary(
-              topics,
-              masteryScores,
-            )}</section>
-            <div id="lesson-list" class="lesson-list">${renderNavigation(
-              lessons,
-              topics,
-              unassignedDemos,
-              masteryScores,
-            )}</div>
-          </nav>
+      <nav class="lesson-nav" aria-labelledby="lesson-heading">
+        <h2 id="lesson-heading">Topics</h2>
+        <section id="mastery-summary" class="mastery-summary" aria-label="Mastery summary">${renderMasterySummary(
+          topics,
+          masteryScores,
+        )}</section>
+        <div id="lesson-list" class="lesson-list">${renderNavigation(
+          lessons,
+          topics,
+          unassignedDemos,
+          masteryScores,
+        )}</div>
+      </nav>
 
-          ${renderLessonContent(lessons, topics)}
-        </section>
-
-        <section id="glossary-view" class="glossary-pane" aria-labelledby="glossary-heading" hidden>
-          <h2 id="glossary-heading">Glossary</h2>
-          <div id="glossary-list" class="glossary-list"></div>
-        </section>
-      </div>
-
-      <aside class="chat-pane" aria-label="Chat">
-        <div class="chat-header">
-          <h2>Chat</h2>
+      <section class="stream-pane" aria-label="Teaching stream">
+        <div class="stream-header">
+          <h2>Teaching stream</h2>
           <p id="status-line" class="${statusLineClass}"><span class="status-dot" aria-hidden="true"></span><span id="status">${escapeHtml(renderStatusText(status, hasSeenWait))}</span></p>
         </div>
 
-        <section id="feynman-panel" class="feynman-panel" aria-labelledby="feynman-heading" hidden>
-          <div class="feynman-heading">
-            <div class="feynman-title">
-              <div class="feynman-kicker">Feynman check</div>
-              <h3 id="feynman-heading">Explain it back</h3>
+        <section id="transcript" aria-live="polite">${renderTranscriptHtml(
+          renderedTranscript,
+        )}</section>
+
+        <div class="stream-dock">
+          <section id="feynman-panel" class="feynman-panel" aria-labelledby="feynman-heading" hidden>
+            <div class="feynman-heading">
+              <div class="feynman-title">
+                <div class="feynman-kicker">Feynman check</div>
+                <h3 id="feynman-heading">Explain it back</h3>
+              </div>
+              <span id="feynman-concept" class="concept-chip"></span>
             </div>
-            <span id="feynman-concept" class="concept-chip"></span>
+            <p id="feynman-replacement" class="feynman-replacement" hidden></p>
+            <p id="feynman-prompt" class="feynman-prompt"></p>
+            <form id="feynman-form" class="feynman-form">
+              <textarea id="feynman-answer" class="feynman-answer" name="feynman-answer" aria-label="Feynman answer" placeholder="Explain the idea in your own words"></textarea>
+              <button id="feynman-submit" class="feynman-submit" type="submit" disabled>Submit answer</button>
+            </form>
+            <p id="feynman-status" class="feynman-status" aria-live="polite"></p>
+          </section>
+
+          <div id="typing" class="typing" aria-hidden="true"${typingHidden}>
+            <span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>
           </div>
-          <p id="feynman-replacement" class="feynman-replacement" hidden></p>
-          <p id="feynman-prompt" class="feynman-prompt"></p>
-          <form id="feynman-form" class="feynman-form">
-            <textarea id="feynman-answer" class="feynman-answer" name="feynman-answer" aria-label="Feynman answer" placeholder="Explain the idea in your own words"></textarea>
-            <button id="feynman-submit" class="feynman-submit" type="submit" disabled>Submit answer</button>
+
+          <form id="turn-form" class="composer">
+            <textarea id="message" name="message" aria-label="${escapeHtml(
+              composerPlaceholder,
+            )}" placeholder="${escapeHtml(composerPlaceholder)}"${composerDisabled}></textarea>
+            <button id="submit" class="send-button" type="submit" disabled>Send</button>
           </form>
-          <p id="feynman-status" class="feynman-status" aria-live="polite"></p>
-        </section>
-
-        <section id="transcript" aria-live="polite"></section>
-
-        <div id="typing" class="typing" aria-hidden="true"${typingHidden}>
-          <span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>
         </div>
+      </section>
 
-        <form id="turn-form" class="composer">
-          <textarea id="message" name="message" aria-label="${escapeHtml(
-            composerPlaceholder,
-          )}" placeholder="${escapeHtml(composerPlaceholder)}"${composerDisabled}></textarea>
-          <button id="submit" class="send-button" type="submit" disabled>Send</button>
-        </form>
+      <aside id="study-rail" class="study-rail collapsed" aria-label="Review rail">
+        <button id="rail-toggle" class="rail-toggle" type="button" aria-label="Open review rail" aria-expanded="false" title="Toggle review rail">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+        <div id="rail-body" class="rail-body" hidden>
+          <nav class="rail-tabs" aria-label="Review view" role="tablist">
+            <button class="rail-tab active" type="button" data-rail-tab="lesson" role="tab" aria-selected="true">Lesson</button>
+            <button class="rail-tab" type="button" data-rail-tab="glossary" role="tab" aria-selected="false">Glossary</button>
+          </nav>
+          <section id="rail-lesson-panel" class="rail-panel" data-rail-panel="lesson" aria-label="Full lesson document">
+            <div id="rail-lesson-document" class="rail-lesson-document">${renderRailLessonDocument(
+              lessons,
+            )}</div>
+          </section>
+          <section id="rail-glossary-panel" class="rail-panel" data-rail-panel="glossary" aria-label="Glossary" hidden>
+            <div id="glossary-list" class="glossary-list">${renderGlossaryList(
+              glossary,
+            )}</div>
+          </section>
+        </div>
       </aside>
     </div>
     <div id="term-card" class="term-card" role="tooltip" hidden></div>
