@@ -91,6 +91,68 @@ describe("renderPage", () => {
     expect(html).not.toContain("lesson-nav");
   });
 
+  test("hides the harness picker outside orchestrated mode", () => {
+    const html = renderEmptyPage();
+
+    expect(html).toContain('id="harness-selector" class="harness-selector" hidden');
+    expect(html).not.toContain('id="agent-activity"');
+  });
+
+  test("renders orchestrated harness picker states and activity skeleton", () => {
+    const html = renderPage(
+      "Display Title",
+      [],
+      emptyLessons,
+      [],
+      [],
+      [],
+      [],
+      new Set(),
+      undefined,
+      "waiting-for-agent",
+      true,
+      {
+        orchestrated: true,
+        harnesses: [
+          {
+            id: "claude-code",
+            name: "Claude Code",
+            installed: true,
+            authenticated: true,
+            version: "1.2.3",
+            selected: true,
+          },
+          {
+            id: "codex",
+            name: "Codex",
+            installed: true,
+            authenticated: false,
+            selected: false,
+          },
+          {
+            id: "gemini",
+            name: "Gemini",
+            installed: false,
+            authenticated: false,
+            selected: false,
+          },
+        ],
+      },
+    );
+
+    expect(html).toContain('id="harness-selector" class="harness-selector"');
+    expect(html).not.toContain('id="harness-selector" class="harness-selector" hidden');
+    expect(html).toContain(
+      '<span id="harness-selected-name" class="harness-selected-name">Claude Code</span>',
+    );
+    expect(html).toContain("Claude Code ✓");
+    expect(html).toContain("Codex — not logged in");
+    expect(html).toContain("Gemini — not installed");
+    expect(html).toContain('data-harness-id="codex"');
+    expect(html).toContain('title="Log in to Codex from your terminal." disabled');
+    expect(html).toContain('id="agent-activity" class="entry agent-activity" hidden');
+  });
+
   test("renders initial status and composer affordance before any wait", () => {
     const html = renderEmptyPage("agent-working", false);
 
