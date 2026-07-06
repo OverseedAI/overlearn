@@ -61,6 +61,32 @@ session, starts the next turn on the new harness, and asks it to rebuild from
 the on-disk course state; lessons, transcript, glossary, mastery, and topic
 state carry over, but the old agent's in-context memory does not.
 
+## Testing
+
+Run the fast unit and source e2e suite:
+
+```sh
+bun test src
+```
+
+Run the daemon contract suite against a specific runtime:
+
+```sh
+OVERLEARN_CONTRACT_RUNTIME=source bun run test:contract
+OVERLEARN_CONTRACT_RUNTIME=binary bun run test:contract
+OVERLEARN_CONTRACT_RUNTIME=sidecar bun run test:contract
+```
+
+`binary` requires `bun run build`; `sidecar` also requires
+`bun run app:copy-sidecar`. The adapter conformance suite is available as:
+
+```sh
+bun run test:conformance
+```
+
+The opt-in real Claude Code ACP smoke lives in the `Adapter Smoke` GitHub
+Actions workflow and requires the `ANTHROPIC_API_KEY` secret.
+
 ## Registry
 
 The course registry Worker lives in `registry/` and is local-first while R2 enablement is pending:
