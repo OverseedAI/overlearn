@@ -85,6 +85,10 @@ export type RunningMcpHttpServer = Readonly<{
   stop: () => void;
 }>;
 
+export type McpHttpHandlerOptions = Readonly<{
+  sessionId?: string | ((request: Request) => string);
+}>;
+
 type Env = Readonly<Record<string, string | undefined>>;
 type UnknownRecord = Record<string, unknown>;
 type JsonRpcId = string | number | null;
@@ -924,6 +928,59 @@ export const connectMcpClient = async (
   return client;
 };
 
+export const createMcpHttpHandler = (
+  definition: McpServerDefinition,
+  options: McpHttpHandlerOptions = {},
+): ((request: Request) => Promise<Response>) => {
+  const fixedSessionId =
+    options.sessionId === undefined
+      ? `mcp-${Math.random().toString(36).slice(2)}`
+      : undefined;
+
+  const sessionIdForRequest = (request: Request): string =>
+    typeof options.sessionId === "function"
+      ? options.sessionId(request)
+      : options.sessionId ?? fixedSessionId ?? "mcp-session";
+
+  return async (request) => {
+    const sessionId = sessionIdForRequest(request);
+
+    if (request.method !== "POST") {
+      return new Response("Method not allowed", { status: 405 });
+    }
+
+    let parsed: unknown;
+
+    try {
+      parsed = JSON.parse(await request.text()) as unknown;
+    } catch (error) {
+      return Response.json(
+        jsonRpcError(null, -32700, "Parse error.", errorMessage(error)),
+        {
+          status: 400,
+          headers: {
+            "Mcp-Session-Id": sessionId,
+          },
+        },
+      );
+    }
+
+    const response = await handleMcpMessage(definition, parsed);
+    const headers = {
+      "Mcp-Session-Id": sessionId,
+    };
+
+    if (response === undefined) {
+      return new Response(null, {
+        status: 202,
+        headers,
+      });
+    }
+
+    return Response.json(response, { headers });
+  };
+};
+
 export const startMcpHttpServer = (
   definition: McpServerDefinition,
   options: Readonly<{
@@ -931,44 +988,7 @@ export const startMcpHttpServer = (
     port?: number;
   }> = {},
 ): RunningMcpHttpServer => {
-  const sessionId = `mcp-${Math.random().toString(36).slice(2)}`;
-  const handler = {
-    async fetch(request: Request): Promise<Response> {
-      if (request.method !== "POST") {
-        return new Response("Method not allowed", { status: 405 });
-      }
-
-      let parsed: unknown;
-
-      try {
-        parsed = JSON.parse(await request.text()) as unknown;
-      } catch (error) {
-        return Response.json(
-          jsonRpcError(null, -32700, "Parse error.", errorMessage(error)),
-          {
-            status: 400,
-            headers: {
-              "Mcp-Session-Id": sessionId,
-            },
-          },
-        );
-      }
-
-      const response = await handleMcpMessage(definition, parsed);
-      const headers = {
-        "Mcp-Session-Id": sessionId,
-      };
-
-      if (response === undefined) {
-        return new Response(null, {
-          status: 202,
-          headers,
-        });
-      }
-
-      return Response.json(response, { headers });
-    },
-  };
+  const fetch = createMcpHttpHandler(definition);
   let server: ReturnType<typeof Bun.serve> | undefined;
   let lastError: unknown;
   const attempts = options.port === undefined ? 20 : 1;
@@ -978,7 +998,7 @@ export const startMcpHttpServer = (
       server = Bun.serve({
         hostname: options.hostname ?? "127.0.0.1",
         port: options.port ?? randomLoopbackPort(),
-        fetch: handler.fetch,
+        fetch,
       });
       break;
     } catch (error) {
