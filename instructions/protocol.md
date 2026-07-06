@@ -64,6 +64,8 @@ Turn files:
 - `{"type":"message","text":"..."}` means the learner sent a chat message.
 - `{"type":"review-weak","concepts":["..."]}` means the learner asked to
   review the lowest-scoring topic concepts.
+- `{"type":"session-done"}` means the learner is done for this session. This is
+  the final turn.
 - `{"type":"feynman-answer","concept":"...","text":"...","keyPoints":[...]}`
   means the learner submitted an explain-it-back checkpoint answer. Grade it
   using `grading.md` and emit mastery before the next teaching turn.
@@ -94,15 +96,28 @@ Review weak areas:
 - Grade each answer with `grading.md`, emit mastery, then return to the regular
   teaching flow.
 
+Session wrap-up:
+
+- When a `session-done` event arrives, do not start a new teaching objective.
+- Optionally run final `learn emit mastery <course> ...` commands for any scores
+  that are clear from the final turn.
+- Send one closing `learn say <course> --text <markdown>` that summarizes what
+  was covered, names the mastery scores recorded, and suggests the next session.
+- Then run `learn stop <course>` and exit the loop.
+- Never run `learn wait <course>` after handling `session-done`.
+
 Daemon and wait rules:
 
 - `learn wait <course>` exits 0 and prints the next `turn.json` path.
 - Exit code 2 means the daemon died or the wait could not continue.
 - On wait failure, run `learn start <course>`, inspect `learn status <course>
   --json`, and resume from the course files and transcript.
+- This restart rule applies only to failed waits. After an intentional
+  `learn stop <course>` for `session-done`, do not restart the daemon and do not
+  call `learn wait` again.
 - Never leave an active learner session without a pending `learn wait`. On
   harnesses without background-task wake-ups (Codex), pending means a
   foreground `learn wait` blocking your current turn.
 - If the learner explicitly ends the session, write a compact final lesson or
-  summary, optionally send a closing `learn say`, and then stop without
-  re-entering wait.
+  summary, send the closing `learn say`, run `learn stop`, and then stop
+  without re-entering wait.

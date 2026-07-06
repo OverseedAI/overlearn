@@ -894,7 +894,7 @@ describe("mastery heat map helpers", () => {
 });
 
 describe("turn event storage", () => {
-  test("parses message, nav, review-weak, and feynman-answer events in stored order", async () => {
+  test("parses message, nav, review-weak, session-done, and feynman-answer events in stored order", async () => {
     const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-events-"));
     const env = { OVERLEARN_COURSES_DIR: coursesDir };
 
@@ -904,6 +904,7 @@ describe("turn event storage", () => {
         { type: "message", text: "hello" },
         { type: "nav", path: "indexes/btree" },
         { type: "review-weak", concepts: ["indexes/btree", "hash"] },
+        { type: "session-done" },
         {
           type: "feynman-answer",
           concept: "rule-of-72",
@@ -916,6 +917,7 @@ describe("turn event storage", () => {
         { type: "message", text: "hello" },
         { type: "nav", path: "indexes/btree" },
         { type: "review-weak", concepts: ["indexes/btree", "hash"] },
+        { type: "session-done" },
         {
           type: "feynman-answer",
           concept: "rule-of-72",

@@ -17,7 +17,11 @@ type RenderedTranscriptEntry = TranscriptEntry &
     lessonMissing?: boolean;
   }>;
 
-type UiRenderStatus = "waiting-for-agent" | "agent-working";
+type UiRenderStatus =
+  | "waiting-for-agent"
+  | "agent-working"
+  | "wrapping-up"
+  | "session-ended";
 
 const escapeHtml = (value: string): string =>
   value
@@ -56,6 +60,8 @@ const courseDisplayTitle = __COURSE_TITLE__;
 const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
 const enabledComposerLabel = "Message the agent…";
 const disabledComposerLabel = "The agent is teaching — you can reply when it pauses";
+const wrappingComposerLabel = "Session is wrapping up — the agent is writing the summary";
+const endedComposerLabel = "Session ended — the daemon has stopped";
 
 const topicSwitcher = document.querySelector("#topic-switcher");
 const topicMenuButton = document.querySelector("#topic-menu-button");
@@ -68,6 +74,11 @@ const submitButton = document.querySelector("#submit");
 const statusLine = document.querySelector("#status");
 const statusIndicator = document.querySelector("#status-line");
 const typingIndicator = document.querySelector("#typing");
+const doneLearningControl = document.querySelector("#done-learning-control");
+const doneLearningButton = document.querySelector("#done-learning");
+const doneConfirm = document.querySelector("#done-confirm");
+const doneConfirmYes = document.querySelector("#done-confirm-yes");
+const doneConfirmNo = document.querySelector("#done-confirm-no");
 const themeToggle = document.querySelector("#theme-toggle");
 const feynmanPanel = document.querySelector("#feynman-panel");
 const feynmanForm = document.querySelector("#feynman-form");
@@ -78,6 +89,7 @@ const feynmanPrompt = document.querySelector("#feynman-prompt");
 const feynmanReplacement = document.querySelector("#feynman-replacement");
 const feynmanStatus = document.querySelector("#feynman-status");
 const transcript = document.querySelector("#transcript");
+const sessionEndedBanner = document.querySelector("#session-ended");
 const masterySummary = document.querySelector("#mastery-summary");
 const lessonList = document.querySelector("#lesson-list");
 const studyRail = document.querySelector("#study-rail");
@@ -103,12 +115,14 @@ let submittedFeynmanConcept = undefined;
 let currentStatus = initialStatus;
 let hasSeenWait = initialHasSeenWait;
 let topicMenuOpen = false;
+let doneConfirmOpen = false;
 let railOpen = false;
 let activeRailTab = "lesson";
 let lessonExpandedById = new Map();
 let glossaryHighlightTimer = undefined;
 let currentTermElement = undefined;
 let hideTermCardTimer = undefined;
+let eventsClosedIntentionally = false;
 
 const scrollTranscript = () => {
   transcript.scrollTop = transcript.scrollHeight;
@@ -122,6 +136,42 @@ const setTopicMenuOpen = (open, options = {}) => {
   if (options.focusButton === true) {
     topicMenuButton.focus();
   }
+};
+
+const setDoneConfirmOpen = (open, options = {}) => {
+  doneConfirmOpen = open;
+  doneConfirm.hidden = !open;
+  doneLearningButton.setAttribute("aria-expanded", open ? "true" : "false");
+
+  if (options.focusButton === true) {
+    doneLearningButton.focus();
+  }
+
+  if (open) {
+    doneConfirmYes.focus();
+  }
+};
+
+const renderDoneLearningControl = () => {
+  if (currentStatus === "wrapping-up") {
+    setDoneConfirmOpen(false);
+    doneLearningButton.disabled = true;
+    doneLearningButton.textContent = "Wrapping up…";
+    doneLearningButton.setAttribute("aria-label", "Session is wrapping up");
+    return;
+  }
+
+  if (currentStatus === "session-ended") {
+    setDoneConfirmOpen(false);
+    doneLearningButton.disabled = true;
+    doneLearningButton.textContent = "Session ended";
+    doneLearningButton.setAttribute("aria-label", "Session ended");
+    return;
+  }
+
+  doneLearningButton.disabled = false;
+  doneLearningButton.textContent = "Done Learning";
+  doneLearningButton.setAttribute("aria-label", "Done Learning");
 };
 
 // Keep the transcript pinned to the latest message unless the learner has
@@ -1121,9 +1171,17 @@ const renderFeynmanPanel = () => {
   setFeynmanControls();
 };
 
-const statusText = (waiting) => {
-  if (waiting) {
+const statusText = (status) => {
+  if (status === "waiting-for-agent") {
     return "Your turn — the agent is waiting";
+  }
+
+  if (status === "wrapping-up") {
+    return "Agent is writing your wrap-up";
+  }
+
+  if (status === "session-ended") {
+    return endedComposerLabel;
   }
 
   return hasSeenWait
@@ -1131,8 +1189,24 @@ const statusText = (waiting) => {
     : "Waiting for the agent to start teaching";
 };
 
-const applyComposerLabel = (waiting) => {
-  const label = waiting ? enabledComposerLabel : disabledComposerLabel;
+const composerLabelForStatus = (status) => {
+  if (status === "waiting-for-agent") {
+    return enabledComposerLabel;
+  }
+
+  if (status === "wrapping-up") {
+    return wrappingComposerLabel;
+  }
+
+  if (status === "session-ended") {
+    return endedComposerLabel;
+  }
+
+  return disabledComposerLabel;
+};
+
+const applyComposerLabel = (status) => {
+  const label = composerLabelForStatus(status);
   textarea.placeholder = label;
   textarea.setAttribute("aria-label", label);
 };
@@ -1141,13 +1215,18 @@ const applyStatus = (status, nextHasSeenWait = hasSeenWait) => {
   currentStatus = status;
   hasSeenWait = nextHasSeenWait;
   const waiting = status === "waiting-for-agent";
-  statusLine.textContent = statusText(waiting);
-  statusIndicator.classList.toggle("working", !waiting);
-  typingIndicator.hidden = waiting;
-  applyComposerLabel(waiting);
+  const ended = status === "session-ended";
+  const working = status === "agent-working" || status === "wrapping-up";
+  statusLine.textContent = statusText(status);
+  statusIndicator.classList.toggle("working", working);
+  statusIndicator.classList.toggle("ended", ended);
+  typingIndicator.hidden = waiting || ended;
+  sessionEndedBanner.hidden = !ended;
+  applyComposerLabel(status);
   textarea.disabled = !waiting;
   submitButton.disabled = !waiting || textarea.value.trim().length === 0;
   setFeynmanControls();
+  renderDoneLearningControl();
 
   // Auto-focus only on desktop layouts: on small screens it scrolls the page
   // to the composer and pops the keyboard while the learner may be reading.
@@ -1180,6 +1259,23 @@ const submitMessage = async () => {
   if (!response.ok) {
     statusLine.textContent = await response.text();
     applyStatus("waiting-for-agent");
+  }
+};
+
+const submitDoneLearning = async () => {
+  if (doneLearningButton.disabled) {
+    return;
+  }
+
+  setDoneConfirmOpen(false);
+  applyStatus("wrapping-up", hasSeenWait);
+
+  const response = await fetch("/api/done", { method: "POST" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    applyStatus("waiting-for-agent", hasSeenWait);
+    statusLine.textContent = message;
   }
 };
 
@@ -1236,16 +1332,38 @@ themeToggle.addEventListener("click", () => {
   }
 });
 
+doneLearningButton.addEventListener("click", () => {
+  if (doneLearningButton.disabled) {
+    return;
+  }
+
+  setDoneConfirmOpen(!doneConfirmOpen);
+});
+
+doneConfirmYes.addEventListener("click", () => {
+  void submitDoneLearning();
+});
+
+doneConfirmNo.addEventListener("click", () => {
+  setDoneConfirmOpen(false, { focusButton: true });
+});
+
 topicMenuButton.addEventListener("click", () => {
   setTopicMenuOpen(!topicMenuOpen);
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || !topicMenuOpen) {
+  if (event.key !== "Escape") {
     return;
   }
 
-  setTopicMenuOpen(false, { focusButton: true });
+  if (topicMenuOpen) {
+    setTopicMenuOpen(false, { focusButton: true });
+  }
+
+  if (doneConfirmOpen) {
+    setDoneConfirmOpen(false, { focusButton: true });
+  }
 });
 
 document.addEventListener("click", (event) => {
@@ -1258,6 +1376,18 @@ document.addEventListener("click", (event) => {
   }
 
   setTopicMenuOpen(false);
+});
+
+document.addEventListener("click", (event) => {
+  if (
+    !doneConfirmOpen ||
+    !(event.target instanceof Node) ||
+    doneLearningControl.contains(event.target)
+  ) {
+    return;
+  }
+
+  setDoneConfirmOpen(false);
 });
 
 feynmanTextarea.addEventListener("input", setFeynmanControls);
@@ -1396,6 +1526,11 @@ const events = new EventSource("/api/events");
 events.addEventListener("status", (event) => {
   const payload = JSON.parse(event.data);
   applyStatus(payload.status, payload.hasSeenWait ?? hasSeenWait);
+
+  if (payload.status === "session-ended") {
+    eventsClosedIntentionally = true;
+    events.close();
+  }
 });
 events.addEventListener("message", (event) => {
   appendEntry(JSON.parse(event.data));
@@ -1443,6 +1578,11 @@ events.addEventListener("transcript", (event) => {
   const stick = transcriptNearBottom();
   transcriptEntries = [...JSON.parse(event.data).entries];
   renderTranscript({ stick });
+});
+events.addEventListener("error", () => {
+  if (eventsClosedIntentionally || currentStatus === "session-ended") {
+    return;
+  }
 });
 `;
 
@@ -1975,15 +2115,34 @@ const renderStatusText = (
     return "Your turn — the agent is waiting";
   }
 
+  if (status === "wrapping-up") {
+    return "Agent is writing your wrap-up";
+  }
+
+  if (status === "session-ended") {
+    return "Session ended — the daemon has stopped";
+  }
+
   return hasSeenWait
     ? "Agent is working…"
     : "Waiting for the agent to start teaching";
 };
 
-const composerLabel = (status: UiRenderStatus): string =>
-  status === "waiting-for-agent"
-    ? "Message the agent…"
-    : "The agent is teaching — you can reply when it pauses";
+const composerLabel = (status: UiRenderStatus): string => {
+  if (status === "waiting-for-agent") {
+    return "Message the agent…";
+  }
+
+  if (status === "wrapping-up") {
+    return "Session is wrapping up — the agent is writing the summary";
+  }
+
+  if (status === "session-ended") {
+    return "Session ended — the daemon has stopped";
+  }
+
+  return "The agent is teaching — you can reply when it pauses";
+};
 
 export const renderPage = (
   courseTitle: string,
@@ -1998,11 +2157,25 @@ export const renderPage = (
   status: UiRenderStatus = "agent-working",
   hasSeenWait = false,
 ): string => {
-  const working = status !== "waiting-for-agent";
-  const statusLineClass = working ? "status-line working" : "status-line";
+  const working = status === "agent-working" || status === "wrapping-up";
+  const ended = status === "session-ended";
+  const statusLineClass = [
+    "status-line",
+    ...(working ? ["working"] : []),
+    ...(ended ? ["ended"] : []),
+  ].join(" ");
   const typingHidden = working ? "" : " hidden";
   const composerDisabled = status === "waiting-for-agent" ? "" : " disabled";
   const composerPlaceholder = composerLabel(status);
+  const sessionEndedHidden = ended ? "" : " hidden";
+  const doneButtonDisabled =
+    status === "wrapping-up" || status === "session-ended" ? " disabled" : "";
+  const doneButtonLabel =
+    status === "wrapping-up"
+      ? "Wrapping up…"
+      : status === "session-ended"
+        ? "Session ended"
+        : "Done Learning";
   const currentHeaderTopic = currentTopic(topics);
   const headerTopicTitle = currentHeaderTopic?.title ?? courseTitle;
   const headerProgress = masteryProgressText(topics, masteryScores);
@@ -2391,6 +2564,97 @@ export const renderPage = (
       justify-self: end;
       gap: 0.5rem;
       min-width: 8rem;
+    }
+
+    .done-learning-control {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .done-learning {
+      min-height: 2.6rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--secondary);
+      padding: 0 0.75rem;
+      font: inherit;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .done-learning:hover {
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+      color: var(--text);
+    }
+
+    .done-learning:disabled {
+      border-color: var(--border-surface);
+      background: var(--surface);
+      color: var(--disabled);
+      cursor: not-allowed;
+    }
+
+    .done-confirm {
+      position: absolute;
+      top: calc(100% + 0.45rem);
+      right: 0;
+      z-index: 35;
+      display: grid;
+      gap: 0.55rem;
+      width: 13rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--card);
+      box-shadow: var(--pop-shadow);
+      padding: 0.65rem;
+    }
+
+    .done-confirm p {
+      margin: 0;
+      color: var(--heading);
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    .done-confirm-actions {
+      display: flex;
+      gap: 0.4rem;
+    }
+
+    .done-confirm-yes,
+    .done-confirm-no {
+      flex: 1;
+      min-height: 2rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 6px;
+      padding: 0 0.55rem;
+      font: inherit;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .done-confirm-yes {
+      border-color: var(--warn);
+      background: var(--accent-hover-bg);
+      color: var(--warn-text);
+    }
+
+    .done-confirm-no {
+      background: var(--surface);
+      color: var(--secondary);
+    }
+
+    .done-confirm-yes:hover,
+    .done-confirm-no:hover {
+      border-color: var(--accent-border-strong);
+      background: var(--accent-active-bg);
+      color: var(--text);
     }
 
     .theme-toggle {
@@ -2986,6 +3250,14 @@ export const renderPage = (
       animation: status-pulse 1.6s ease-in-out infinite;
     }
 
+    .status-line.ended {
+      color: var(--muted);
+    }
+
+    .status-line.ended .status-dot {
+      background: var(--disabled);
+    }
+
     @keyframes status-pulse {
       0% {
         box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 45%, transparent);
@@ -3026,6 +3298,17 @@ export const renderPage = (
       border-radius: 8px 8px 8px 2px;
       background: var(--card);
       padding: 0.6rem 0.75rem;
+    }
+
+    .session-ended {
+      margin: 0;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--muted);
+      padding: 0.7rem 0.85rem;
+      font-size: 0.92rem;
+      line-height: 1.45;
     }
 
     .typing-dot {
@@ -3693,6 +3976,19 @@ export const renderPage = (
         min-width: 0;
       }
 
+      .done-learning {
+        min-height: 2.4rem;
+        max-width: 8.5rem;
+        overflow: hidden;
+        padding: 0 0.6rem;
+        font-size: 0.82rem;
+        text-overflow: ellipsis;
+      }
+
+      .done-confirm {
+        width: min(13rem, calc(100vw - 1.5rem));
+      }
+
       .topic-switcher {
         grid-area: topic;
         justify-self: stretch;
@@ -3776,6 +4072,20 @@ export const renderPage = (
         </div>
       </div>
       <div class="header-controls">
+        <div id="done-learning-control" class="done-learning-control">
+          <button id="done-learning" class="done-learning" type="button" aria-label="${escapeHtml(
+            doneButtonLabel,
+          )}" aria-expanded="false"${doneButtonDisabled}>${escapeHtml(
+            doneButtonLabel,
+          )}</button>
+          <div id="done-confirm" class="done-confirm" role="dialog" aria-label="End learning session" hidden>
+            <p>End session?</p>
+            <div class="done-confirm-actions">
+              <button id="done-confirm-yes" class="done-confirm-yes" type="button">End</button>
+              <button id="done-confirm-no" class="done-confirm-no" type="button">Cancel</button>
+            </div>
+          </div>
+        </div>
         <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle color theme" title="Toggle color theme">
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/></svg>
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
@@ -3795,6 +4105,7 @@ export const renderPage = (
         )}</section>
 
         <div class="stream-dock">
+          <p id="session-ended" class="session-ended"${sessionEndedHidden}>Session ended — the daemon has stopped.</p>
           <section id="feynman-panel" class="feynman-panel" aria-labelledby="feynman-heading" hidden>
             <div class="feynman-heading">
               <div class="feynman-title">

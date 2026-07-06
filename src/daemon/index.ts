@@ -72,7 +72,11 @@ export type CourseStatus = Readonly<{
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-type UiStatus = "waiting-for-agent" | "agent-working";
+type UiStatus =
+  | "waiting-for-agent"
+  | "agent-working"
+  | "wrapping-up"
+  | "session-ended";
 
 type UiStatusPayload = Readonly<{
   status: UiStatus;
@@ -112,6 +116,8 @@ const LOCALHOST_BIND_HOST = "127.0.0.1";
 const LOCALHOST_PRINT_HOST = "localhost";
 const DAEMON_START_TIMEOUT_MS = 5_000;
 const DAEMON_START_POLL_MS = 50;
+const DAEMON_STOP_TIMEOUT_MS = 5_000;
+const DAEMON_STOP_POLL_MS = 50;
 const WAIT_RETRY_DELAY_MS = 250;
 export const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
 
@@ -185,6 +191,23 @@ const readDaemonHealth = async (
   } catch {
     return undefined;
   }
+};
+
+const waitForDaemonShutdown = async (
+  courseDir: string,
+  pid: number,
+): Promise<boolean> => {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < DAEMON_STOP_TIMEOUT_MS) {
+    if (!isPidAlive(pid) && (await readDaemonMetadata(courseDir)) === undefined) {
+      return true;
+    }
+
+    await sleep(DAEMON_STOP_POLL_MS);
+  }
+
+  return !isPidAlive(pid) && (await readDaemonMetadata(courseDir)) === undefined;
 };
 
 const readCourseDisplayTitle = async (
@@ -429,6 +452,54 @@ export const getCourseStatus = async (
     waitPending: health.waitPending,
     courseDir,
   };
+};
+
+const noDaemonMessage = (courseDir: string): string =>
+  `No daemon is running for course: ${courseDir}`;
+
+export const stopCourseDaemon = async (
+  name: string | undefined,
+  env: Env = process.env,
+  cwd = process.cwd(),
+): Promise<string> => {
+  const courseDir = await resolveCourseDirForWait(name, env, cwd);
+  const metadata = await readDaemonMetadata(courseDir);
+
+  if (metadata === undefined) {
+    return noDaemonMessage(courseDir);
+  }
+
+  if (!isPidAlive(metadata.pid)) {
+    await clearDaemonMetadata(courseDir);
+    return noDaemonMessage(courseDir);
+  }
+
+  try {
+    const response = await fetch(
+      formatDaemonUrl(metadata.port, "/api/shutdown"),
+      { method: "POST" },
+    );
+
+    if (!response.ok) {
+      throw new Error(`Shutdown failed with HTTP ${response.status}.`);
+    }
+  } catch {
+    try {
+      process.kill(metadata.pid, "SIGTERM");
+    } catch {
+      await clearDaemonMetadata(courseDir);
+      return noDaemonMessage(courseDir);
+    }
+  }
+
+  if (!(await waitForDaemonShutdown(courseDir, metadata.pid))) {
+    throw new LearnCommandError(
+      1,
+      `Daemon did not stop within 5 seconds for course: ${courseDir}`,
+    );
+  }
+
+  return `Stopped daemon for course: ${courseDir}`;
 };
 
 const readAgentMessageText = async (
@@ -933,6 +1004,13 @@ const createSseHub = (
     });
   };
 
+  const close = (): void => {
+    for (const subscriber of subscribers) {
+      subscriber.end();
+    }
+    subscribers.clear();
+  };
+
   return {
     broadcastFeynman,
     broadcastGlossary,
@@ -942,6 +1020,7 @@ const createSseHub = (
     broadcastStatus,
     broadcastTranscript,
     broadcastTopics,
+    close,
     connect,
   };
 };
@@ -1279,6 +1358,11 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     sseHub.broadcastStatus();
   };
 
+  const statusAfterTurnEvents = (events: readonly TurnEvent[]): UiStatus =>
+    events.some((event) => event.type === "session-done")
+      ? "wrapping-up"
+      : "agent-working";
+
   const flushPendingTurn = async (): Promise<string | undefined> => {
     const events = await readPendingEvents(coursePath);
     if (events.length === 0) {
@@ -1287,7 +1371,7 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
 
     const turnPath = await writeTurnFile(coursePath, events);
     await writePendingEvents(coursePath, []);
-    setStatus("agent-working");
+    setStatus(statusAfterTurnEvents(events));
 
     return turnPath;
   };
@@ -1377,6 +1461,18 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       if (waiter === undefined) {
         setStatus("agent-working");
       }
+    });
+
+    return jsonResponse({ ok: true });
+  };
+
+  const handleDone = async (): Promise<Response> => {
+    await serialize(async () => {
+      const event: TurnEvent = { type: "session-done" };
+      const pendingEvents = await readPendingEvents(coursePath);
+      await writePendingEvents(coursePath, [...pendingEvents, event]);
+      await maybeResolveWaiter();
+      setStatus("wrapping-up");
     });
 
     return jsonResponse({ ok: true });
@@ -1599,6 +1695,11 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
         return;
       }
 
+      if (method === "POST" && requestUrl.pathname === "/api/done") {
+        await sendResponse(response, await handleDone());
+        return;
+      }
+
       if (method === "POST" && requestUrl.pathname === "/api/nav") {
         const bodyText = await readRequestBody(request);
         await sendResponse(response, await handleNav(bodyText));
@@ -1614,6 +1715,12 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
       if (method === "POST" && requestUrl.pathname === "/api/agent-message") {
         const bodyText = await readRequestBody(request);
         await sendResponse(response, await handleAgentMessage(bodyText));
+        return;
+      }
+
+      if (method === "POST" && requestUrl.pathname === "/api/shutdown") {
+        await sendResponse(response, jsonResponse({ ok: true }));
+        requestShutdown();
         return;
       }
 
@@ -1633,6 +1740,44 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
   // requestTimeout (5 min) would destroy the socket mid-wait.
   server.requestTimeout = 0;
 
+  let cleanupStarted = false;
+  const cleanup = async (): Promise<void> => {
+    if (cleanupStarted) {
+      return;
+    }
+
+    cleanupStarted = true;
+    lessonWatcher.close();
+    glossaryWatcher.close();
+    topicWatcher.close();
+    masteryWatcher.close();
+    feynmanWatcher.close();
+    sseHub.close();
+    server.close();
+    await clearDaemonMetadata(coursePath);
+  };
+
+  let shutdownStarted = false;
+  const requestShutdown = (): void => {
+    if (shutdownStarted) {
+      return;
+    }
+
+    shutdownStarted = true;
+    void (async () => {
+      setStatus("session-ended");
+      await sleep(50);
+      await cleanup();
+    })().finally(() => process.exit(0));
+  };
+
+  process.once("SIGTERM", () => {
+    void cleanup().finally(() => process.exit(0));
+  });
+  process.once("SIGINT", () => {
+    void cleanup().finally(() => process.exit(0));
+  });
+
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, LOCALHOST_BIND_HOST, () => resolve());
@@ -1649,23 +1794,6 @@ export const runDaemon = async (courseDir: string): Promise<void> => {
     pid: process.pid,
     port,
     startedAt: new Date().toISOString(),
-  });
-
-  const cleanup = async (): Promise<void> => {
-    lessonWatcher.close();
-    glossaryWatcher.close();
-    topicWatcher.close();
-    masteryWatcher.close();
-    feynmanWatcher.close();
-    server.close();
-    await clearDaemonMetadata(coursePath);
-  };
-
-  process.on("SIGTERM", () => {
-    void cleanup().finally(() => process.exit(0));
-  });
-  process.on("SIGINT", () => {
-    void cleanup().finally(() => process.exit(0));
   });
 
   await new Promise<never>(() => undefined);

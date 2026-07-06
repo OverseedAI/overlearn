@@ -14,6 +14,7 @@ export type CliCommand =
   | Readonly<{ kind: "start"; name?: string }>
   | Readonly<{ kind: "resume"; name: string }>
   | Readonly<{ kind: "wait"; name?: string }>
+  | Readonly<{ kind: "stop"; name?: string }>
   | Readonly<{ kind: "instructions"; name?: string; json: boolean }>
   | Readonly<{ kind: "instructions-eject"; toDir?: string; force: boolean }>
   | Readonly<{
@@ -102,6 +103,8 @@ const formatHelp = (version: string): string =>
     "  learn start [name]",
     "  learn resume <name>",
     "  learn wait [name]",
+    "  learn stop [name]",
+    "  learn done [name]",
     "  learn instructions [name] [--json]",
     "  learn instructions --eject [--to <dir>] [--force]",
     "  learn install <claude-code|codex> [--project] [--force]",
@@ -169,7 +172,7 @@ const result = (
 });
 
 const optionalNameCommand = (
-  kind: "start" | "wait",
+  kind: "start" | "wait" | "stop",
   args: readonly string[],
   version: string,
 ): CliCommand => {
@@ -1005,6 +1008,10 @@ export const parseCli = (
 
   if (arg === "wait") {
     return optionalNameCommand("wait", rest, version);
+  }
+
+  if (arg === "stop" || arg === "done") {
+    return optionalNameCommand("stop", rest, version);
   }
 
   if (arg === "instructions") {

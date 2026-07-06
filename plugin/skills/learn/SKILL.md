@@ -59,13 +59,19 @@ Do not inline or invent teaching policy. The teaching directives must come from
 7. Handle the next learner turn.
    - When `learn wait` exits 0, read the `turn.json` path it printed.
    - Act on every event in that file.
+   - If any event has `type: "session-done"`, send the final wrap-up required
+     by `learn instructions` with `learn say`, optionally emit final mastery,
+     run `learn stop <course>`, and EXIT the loop.
+   - Do NOT run `learn wait` again after `session-done`.
    - GOTO step 5.
 
 8. Recover from daemon failure.
-   - If `learn wait` exits non-zero, run `learn start <course>`.
+   - If `learn wait` exits non-zero while a learner turn is still expected, run
+     `learn start <course>`.
    - Inspect `learn status <course> --json` if needed.
    - Resume from the course files and transcript.
    - GOTO step 5.
 
 Never end an active learner session without either a pending `learn wait` or a
-clear learner goodbye handled according to the ingested protocol.
+clear `session-done` turn handled with `learn stop` according to the ingested
+protocol.

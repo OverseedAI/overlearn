@@ -75,6 +75,10 @@ export type ReviewWeakTurnEvent = Readonly<{
   concepts: readonly string[];
 }>;
 
+export type SessionDoneTurnEvent = Readonly<{
+  type: "session-done";
+}>;
+
 export type FeynmanAnswerTurnEvent = Readonly<{
   type: "feynman-answer";
   concept: string;
@@ -86,6 +90,7 @@ export type TurnEvent =
   | MessageTurnEvent
   | NavTurnEvent
   | ReviewWeakTurnEvent
+  | SessionDoneTurnEvent
   | FeynmanAnswerTurnEvent;
 
 export type TurnFile = Readonly<{
@@ -742,6 +747,10 @@ const parseTurnEvent = (value: unknown, filePath: string): TurnEvent => {
         return concept;
       }),
     };
+  }
+
+  if (type === "session-done") {
+    return { type };
   }
 
   if (type === "feynman-answer") {
