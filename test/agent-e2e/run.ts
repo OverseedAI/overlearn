@@ -39,7 +39,6 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1_000;
 const POLL_MS = 500;
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const pluginDir = join(repoRoot, "plugin");
 const learnBinary = join(repoRoot, "dist", "learn");
 
 const sleep = async (milliseconds: number): Promise<void> => {
@@ -291,6 +290,8 @@ const createEnv = (
   env["OVERLEARN_BIN"] = learnBinary;
   env["OVERLEARN_COURSES_DIR"] = coursesDir;
   env["OVERLEARN_NO_BROWSER"] = "1";
+  // TODO(DEV-547): Move this live-agent suite to daemon-orchestrated turns.
+  env["OVERLEARN_ORCHESTRATED"] = "0";
   env["NO_COLOR"] = "1";
   env["PATH"] = `${binDir}:${env["PATH"] ?? ""}`;
   delete env["FORCE_COLOR"];
@@ -489,8 +490,10 @@ const main = async (): Promise<void> => {
 
     const env = createEnv(coursesDir, binDir, homeDir);
     const prompt = [
-      "/learn teach me the rule of 72.",
-      "Use course name rule-of-72-e2e.",
+      "Use the `learn` CLI directly to teach me the rule of 72.",
+      "Start with `learn start rule-of-72-e2e`.",
+      "Use `learn say` for learner-facing replies and lesson files for durable teaching notes.",
+      "After each learner reply, handle the printed turn file from `learn wait rule-of-72-e2e`, then re-enter `learn wait rule-of-72-e2e` until I end the session.",
       "Keep it to 3 short learner turns.",
       "When I say to end the session, close the loop and stop.",
     ].join(" ");
@@ -500,8 +503,6 @@ const main = async (): Promise<void> => {
         "-p",
         "--dangerously-skip-permissions",
         "--no-session-persistence",
-        "--plugin-dir",
-        pluginDir,
         "--model",
         MODEL,
         "--max-budget-usd",

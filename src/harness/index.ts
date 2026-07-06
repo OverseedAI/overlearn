@@ -1,7 +1,5 @@
 import { createHash } from "node:crypto";
 import {
-  access,
-  chmod,
   mkdir,
   readFile,
   rmdir,
@@ -11,9 +9,6 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-import stopBackstop from "../../plugin/hooks/stop-backstop.sh" with { type: "text" };
-import learnSkillCodex from "../../plugin/skills/learn/SKILL.codex.md" with { type: "text" };
-import learnSkill from "../../plugin/skills/learn/SKILL.md" with { type: "text" };
 import { getOverlearnHome } from "../instructions";
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -30,14 +25,10 @@ export type HarnessOptions = Readonly<{
 }>;
 
 export type HarnessAction = Readonly<{
-  kind: "file" | "settings-hook" | "config" | "directory";
+  kind: "file" | "settings-hook" | "directory";
   path: string;
   status:
-    | "written"
-    | "overwritten"
-    | "skipped"
     | "updated"
-    | "unchanged"
     | "removed"
     | "missing"
     | "kept"
@@ -45,50 +36,24 @@ export type HarnessAction = Readonly<{
   detail?: string;
 }>;
 
-export type HarnessInstallResult = Readonly<{
+export type HarnessUninstallResult = Readonly<{
   tool: HarnessTool;
   scope: HarnessScope;
   root: string;
   manifestPath: string;
   actions: readonly HarnessAction[];
+  nothingToUninstall: boolean;
 }>;
-
-export type HarnessUninstallResult = HarnessInstallResult &
-  Readonly<{
-    nothingToUninstall: boolean;
-  }>;
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonObject = { [key: string]: JsonValue };
 type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 
-type PlannedFile = Readonly<{
-  path: string;
-  content: string;
-  mode?: number;
-}>;
-
-type PlannedSettingsHook = Readonly<{
-  path: string;
-  scriptPath: string;
-  command: string;
-}>;
-
-type PlannedTomlFlag = Readonly<{
-  path: string;
-  table: string;
-  key: string;
-  value: boolean;
-}>;
-
-type HarnessPlan = Readonly<{
+type HarnessTarget = Readonly<{
   tool: HarnessTool;
   scope: HarnessScope;
   root: string;
   manifestPath: string;
-  files: readonly PlannedFile[];
-  settingsHooks: readonly PlannedSettingsHook[];
-  tomlFlags: readonly PlannedTomlFlag[];
 }>;
 
 type ManifestFileEntry = Readonly<{
@@ -120,15 +85,6 @@ type InstallManifest = Readonly<{
   installs: readonly ManifestInstall[];
 }>;
 
-type SettingsMerge = Readonly<{
-  path: string;
-  scriptPath: string;
-  command: string;
-  existed: boolean;
-  status: "updated" | "unchanged";
-  content?: string;
-}>;
-
 type SettingsRemoval = Readonly<{
   entry: ManifestSettingsHookEntry;
   existed: boolean;
@@ -138,28 +94,11 @@ type SettingsRemoval = Readonly<{
 
 const manifestVersion = 1 as const;
 
-const skillContent = `${learnSkill.trimEnd()}\n`;
-const codexSkillContent = `${learnSkillCodex.trimEnd()}\n`;
-const stopBackstopContent = `${stopBackstop.trimEnd()}\n`;
-
 const hasErrorCode = (error: unknown, code: string): boolean =>
   typeof error === "object" &&
   error !== null &&
   "code" in error &&
   error["code"] === code;
-
-const pathExists = async (path: string): Promise<boolean> => {
-  try {
-    await access(path);
-    return true;
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return false;
-    }
-
-    throw error;
-  }
-};
 
 const readTextIfExists = async (path: string): Promise<string | undefined> => {
   try {
@@ -178,25 +117,6 @@ const hashText = (content: string): string =>
 
 const getAgentHome = (env: Env = process.env): string =>
   resolve(env["OVERLEARN_AGENT_HOME"] ?? homedir());
-
-const shellQuote = (value: string): string =>
-  `'${value.replaceAll("'", "'\\''")}'`;
-
-const claudeHookCommand = (scriptPath: string): string =>
-  `bash ${shellQuote(scriptPath)}`;
-
-const codexHookCommand = (scriptPath: string): string =>
-  `bash ${shellQuote(scriptPath)} codex`;
-
-const stopHookEntry = (command: string): JsonObject => ({
-  hooks: [
-    {
-      type: "command",
-      command,
-      timeout: 10,
-    },
-  ],
-});
 
 const isJsonObject = (value: unknown): value is JsonObject =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -217,91 +137,8 @@ const jsonContainsString = (value: JsonValue, needle: string): boolean => {
   return false;
 };
 
-const parseSettingsObject = (text: string, path: string): JsonObject => {
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `Cannot merge Stop hook into ${path}: invalid JSON (${message}).`,
-      { cause: error },
-    );
-  }
-
-  if (!isJsonObject(parsed)) {
-    throw new Error(`Cannot merge Stop hook into ${path}: settings file must contain a JSON object.`);
-  }
-
-  return parsed;
-};
-
 const stringifyJson = (value: unknown): string =>
   `${JSON.stringify(value, null, 2)}\n`;
-
-const ensureHooksObject = (settings: JsonObject, path: string): JsonObject => {
-  const current = settings["hooks"];
-
-  if (current === undefined) {
-    const hooks: JsonObject = {};
-    settings["hooks"] = hooks;
-    return hooks;
-  }
-
-  if (!isJsonObject(current)) {
-    throw new Error(`Cannot merge Stop hook into ${path}: hooks must be a JSON object.`);
-  }
-
-  return current;
-};
-
-const ensureStopArray = (hooks: JsonObject, path: string): JsonValue[] => {
-  const current = hooks["Stop"];
-
-  if (current === undefined) {
-    const stop: JsonValue[] = [];
-    hooks["Stop"] = stop;
-    return stop;
-  }
-
-  if (!Array.isArray(current)) {
-    throw new Error(`Cannot merge Stop hook into ${path}: hooks.Stop must be an array.`);
-  }
-
-  return current;
-};
-
-const prepareSettingsMerge = async (
-  hook: PlannedSettingsHook,
-): Promise<SettingsMerge> => {
-  const text = await readTextIfExists(hook.path);
-  const existed = text !== undefined;
-  const settings = text === undefined ? {} : parseSettingsObject(text, hook.path);
-  const hooks = ensureHooksObject(settings, hook.path);
-  const stop = ensureStopArray(hooks, hook.path);
-
-  if (stop.some((entry) => jsonContainsString(entry, hook.scriptPath))) {
-    return {
-      path: hook.path,
-      scriptPath: hook.scriptPath,
-      command: hook.command,
-      existed,
-      status: "unchanged",
-    };
-  }
-
-  stop.push(stopHookEntry(hook.command));
-
-  return {
-    path: hook.path,
-    scriptPath: hook.scriptPath,
-    command: hook.command,
-    existed,
-    status: "updated",
-    content: stringifyJson(settings),
-  };
-};
 
 const removeStopHook = (
   settings: JsonObject,
@@ -434,97 +271,6 @@ const prepareSettingsRemoval = async (
     status: "updated",
     content: stringifyJson(parsed),
   };
-};
-
-type TomlFlagResult = Readonly<{
-  status: "updated" | "unchanged" | "skipped";
-  detail: string;
-  content?: string;
-}>;
-
-// Line-based upsert so user formatting and comments survive. Handles the
-// common `[table]` section form only; an inline `table = { ... }` is left
-// alone and reported for manual editing.
-const upsertTomlFlag = (raw: string, flag: PlannedTomlFlag): TomlFlagResult => {
-  const header = `[${flag.table}]`;
-  const assignment = `${flag.key} = ${flag.value}`;
-  const detail = `${flag.table}.${flag.key} = ${flag.value}`;
-  const keyPattern = new RegExp(`^\\s*${flag.key}\\s*=`);
-  const inlinePattern = new RegExp(`^\\s*${flag.table}\\s*=`);
-
-  const normalized =
-    raw.length === 0 || raw.endsWith("\n") ? raw : `${raw}\n`;
-  const lines = normalized.length === 0 ? [] : normalized.split("\n");
-
-  if (lines.some((line) => inlinePattern.test(line))) {
-    return {
-      status: "skipped",
-      detail: `${flag.table} is an inline table; set ${detail} manually`,
-    };
-  }
-
-  const headerIndex = lines.findIndex((line) => line.trim() === header);
-
-  if (headerIndex === -1) {
-    const prefix = normalized.length === 0 ? "" : `${normalized}\n`;
-    return {
-      status: "updated",
-      detail,
-      content: `${prefix}${header}\n${assignment}\n`,
-    };
-  }
-
-  let tableEnd = lines.length;
-  for (let index = headerIndex + 1; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    if (line.trim().startsWith("[")) {
-      tableEnd = index;
-      break;
-    }
-  }
-
-  for (let index = headerIndex + 1; index < tableEnd; index += 1) {
-    const line = lines[index] ?? "";
-    if (!keyPattern.test(line)) {
-      continue;
-    }
-
-    if (line.trim() === assignment) {
-      return { status: "unchanged", detail };
-    }
-
-    const next = [...lines];
-    next[index] = assignment;
-    return {
-      status: "updated",
-      detail,
-      content: next.join("\n"),
-    };
-  }
-
-  const next = [...lines];
-  next.splice(headerIndex + 1, 0, assignment);
-  return {
-    status: "updated",
-    detail,
-    content: next.join("\n"),
-  };
-};
-
-const missingDirsFor = async (path: string): Promise<readonly string[]> => {
-  const dirs: string[] = [];
-  let current = dirname(path);
-
-  while (!(await pathExists(current))) {
-    dirs.push(current);
-    const parent = dirname(current);
-    if (parent === current) {
-      break;
-    }
-    current = parent;
-  }
-
-  return dirs;
 };
 
 const isHarnessTool = (value: JsonValue | undefined): value is HarnessTool =>
@@ -693,29 +439,13 @@ const writeManifest = async (
   await writeFile(path, stringifyJson(manifest), "utf8");
 };
 
-const installMatchesPlan = (
+const installMatchesTarget = (
   install: ManifestInstall,
-  plan: HarnessPlan,
+  target: HarnessTarget,
 ): boolean =>
-  install.tool === plan.tool &&
-  install.scope === plan.scope &&
-  install.root === plan.root;
-
-const upsertFileEntry = (
-  files: readonly ManifestFileEntry[],
-  entry: ManifestFileEntry,
-): readonly ManifestFileEntry[] => [
-  ...files.filter((file) => file.path !== entry.path),
-  entry,
-];
-
-const upsertSettingsHookEntry = (
-  settingsHooks: readonly ManifestSettingsHookEntry[],
-  entry: ManifestSettingsHookEntry,
-): readonly ManifestSettingsHookEntry[] => [
-  ...settingsHooks.filter((hook) => hook.path !== entry.path),
-  entry,
-];
+  install.tool === target.tool &&
+  install.scope === target.scope &&
+  install.root === target.root;
 
 const fileReferencedBy = (
   installs: readonly ManifestInstall[],
@@ -724,31 +454,6 @@ const fileReferencedBy = (
   installs.some((install) =>
     install.files.some((file) => file.path === path),
   );
-
-const manifestRecordsContent = (
-  installs: readonly ManifestInstall[],
-  path: string,
-  sha256: string,
-): boolean =>
-  installs.some((install) =>
-    install.files.some(
-      (file) => file.path === path && file.sha256 === sha256,
-    ),
-  );
-
-const withRefreshedHashes = (
-  install: ManifestInstall,
-  refreshedHashes: ReadonlyMap<string, string>,
-): ManifestInstall =>
-  refreshedHashes.size === 0
-    ? install
-    : {
-        ...install,
-        files: install.files.map((file) => {
-          const sha256 = refreshedHashes.get(file.path);
-          return sha256 === undefined ? file : { ...file, sha256 };
-        }),
-      };
 
 const settingsHookReferencedBy = (
   installs: readonly ManifestInstall[],
@@ -792,267 +497,18 @@ const pruneCreatedDirs = async (
   return actions;
 };
 
-export const planHarnessInstall = (
-  options: HarnessOptions,
-): HarnessPlan => {
+const resolveHarnessTarget = (options: HarnessOptions): HarnessTarget => {
   const env = options.env ?? process.env;
   const cwd = resolve(options.cwd ?? process.cwd());
   const agentHome = getAgentHome(env);
   const overlearnHome = getOverlearnHome(env);
   const root = options.scope === "global" ? agentHome : cwd;
-  const manifestPath = join(overlearnHome, "install-manifest.json");
-
-  const scriptPath = join(overlearnHome, "hooks", "stop-backstop.sh");
-
-  if (options.tool === "codex") {
-    // Codex reads hooks from ~/.codex/hooks.json regardless of project;
-    // there is no project-level hooks file, so both scopes target agent home.
-    return {
-      tool: options.tool,
-      scope: options.scope,
-      root,
-      manifestPath,
-      files: [
-        {
-          path: join(root, ".agents", "skills", "learn", "SKILL.md"),
-          content: codexSkillContent,
-        },
-        {
-          path: scriptPath,
-          content: stopBackstopContent,
-          mode: 0o755,
-        },
-      ],
-      settingsHooks: [
-        {
-          path: join(agentHome, ".codex", "hooks.json"),
-          scriptPath,
-          command: codexHookCommand(scriptPath),
-        },
-      ],
-      // Codex only runs hooks.json when the feature flag is on; uninstall
-      // leaves the flag alone since other hooks may rely on it.
-      tomlFlags: [
-        {
-          path: join(agentHome, ".codex", "config.toml"),
-          table: "features",
-          key: "hooks",
-          value: true,
-        },
-      ],
-    };
-  }
 
   return {
     tool: options.tool,
     scope: options.scope,
     root,
-    manifestPath,
-    files: [
-      {
-        path: join(root, ".claude", "skills", "learn", "SKILL.md"),
-        content: skillContent,
-      },
-      {
-        path: scriptPath,
-        content: stopBackstopContent,
-        mode: 0o755,
-      },
-    ],
-    settingsHooks: [
-      {
-        path: join(root, ".claude", "settings.json"),
-        scriptPath,
-        command: claudeHookCommand(scriptPath),
-      },
-    ],
-    tomlFlags: [],
-  };
-};
-
-export const installHarness = async (
-  options: HarnessOptions,
-): Promise<HarnessInstallResult> => {
-  const force = options.force ?? false;
-  const plan = planHarnessInstall(options);
-  const manifest = await readManifest(plan.manifestPath);
-  const settingsMerges = await Promise.all(
-    plan.settingsHooks.map((hook) => prepareSettingsMerge(hook)),
-  );
-  const existingInstall = manifest.installs.find((install) =>
-    installMatchesPlan(install, plan),
-  );
-  const actions: HarnessAction[] = [];
-  const refreshedHashes = new Map<string, string>();
-
-  let files = existingInstall?.files ?? [];
-  let settingsHooks = existingInstall?.settingsHooks ?? [];
-
-  for (const file of plan.files) {
-    const existing = await readTextIfExists(file.path);
-    const exists = existing !== undefined;
-    const ownedUnmodified =
-      exists && manifestRecordsContent(manifest.installs, file.path, hashText(existing));
-
-    if (exists && !force) {
-      if (existing === file.content) {
-        // Same content, likely installed for another tool: reference it in
-        // this install too so uninstalling the other tool keeps the file.
-        // A re-run keeps its original entry (and recorded createdDirs).
-        const priorEntry = files.find((entry) => entry.path === file.path);
-        files = upsertFileEntry(
-          files,
-          priorEntry ?? {
-            path: file.path,
-            sha256: hashText(file.content),
-            ...(file.mode === undefined ? {} : { mode: file.mode }),
-            createdDirs: [],
-          },
-        );
-        actions.push({
-          kind: "file",
-          path: file.path,
-          status: "unchanged",
-          detail: "already installed",
-        });
-        continue;
-      }
-
-      // A file that still matches an installed hash is ours and unmodified,
-      // so a newer bundled version may refresh it. Anything else was changed
-      // by the user and needs --force.
-      if (!ownedUnmodified) {
-        actions.push({
-          kind: "file",
-          path: file.path,
-          status: "skipped",
-          detail: "existing file",
-        });
-        continue;
-      }
-    }
-
-    const createdDirs = await missingDirsFor(file.path);
-    await mkdir(dirname(file.path), { recursive: true });
-    await writeFile(file.path, file.content, "utf8");
-
-    if (file.mode !== undefined) {
-      await chmod(file.path, file.mode);
-    }
-
-    const sha256 = hashText(file.content);
-    refreshedHashes.set(file.path, sha256);
-    files = upsertFileEntry(files, {
-      path: file.path,
-      sha256,
-      ...(file.mode === undefined ? {} : { mode: file.mode }),
-      createdDirs,
-    });
-    actions.push({
-      kind: "file",
-      path: file.path,
-      status: exists ? (ownedUnmodified && !force ? "updated" : "overwritten") : "written",
-      ...(ownedUnmodified && !force && exists
-        ? { detail: "bundled content refreshed" }
-        : {}),
-    });
-  }
-
-  for (const merge of settingsMerges) {
-    if (merge.status === "unchanged") {
-      // Hook already present (possibly merged by another install of ours):
-      // reference it in this install too so uninstalling the other keeps it.
-      // A re-run keeps its original entry (and recorded createdFile/dirs).
-      const priorEntry = settingsHooks.find(
-        (entry) => entry.path === merge.path,
-      );
-      settingsHooks = upsertSettingsHookEntry(
-        settingsHooks,
-        priorEntry ?? {
-          path: merge.path,
-          scriptPath: merge.scriptPath,
-          command: merge.command,
-          createdFile: false,
-          createdDirs: [],
-        },
-      );
-      actions.push({
-        kind: "settings-hook",
-        path: merge.path,
-        status: "skipped",
-        detail: "Stop hook already present",
-      });
-      continue;
-    }
-
-    if (merge.content === undefined) {
-      throw new Error(`Cannot write Stop hook into ${merge.path}: no settings content prepared.`);
-    }
-
-    const createdDirs = await missingDirsFor(merge.path);
-    await mkdir(dirname(merge.path), { recursive: true });
-    await writeFile(merge.path, merge.content, "utf8");
-    settingsHooks = upsertSettingsHookEntry(settingsHooks, {
-      path: merge.path,
-      scriptPath: merge.scriptPath,
-      command: merge.command,
-      createdFile: !merge.existed,
-      createdDirs,
-    });
-    actions.push({
-      kind: "settings-hook",
-      path: merge.path,
-      status: "updated",
-    });
-  }
-
-  for (const flag of plan.tomlFlags) {
-    const raw = (await readTextIfExists(flag.path)) ?? "";
-    const result = upsertTomlFlag(raw, flag);
-
-    if (result.status === "updated" && result.content !== undefined) {
-      await mkdir(dirname(flag.path), { recursive: true });
-      await writeFile(flag.path, result.content, "utf8");
-    }
-
-    actions.push({
-      kind: "config",
-      path: flag.path,
-      status: result.status === "unchanged" ? "skipped" : result.status,
-      detail:
-        result.status === "unchanged"
-          ? `${result.detail} already set`
-          : result.detail,
-    });
-  }
-
-  const nextInstall: ManifestInstall = {
-    tool: plan.tool,
-    scope: plan.scope,
-    root: plan.root,
-    installedAt: new Date().toISOString(),
-    files,
-    settingsHooks,
-  };
-  const nextInstalls = [
-    ...manifest.installs
-      .filter((install) => !installMatchesPlan(install, plan))
-      .map((install) => withRefreshedHashes(install, refreshedHashes)),
-    nextInstall,
-  ].filter(
-    (install) => install.files.length > 0 || install.settingsHooks.length > 0,
-  );
-  await writeManifest(plan.manifestPath, {
-    version: manifestVersion,
-    installs: nextInstalls,
-  });
-
-  return {
-    tool: plan.tool,
-    scope: plan.scope,
-    root: plan.root,
-    manifestPath: plan.manifestPath,
-    actions,
+    manifestPath: join(overlearnHome, "install-manifest.json"),
   };
 };
 
@@ -1060,25 +516,25 @@ export const uninstallHarness = async (
   options: HarnessOptions,
 ): Promise<HarnessUninstallResult> => {
   const force = options.force ?? false;
-  const plan = planHarnessInstall(options);
-  const manifest = await readManifest(plan.manifestPath);
+  const target = resolveHarnessTarget(options);
+  const manifest = await readManifest(target.manifestPath);
   const install = manifest.installs.find((candidate) =>
-    installMatchesPlan(candidate, plan),
+    installMatchesTarget(candidate, target),
   );
 
   if (install === undefined) {
     return {
-      tool: plan.tool,
-      scope: plan.scope,
-      root: plan.root,
-      manifestPath: plan.manifestPath,
+      tool: target.tool,
+      scope: target.scope,
+      root: target.root,
+      manifestPath: target.manifestPath,
       actions: [],
       nothingToUninstall: true,
     };
   }
 
   const remainingInstalls = manifest.installs.filter(
-    (candidate) => !installMatchesPlan(candidate, plan),
+    (candidate) => !installMatchesTarget(candidate, target),
   );
   const sharedSettingsHooks = install.settingsHooks.filter((hook) =>
     settingsHookReferencedBy(remainingInstalls, hook),
@@ -1203,16 +659,16 @@ export const uninstallHarness = async (
           },
         ];
 
-  await writeManifest(plan.manifestPath, {
+  await writeManifest(target.manifestPath, {
     version: manifestVersion,
     installs: retainedInstalls,
   });
 
   return {
-    tool: plan.tool,
-    scope: plan.scope,
-    root: plan.root,
-    manifestPath: plan.manifestPath,
+    tool: target.tool,
+    scope: target.scope,
+    root: target.root,
+    manifestPath: target.manifestPath,
     actions,
     nothingToUninstall: false,
   };
@@ -1224,25 +680,12 @@ const scopeLabel = (scope: HarnessScope): string =>
 const formatAction = (action: HarnessAction): string => {
   const detail = action.detail === undefined ? "" : ` (${action.detail})`;
 
-  if (action.status === "skipped") {
-    return `skipped ${action.kind}: ${action.path}${detail}`;
-  }
-
   if (action.status === "kept") {
     return `kept ${action.kind}: ${action.path}${detail}`;
   }
 
   return `${action.status} ${action.kind}: ${action.path}${detail}`;
 };
-
-export const formatInstallHarnessResult = (
-  result: HarnessInstallResult,
-): string =>
-  [
-    `learn ${result.tool} harness install (${scopeLabel(result.scope)}):`,
-    ...result.actions.map(formatAction),
-    `manifest: ${result.manifestPath}`,
-  ].join("\n");
 
 export const formatUninstallHarnessResult = (
   result: HarnessUninstallResult,

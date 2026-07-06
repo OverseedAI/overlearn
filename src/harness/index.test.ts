@@ -1,25 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import stopBackstop from "../../plugin/hooks/stop-backstop.sh" with { type: "text" };
-import learnSkillCodex from "../../plugin/skills/learn/SKILL.codex.md" with { type: "text" };
-import learnSkill from "../../plugin/skills/learn/SKILL.md" with { type: "text" };
 import {
-  formatInstallHarnessResult,
   formatUninstallHarnessResult,
-  installHarness,
-  planHarnessInstall,
   uninstallHarness,
   type HarnessOptions,
+  type HarnessScope,
+  type HarnessTool,
 } from "./index";
 
 type HarnessFixture = Readonly<{
@@ -28,6 +18,29 @@ type HarnessFixture = Readonly<{
   overlearnHome: string;
   projectDir: string;
   env: Record<string, string>;
+}>;
+
+type ManifestFile = Readonly<{
+  path: string;
+  sha256: string;
+  createdDirs: readonly string[];
+}>;
+
+type ManifestSettingsHook = Readonly<{
+  path: string;
+  scriptPath: string;
+  command: string;
+  createdFile: boolean;
+  createdDirs: readonly string[];
+}>;
+
+type ManifestEntry = Readonly<{
+  tool: HarnessTool;
+  scope: HarnessScope;
+  root: string;
+  installedAt: string;
+  files: readonly ManifestFile[];
+  settingsHooks: readonly ManifestSettingsHook[];
 }>;
 
 const withFixture = async (
@@ -70,6 +83,22 @@ const writeText = async (path: string, text: string): Promise<void> => {
   await writeFile(path, text, "utf8");
 };
 
+const sha256 = (text: string): string =>
+  createHash("sha256").update(text).digest("hex");
+
+const manifestPath = (fixture: HarnessFixture): string =>
+  join(fixture.overlearnHome, "install-manifest.json");
+
+const writeManifest = async (
+  fixture: HarnessFixture,
+  installs: readonly ManifestEntry[],
+): Promise<void> => {
+  await writeText(
+    manifestPath(fixture),
+    `${JSON.stringify({ version: 1, installs }, null, 2)}\n`,
+  );
+};
+
 const harnessOptions = (
   fixture: HarnessFixture,
   options: Pick<HarnessOptions, "tool" | "scope" | "force">,
@@ -79,728 +108,24 @@ const harnessOptions = (
   cwd: fixture.projectDir,
 });
 
-describe("harness install", () => {
-  test("fresh claude-code install writes skill, hook, settings, and manifest", async () => {
-    await withFixture(async (fixture) => {
-      const result = await installHarness(
-        harnessOptions(fixture, { tool: "claude-code", scope: "global" }),
-      );
-      const plan = planHarnessInstall(
-        harnessOptions(fixture, { tool: "claude-code", scope: "global" }),
-      );
-
-      const skillPath = join(
-        fixture.agentHome,
-        ".claude",
-        "skills",
-        "learn",
-        "SKILL.md",
-      );
-      const hookPath = join(
-        fixture.overlearnHome,
-        "hooks",
-        "stop-backstop.sh",
-      );
-      const settingsPath = join(fixture.agentHome, ".claude", "settings.json");
-
-      expect(result.actions.map((action) => action.status)).toEqual([
-        "written",
-        "written",
-        "updated",
-      ]);
-      expect(await readFile(skillPath, "utf8")).toBe(`${learnSkill.trimEnd()}\n`);
-      expect(await readFile(hookPath, "utf8")).toBe(
-        `${stopBackstop.trimEnd()}\n`,
-      );
-      expect((await stat(hookPath)).mode & 0o777).toBe(0o755);
-
-      const settings = await readJson<{ hooks: { Stop: unknown[] } }>(
-        settingsPath,
-      );
-      expect(JSON.stringify(settings.hooks.Stop)).toContain(hookPath);
-
-      const manifest = await readJson<{
-        installs: Array<{
-          tool: string;
-          scope: string;
-          root: string;
-          files: Array<{ path: string; sha256: string }>;
-          settingsHooks: Array<{ path: string; scriptPath: string }>;
-        }>;
-      }>(plan.manifestPath);
-      expect(manifest.installs).toHaveLength(1);
-      expect(manifest.installs[0]).toEqual(
-        expect.objectContaining({
-          tool: "claude-code",
-          scope: "global",
-          root: fixture.agentHome,
-        }),
-      );
-      expect(manifest.installs[0]?.files.map((file) => file.path).sort()).toEqual(
-        [hookPath, skillPath].sort(),
-      );
-      expect(manifest.installs[0]?.settingsHooks).toEqual([
-        expect.objectContaining({
-          path: settingsPath,
-          scriptPath: hookPath,
-        }),
-      ]);
-    });
-  });
-
-  test("re-run leaves existing files and hook unchanged without dropping manifest entries", async () => {
-    await withFixture(async (fixture) => {
-      const options = harnessOptions(fixture, {
-        tool: "claude-code",
-        scope: "global",
-      });
-      await installHarness(options);
-
-      const second = await installHarness(options);
-      const output = formatInstallHarnessResult(second);
-      expect(second.actions).toEqual([
-        expect.objectContaining({ kind: "file", status: "unchanged" }),
-        expect.objectContaining({ kind: "file", status: "unchanged" }),
-        expect.objectContaining({ kind: "settings-hook", status: "skipped" }),
-      ]);
-      expect(output).toContain("unchanged file");
-
-      const manifest = await readJson<{ installs: unknown[] }>(
-        planHarnessInstall(options).manifestPath,
-      );
-      expect(manifest.installs).toHaveLength(1);
-    });
-  });
-
-  test("--force overwrites existing installed skill content", async () => {
-    await withFixture(async (fixture) => {
-      const options = harnessOptions(fixture, { tool: "codex", scope: "global" });
-      const skillPath = join(
-        fixture.agentHome,
-        ".agents",
-        "skills",
-        "learn",
-        "SKILL.md",
-      );
-      await writeText(skillPath, "# User skill\n");
-
-      const skipped = await installHarness(options);
-      expect(skipped.actions).toContainEqual(
-        expect.objectContaining({ path: skillPath, status: "skipped" }),
-      );
-      expect(await readFile(skillPath, "utf8")).toBe("# User skill\n");
-
-      const forced = await installHarness({ ...options, force: true });
-      expect(forced.actions).toContainEqual(
-        expect.objectContaining({ path: skillPath, status: "overwritten" }),
-      );
-      expect(await readFile(skillPath, "utf8")).toBe(
-        `${learnSkillCodex.trimEnd()}\n`,
-      );
-    });
-  });
-
-  test("settings merge preserves unrelated keys and hooks", async () => {
-    await withFixture(async (fixture) => {
-      const settingsPath = join(fixture.agentHome, ".claude", "settings.json");
-      await writeText(
-        settingsPath,
-        `${JSON.stringify(
-          {
-            theme: "dark",
-            hooks: {
-              Stop: [
-                {
-                  hooks: [
-                    {
-                      type: "command",
-                      command: "echo user-stop",
-                      timeout: 2,
-                    },
-                  ],
-                },
-              ],
-              PreToolUse: [{ matcher: "Bash" }],
-            },
-          },
-          null,
-          2,
-        )}\n`,
-      );
-
-      await installHarness(
-        harnessOptions(fixture, { tool: "claude-code", scope: "global" }),
-      );
-
-      const hookPath = join(
-        fixture.overlearnHome,
-        "hooks",
-        "stop-backstop.sh",
-      );
-      const settings = await readJson<{
-        theme: string;
-        hooks: {
-          Stop: Array<{ hooks: Array<{ command: string }> }>;
-          PreToolUse: unknown[];
-        };
-      }>(settingsPath);
-
-      expect(settings.theme).toBe("dark");
-      expect(settings.hooks.PreToolUse).toEqual([{ matcher: "Bash" }]);
-      expect(settings.hooks.Stop).toHaveLength(2);
-      expect(JSON.stringify(settings.hooks.Stop[0])).toContain("echo user-stop");
-      expect(JSON.stringify(settings.hooks.Stop[1])).toContain(hookPath);
-    });
-  });
-
-  test("malformed Claude settings aborts before writing files", async () => {
-    await withFixture(async (fixture) => {
-      const settingsPath = join(fixture.agentHome, ".claude", "settings.json");
-      await writeText(settingsPath, "{ nope\n");
-
-      await expect(
-        installHarness(
-          harnessOptions(fixture, { tool: "claude-code", scope: "global" }),
-        ),
-      ).rejects.toThrow("invalid JSON");
-
-      expect(
-        await exists(
-          join(fixture.agentHome, ".claude", "skills", "learn", "SKILL.md"),
-        ),
-      ).toBe(false);
-      expect(
-        await exists(join(fixture.overlearnHome, "hooks", "stop-backstop.sh")),
-      ).toBe(false);
-    });
-  });
-
-  test("codex install writes codex skill, backstop hook, and hooks.json", async () => {
-    await withFixture(async (fixture) => {
-      const result = await installHarness(
-        harnessOptions(fixture, { tool: "codex", scope: "global" }),
-      );
-      const skillPath = join(
-        fixture.agentHome,
-        ".agents",
-        "skills",
-        "learn",
-        "SKILL.md",
-      );
-      const hookPath = join(
-        fixture.overlearnHome,
-        "hooks",
-        "stop-backstop.sh",
-      );
-      const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
-      const configPath = join(fixture.agentHome, ".codex", "config.toml");
-
-      expect(result.actions).toEqual([
-        expect.objectContaining({ path: skillPath, status: "written" }),
-        expect.objectContaining({ path: hookPath, status: "written" }),
-        expect.objectContaining({ path: hooksJsonPath, status: "updated" }),
-        expect.objectContaining({
-          kind: "config",
-          path: configPath,
-          status: "updated",
-        }),
-      ]);
-      expect(await readFile(configPath, "utf8")).toBe(
-        "[features]\nhooks = true\n",
-      );
-      expect(await readFile(skillPath, "utf8")).toBe(
-        `${learnSkillCodex.trimEnd()}\n`,
-      );
-      expect((await stat(hookPath)).mode & 0o777).toBe(0o755);
-
-      const hooksJson = await readJson<{
-        hooks: { Stop: Array<{ hooks: Array<{ command: string }> }> };
-      }>(hooksJsonPath);
-      expect(hooksJson.hooks.Stop).toHaveLength(1);
-      expect(hooksJson.hooks.Stop[0]?.hooks[0]?.command).toBe(
-        `bash '${hookPath}' codex`,
-      );
-
-      expect(await exists(join(fixture.agentHome, ".claude"))).toBe(false);
-    });
-  });
-
-  test("codex project install merges the hook into agent-home hooks.json", async () => {
-    await withFixture(async (fixture) => {
-      await installHarness(
-        harnessOptions(fixture, { tool: "codex", scope: "project" }),
-      );
-
-      const projectSkill = join(
-        fixture.projectDir,
-        ".agents",
-        "skills",
-        "learn",
-        "SKILL.md",
-      );
-      const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
-
-      expect(await exists(projectSkill)).toBe(true);
-      expect(await exists(join(fixture.projectDir, ".codex"))).toBe(false);
-      expect(JSON.stringify(await readJson(hooksJsonPath))).toContain(
-        "stop-backstop.sh",
-      );
-    });
-  });
-
-  test("codex install flips features.hooks in an existing config.toml without touching the rest", async () => {
-    await withFixture(async (fixture) => {
-      const configPath = join(fixture.agentHome, ".codex", "config.toml");
-      await writeText(
-        configPath,
-        [
-          'model = "gpt-5.5"',
-          "",
-          "[features]",
-          "plugins = true",
-          "hooks = false",
-          "",
-          "[tui]",
-          'theme = "dark"',
-          "",
-        ].join("\n"),
-      );
-
-      const first = await installHarness(
-        harnessOptions(fixture, { tool: "codex", scope: "global" }),
-      );
-      expect(first.actions).toContainEqual(
-        expect.objectContaining({
-          kind: "config",
-          path: configPath,
-          status: "updated",
-          detail: "features.hooks = true",
-        }),
-      );
-      expect(await readFile(configPath, "utf8")).toBe(
-        [
-          'model = "gpt-5.5"',
-          "",
-          "[features]",
-          "plugins = true",
-          "hooks = true",
-          "",
-          "[tui]",
-          'theme = "dark"',
-          "",
-        ].join("\n"),
-      );
-
-      const second = await installHarness(
-        harnessOptions(fixture, { tool: "codex", scope: "global" }),
-      );
-      expect(second.actions).toContainEqual(
-        expect.objectContaining({
-          kind: "config",
-          path: configPath,
-          status: "skipped",
-          detail: "features.hooks = true already set",
-        }),
-      );
-    });
-  });
-
-  test("codex install leaves an inline features table for manual editing", async () => {
-    await withFixture(async (fixture) => {
-      const configPath = join(fixture.agentHome, ".codex", "config.toml");
-      const original = 'features = { plugins = true }\n';
-      await writeText(configPath, original);
-
-      const result = await installHarness(
-        harnessOptions(fixture, { tool: "codex", scope: "global" }),
-      );
-      expect(result.actions).toContainEqual(
-        expect.objectContaining({
-          kind: "config",
-          path: configPath,
-          status: "skipped",
-          detail: "features is an inline table; set features.hooks = true manually",
-        }),
-      );
-      expect(await readFile(configPath, "utf8")).toBe(original);
-    });
-  });
-
-  test("re-run refreshes files from an older install without --force", async () => {
-    await withFixture(async (fixture) => {
-      const options = harnessOptions(fixture, { tool: "codex", scope: "global" });
-      await installHarness(options);
-
-      const skillPath = join(
-        fixture.agentHome,
-        ".agents",
-        "skills",
-        "learn",
-        "SKILL.md",
-      );
-      const manifestPath = planHarnessInstall(options).manifestPath;
-
-      // Simulate a previous CLI version's install: older bundled content on
-      // disk, with a matching hash recorded in the manifest.
-      const oldContent = "# Old bundled skill\n";
-      const oldSha256 = new Bun.CryptoHasher("sha256")
-        .update(oldContent)
-        .digest("hex");
-      await writeText(skillPath, oldContent);
-      const manifest = await readJson<{
-        installs: Array<{ files: Array<{ path: string; sha256: string }> }>;
-      }>(manifestPath);
-      for (const install of manifest.installs) {
-        for (const file of install.files) {
-          if (file.path === skillPath) {
-            file.sha256 = oldSha256;
-          }
-        }
-      }
-      await writeText(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-
-      const result = await installHarness(options);
-      expect(result.actions).toContainEqual(
-        expect.objectContaining({
-          path: skillPath,
-          status: "updated",
-          detail: "bundled content refreshed",
-        }),
-      );
-      expect(await readFile(skillPath, "utf8")).toBe(
-        `${learnSkillCodex.trimEnd()}\n`,
-      );
-    });
-  });
-
-  test("refresh updates the shared script hash in other installs' manifests", async () => {
-    await withFixture(async (fixture) => {
-      const claudeOptions = harnessOptions(fixture, {
-        tool: "claude-code",
-        scope: "global",
-      });
-      const codexOptions = harnessOptions(fixture, {
-        tool: "codex",
-        scope: "global",
-      });
-      await installHarness(claudeOptions);
-      await installHarness(codexOptions);
-
-      const hookPath = join(
-        fixture.overlearnHome,
-        "hooks",
-        "stop-backstop.sh",
-      );
-      const manifestPath = planHarnessInstall(claudeOptions).manifestPath;
-
-      const oldContent = "#!/usr/bin/env bash\n# old backstop\n";
-      const oldSha256 = new Bun.CryptoHasher("sha256")
-        .update(oldContent)
-        .digest("hex");
-      await writeText(hookPath, oldContent);
-      const manifest = await readJson<{
-        installs: Array<{ files: Array<{ path: string; sha256: string }> }>;
-      }>(manifestPath);
-      for (const install of manifest.installs) {
-        for (const file of install.files) {
-          if (file.path === hookPath) {
-            file.sha256 = oldSha256;
-          }
-        }
-      }
-      await writeText(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-
-      // Refresh via the codex install; the claude-code manifest entry must
-      // pick up the new hash so its uninstall still recognizes the file.
-      await installHarness(codexOptions);
-
-      const currentSha256 = new Bun.CryptoHasher("sha256")
-        .update(`${stopBackstop.trimEnd()}\n`)
-        .digest("hex");
-      const after = await readJson<{
-        installs: Array<{
-          tool: string;
-          files: Array<{ path: string; sha256: string }>;
-        }>;
-      }>(manifestPath);
-      for (const install of after.installs) {
-        for (const file of install.files) {
-          if (file.path === hookPath) {
-            expect(file.sha256).toBe(currentSha256);
-          }
-        }
-      }
-
-      const result = await uninstallHarness(claudeOptions);
-      expect(result.actions).toContainEqual(
-        expect.objectContaining({
-          path: hookPath,
-          status: "kept",
-          detail: "still referenced by another harness install",
-        }),
-      );
-    });
-  });
-
-  test("codex hooks.json merge preserves unrelated hooks", async () => {
-    await withFixture(async (fixture) => {
-      const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
-      await writeText(
-        hooksJsonPath,
-        `${JSON.stringify(
-          {
-            hooks: {
-              SessionStart: [
-                {
-                  hooks: [
-                    {
-                      command: "bash '/Users/hal/.codex/herdr-agent-state.sh' session",
-                      timeout: 10,
-                      type: "command",
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-          null,
-          2,
-        )}\n`,
-      );
-
-      await installHarness(
-        harnessOptions(fixture, { tool: "codex", scope: "global" }),
-      );
-
-      const hooksJson = await readJson<{
-        hooks: { SessionStart: unknown[]; Stop: unknown[] };
-      }>(hooksJsonPath);
-      expect(hooksJson.hooks.SessionStart).toHaveLength(1);
-      expect(JSON.stringify(hooksJson.hooks.SessionStart)).toContain(
-        "herdr-agent-state.sh",
-      );
-      expect(hooksJson.hooks.Stop).toHaveLength(1);
-      expect(JSON.stringify(hooksJson.hooks.Stop)).toContain(
-        "stop-backstop.sh",
-      );
-    });
-  });
-
-  test("--project claude-code install targets project .claude paths", async () => {
-    await withFixture(async (fixture) => {
-      await installHarness(
-        harnessOptions(fixture, { tool: "claude-code", scope: "project" }),
-      );
-
-      const skillPath = join(
-        fixture.projectDir,
-        ".claude",
-        "skills",
-        "learn",
-        "SKILL.md",
-      );
-      const settingsPath = join(fixture.projectDir, ".claude", "settings.json");
-      const hookPath = join(
-        fixture.overlearnHome,
-        "hooks",
-        "stop-backstop.sh",
-      );
-      const manifest = await readJson<{
-        installs: Array<{ root: string; scope: string }>;
-      }>(join(fixture.overlearnHome, "install-manifest.json"));
-
-      expect(await exists(skillPath)).toBe(true);
-      expect(JSON.stringify(await readJson(settingsPath))).toContain(hookPath);
-      expect(await exists(join(fixture.agentHome, ".claude"))).toBe(false);
-      expect(manifest.installs[0]).toEqual(
-        expect.objectContaining({
-          root: fixture.projectDir,
-          scope: "project",
-        }),
-      );
-    });
-  });
+const installEntry = (
+  fixture: HarnessFixture,
+  options: Readonly<{
+    tool: HarnessTool;
+    scope: HarnessScope;
+    files?: readonly ManifestFile[];
+    settingsHooks?: readonly ManifestSettingsHook[];
+  }>,
+): ManifestEntry => ({
+  tool: options.tool,
+  scope: options.scope,
+  root: options.scope === "global" ? fixture.agentHome : fixture.projectDir,
+  installedAt: "2026-01-01T00:00:00.000Z",
+  files: options.files ?? [],
+  settingsHooks: options.settingsHooks ?? [],
 });
 
 describe("harness uninstall", () => {
-  test("uninstall removes manifest-owned files and only the installed hook", async () => {
-    await withFixture(async (fixture) => {
-      const options = harnessOptions(fixture, {
-        tool: "claude-code",
-        scope: "global",
-      });
-      await installHarness(options);
-
-      const skillPath = join(
-        fixture.agentHome,
-        ".claude",
-        "skills",
-        "learn",
-        "SKILL.md",
-      );
-      const hookPath = join(
-        fixture.overlearnHome,
-        "hooks",
-        "stop-backstop.sh",
-      );
-      const settingsPath = join(fixture.agentHome, ".claude", "settings.json");
-      const settings = await readJson<{
-        theme?: string;
-        hooks: { Stop: Array<{ hooks: Array<{ command: string }> }> };
-      }>(settingsPath);
-      settings.theme = "dark";
-      settings.hooks.Stop.push({
-        hooks: [
-          {
-            command: "echo user-stop",
-          },
-        ],
-      });
-      await writeText(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
-
-      const result = await uninstallHarness(options);
-      const output = formatUninstallHarnessResult(result);
-
-      expect(result.nothingToUninstall).toBe(false);
-      expect(output).toContain("removed file");
-      expect(await exists(skillPath)).toBe(false);
-      expect(await exists(hookPath)).toBe(false);
-
-      const afterSettings = await readJson<{
-        theme: string;
-        hooks: { Stop: Array<unknown> };
-      }>(settingsPath);
-      expect(afterSettings.theme).toBe("dark");
-      expect(afterSettings.hooks.Stop).toHaveLength(1);
-      expect(JSON.stringify(afterSettings)).toContain("echo user-stop");
-      expect(JSON.stringify(afterSettings)).not.toContain(hookPath);
-
-      const manifest = await readJson<{ installs: unknown[] }>(
-        join(fixture.overlearnHome, "install-manifest.json"),
-      );
-      expect(manifest.installs).toEqual([]);
-    });
-  });
-
-  test("uninstall leaves changed installed files unless forced", async () => {
-    await withFixture(async (fixture) => {
-      const options = harnessOptions(fixture, { tool: "codex", scope: "global" });
-      await installHarness(options);
-
-      const skillPath = join(
-        fixture.agentHome,
-        ".agents",
-        "skills",
-        "learn",
-        "SKILL.md",
-      );
-      await writeText(skillPath, "# User changed skill\n");
-
-      const kept = await uninstallHarness(options);
-      expect(kept.actions).toContainEqual(
-        expect.objectContaining({
-          path: skillPath,
-          status: "kept",
-          detail: "content changed since install",
-        }),
-      );
-      expect(await readFile(skillPath, "utf8")).toBe("# User changed skill\n");
-      const manifest = await readJson<{
-        installs: Array<{
-          tool: string;
-          files: Array<{ path: string }>;
-          settingsHooks: unknown[];
-        }>;
-      }>(join(fixture.overlearnHome, "install-manifest.json"));
-      expect(manifest.installs).toHaveLength(1);
-      expect(manifest.installs[0]).toEqual(
-        expect.objectContaining({
-          tool: "codex",
-          settingsHooks: [],
-        }),
-      );
-      expect(manifest.installs[0]?.files).toEqual([
-        expect.objectContaining({ path: skillPath }),
-      ]);
-
-      const forced = await uninstallHarness({ ...options, force: true });
-      expect(forced.actions).toContainEqual(
-        expect.objectContaining({ path: skillPath, status: "removed" }),
-      );
-      expect(await exists(skillPath)).toBe(false);
-    });
-  });
-
-  test("uninstalling claude-code keeps the backstop script the codex install references", async () => {
-    await withFixture(async (fixture) => {
-      const claudeOptions = harnessOptions(fixture, {
-        tool: "claude-code",
-        scope: "global",
-      });
-      const codexOptions = harnessOptions(fixture, {
-        tool: "codex",
-        scope: "global",
-      });
-      await installHarness(claudeOptions);
-      await installHarness(codexOptions);
-
-      const hookPath = join(
-        fixture.overlearnHome,
-        "hooks",
-        "stop-backstop.sh",
-      );
-      const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
-
-      const result = await uninstallHarness(claudeOptions);
-      expect(result.actions).toContainEqual(
-        expect.objectContaining({
-          path: hookPath,
-          status: "kept",
-          detail: "still referenced by another harness install",
-        }),
-      );
-      expect(await exists(hookPath)).toBe(true);
-      expect(JSON.stringify(await readJson(hooksJsonPath))).toContain(hookPath);
-
-      await uninstallHarness(codexOptions);
-      expect(await exists(hookPath)).toBe(false);
-      expect(await exists(hooksJsonPath)).toBe(false);
-    });
-  });
-
-  test("uninstalling one codex scope keeps the hooks.json entry the other references", async () => {
-    await withFixture(async (fixture) => {
-      const globalOptions = harnessOptions(fixture, {
-        tool: "codex",
-        scope: "global",
-      });
-      const projectOptions = harnessOptions(fixture, {
-        tool: "codex",
-        scope: "project",
-      });
-      await installHarness(globalOptions);
-      await installHarness(projectOptions);
-
-      const hooksJsonPath = join(fixture.agentHome, ".codex", "hooks.json");
-
-      const result = await uninstallHarness(projectOptions);
-      expect(result.actions).toContainEqual(
-        expect.objectContaining({
-          kind: "settings-hook",
-          path: hooksJsonPath,
-          status: "kept",
-          detail: "still referenced by another harness install",
-        }),
-      );
-      expect(JSON.stringify(await readJson(hooksJsonPath))).toContain(
-        "stop-backstop.sh",
-      );
-
-      await uninstallHarness(globalOptions);
-      expect(await exists(hooksJsonPath)).toBe(false);
-    });
-  });
-
   test("uninstall with no manifest is a clean no-op", async () => {
     await withFixture(async (fixture) => {
       const result = await uninstallHarness(
@@ -815,34 +140,230 @@ describe("harness uninstall", () => {
     });
   });
 
-  test("project uninstall removes project codex skill without touching global paths", async () => {
+  test("removes manifest-owned files and only the matching settings entry", async () => {
     await withFixture(async (fixture) => {
-      const projectOptions = harnessOptions(fixture, {
-        tool: "codex",
-        scope: "project",
-      });
-      await installHarness(projectOptions);
+      const ownedPath = join(fixture.agentHome, ".overlearn-agent", "owned.md");
+      const scriptPath = join(fixture.overlearnHome, "hooks", "loop.sh");
+      const settingsPath = join(fixture.agentHome, ".claude", "settings.json");
+      const ownedContent = "# Owned by old setup\n";
+      const scriptContent = "#!/bin/sh\nexit 0\n";
 
-      const projectSkill = join(
-        fixture.projectDir,
-        ".agents",
-        "skills",
-        "learn",
-        "SKILL.md",
+      await writeText(ownedPath, ownedContent);
+      await writeText(scriptPath, scriptContent);
+      await writeText(
+        settingsPath,
+        `${JSON.stringify(
+          {
+            theme: "dark",
+            hooks: {
+              Stop: [
+                {
+                  hooks: [
+                    {
+                      type: "command",
+                      command: `bash '${scriptPath}'`,
+                      timeout: 10,
+                    },
+                  ],
+                },
+                {
+                  hooks: [{ command: "echo user-stop" }],
+                },
+              ],
+            },
+          },
+          null,
+          2,
+        )}\n`,
       );
-      const globalSkill = join(
-        fixture.agentHome,
-        ".agents",
-        "skills",
-        "learn",
-        "SKILL.md",
+      await writeManifest(fixture, [
+        installEntry(fixture, {
+          tool: "claude-code",
+          scope: "global",
+          files: [
+            {
+              path: ownedPath,
+              sha256: sha256(ownedContent),
+              createdDirs: [dirname(ownedPath)],
+            },
+            {
+              path: scriptPath,
+              sha256: sha256(scriptContent),
+              createdDirs: [dirname(scriptPath)],
+            },
+          ],
+          settingsHooks: [
+            {
+              path: settingsPath,
+              scriptPath,
+              command: `bash '${scriptPath}'`,
+              createdFile: false,
+              createdDirs: [dirname(settingsPath)],
+            },
+          ],
+        }),
+      ]);
+
+      const result = await uninstallHarness(
+        harnessOptions(fixture, { tool: "claude-code", scope: "global" }),
       );
-      await writeText(globalSkill, "# Global user skill\n");
+      const output = formatUninstallHarnessResult(result);
 
-      await uninstallHarness(projectOptions);
+      expect(result.nothingToUninstall).toBe(false);
+      expect(output).toContain("removed file");
+      expect(await exists(ownedPath)).toBe(false);
+      expect(await exists(scriptPath)).toBe(false);
 
-      expect(await exists(projectSkill)).toBe(false);
-      expect(await readFile(globalSkill, "utf8")).toBe("# Global user skill\n");
+      const afterSettings = await readJson<{
+        theme: string;
+        hooks: { Stop: Array<unknown> };
+      }>(settingsPath);
+      expect(afterSettings.theme).toBe("dark");
+      expect(afterSettings.hooks.Stop).toHaveLength(1);
+      expect(JSON.stringify(afterSettings)).toContain("echo user-stop");
+      expect(JSON.stringify(afterSettings)).not.toContain(scriptPath);
+
+      const manifest = await readJson<{ installs: unknown[] }>(
+        manifestPath(fixture),
+      );
+      expect(manifest.installs).toEqual([]);
+    });
+  });
+
+  test("leaves changed manifest-owned files unless forced", async () => {
+    await withFixture(async (fixture) => {
+      const options = harnessOptions(fixture, { tool: "codex", scope: "global" });
+      const ownedPath = join(fixture.agentHome, ".overlearn-agent", "owned.md");
+      const original = "# Original\n";
+
+      await writeText(ownedPath, "# User changed content\n");
+      await writeManifest(fixture, [
+        installEntry(fixture, {
+          tool: "codex",
+          scope: "global",
+          files: [
+            {
+              path: ownedPath,
+              sha256: sha256(original),
+              createdDirs: [dirname(ownedPath)],
+            },
+          ],
+        }),
+      ]);
+
+      const kept = await uninstallHarness(options);
+      expect(kept.actions).toContainEqual(
+        expect.objectContaining({
+          path: ownedPath,
+          status: "kept",
+          detail: "content changed since install",
+        }),
+      );
+      expect(await readFile(ownedPath, "utf8")).toBe("# User changed content\n");
+
+      const retained = await readJson<{
+        installs: Array<{ files: Array<{ path: string }>; settingsHooks: unknown[] }>;
+      }>(manifestPath(fixture));
+      expect(retained.installs).toHaveLength(1);
+      expect(retained.installs[0]?.files).toEqual([
+        expect.objectContaining({ path: ownedPath }),
+      ]);
+      expect(retained.installs[0]?.settingsHooks).toEqual([]);
+
+      const forced = await uninstallHarness({ ...options, force: true });
+      expect(forced.actions).toContainEqual(
+        expect.objectContaining({ path: ownedPath, status: "removed" }),
+      );
+      expect(await exists(ownedPath)).toBe(false);
+    });
+  });
+
+  test("keeps files and settings entries still referenced by another install", async () => {
+    await withFixture(async (fixture) => {
+      const sharedPath = join(fixture.overlearnHome, "hooks", "loop.sh");
+      const settingsPath = join(fixture.agentHome, ".codex", "settings.json");
+      const sharedContent = "#!/bin/sh\nexit 0\n";
+      const settingsHook = {
+        path: settingsPath,
+        scriptPath: sharedPath,
+        command: `bash '${sharedPath}'`,
+        createdFile: true,
+        createdDirs: [dirname(settingsPath)],
+      };
+
+      await writeText(sharedPath, sharedContent);
+      await writeText(
+        settingsPath,
+        `${JSON.stringify(
+          {
+            hooks: {
+              Stop: [
+                {
+                  hooks: [{ command: `bash '${sharedPath}'` }],
+                },
+              ],
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      await writeManifest(fixture, [
+        installEntry(fixture, {
+          tool: "codex",
+          scope: "global",
+          files: [
+            {
+              path: sharedPath,
+              sha256: sha256(sharedContent),
+              createdDirs: [dirname(sharedPath)],
+            },
+          ],
+          settingsHooks: [settingsHook],
+        }),
+        installEntry(fixture, {
+          tool: "codex",
+          scope: "project",
+          files: [
+            {
+              path: sharedPath,
+              sha256: sha256(sharedContent),
+              createdDirs: [dirname(sharedPath)],
+            },
+          ],
+          settingsHooks: [settingsHook],
+        }),
+      ]);
+
+      const result = await uninstallHarness(
+        harnessOptions(fixture, { tool: "codex", scope: "global" }),
+      );
+
+      expect(result.actions).toContainEqual(
+        expect.objectContaining({
+          kind: "file",
+          path: sharedPath,
+          status: "kept",
+          detail: "still referenced by another harness install",
+        }),
+      );
+      expect(result.actions).toContainEqual(
+        expect.objectContaining({
+          kind: "settings-hook",
+          path: settingsPath,
+          status: "kept",
+          detail: "still referenced by another harness install",
+        }),
+      );
+      expect(await exists(sharedPath)).toBe(true);
+      expect(JSON.stringify(await readJson(settingsPath))).toContain(sharedPath);
+
+      const manifest = await readJson<{ installs: Array<{ scope: string }> }>(
+        manifestPath(fixture),
+      );
+      expect(manifest.installs).toEqual([
+        expect.objectContaining({ scope: "project" }),
+      ]);
     });
   });
 });
