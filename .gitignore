@@ -6,6 +6,9 @@ dist/
 node_modules/
 registry/.wrangler/
 registry/wrangler.it.*.toml
+src-tauri/bin/learn-*
+src-tauri/gen/
+src-tauri/target/
 
 .env
 .env.*

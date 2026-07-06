@@ -11,10 +11,14 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "bun test src",
-    "build": "bun build --compile ./src/cli/index.ts --outfile ./dist/learn"
+    "build": "bun build --compile ./src/cli/index.ts --outfile ./dist/learn",
+    "app:copy-sidecar": "bun scripts/copy-tauri-sidecar.ts",
+    "app:dev": "bun run build && bun run app:copy-sidecar && tauri dev",
+    "app:build": "bun run build && bun run app:copy-sidecar && tauri build --debug"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@tauri-apps/cli": "2.10.1",
     "bun-types": "1.3.14",
     "eslint": "10.4.0",
     "typescript": "5.9.3",

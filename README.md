@@ -57,6 +57,22 @@ learn start my-course
 
 In your agent, run `/learn`.
 
+## Desktop App
+
+The Tauri desktop shell packages the same compiled `dist/learn` daemon used by
+the CLI release. Build the sidecar first, copy it into Tauri's target-triple
+binary name, then run the debug bundle:
+
+```sh
+bun run app:build
+```
+
+The launcher stores selected course directories and optional per-course working
+directories in the Tauri app config file (`app.json` under the platform app
+config directory). The working directory is persisted for future orchestration;
+the current daemon still runs through the existing `learn resume <course>`
+command.
+
 ## Registry
 
 The course registry Worker lives in `registry/` and is local-first while R2 enablement is pending:
