@@ -47,7 +47,6 @@ const POLL_MS = 500;
 const COURSE_NAME = "rule-of-72-partial";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const pluginDir = join(repoRoot, "plugin");
 const learnBinary = join(repoRoot, "dist", "learn");
 const fixtureDir = join(repoRoot, "test", "agent-e2e", "fixtures", COURSE_NAME);
 
@@ -323,6 +322,8 @@ const createEnv = (
   env["OVERLEARN_BIN"] = learnBinary;
   env["OVERLEARN_COURSES_DIR"] = coursesDir;
   env["OVERLEARN_NO_BROWSER"] = "1";
+  // TODO(DEV-547): Move this live-agent suite to daemon-orchestrated turns.
+  env["OVERLEARN_ORCHESTRATED"] = "0";
   env["NO_COLOR"] = "1";
   env["PATH"] = `${binDir}:${env["PATH"] ?? ""}`;
   delete env["FORCE_COLOR"];
@@ -523,9 +524,9 @@ const main = async (): Promise<void> => {
     const initialEntries = await readTranscriptEntries(courseDir);
     const env = createEnv(coursesDir, binDir, homeDir);
     const prompt = [
-      `/learn --resume ${COURSE_NAME}`,
+      `Use the \`learn\` CLI directly and run \`learn resume ${COURSE_NAME}\`.`,
       "This is a fresh headless session. Rebuild course context only from disk.",
-      "After your resume greeting, wait for me.",
+      `Send the resume greeting with \`learn say ${COURSE_NAME} --text <markdown>\`, then run \`learn wait ${COURSE_NAME}\` and wait for me.`,
       "When I reply exactly 'yes, continue', teach one tiny next step and then end the session without waiting again.",
     ].join(" ");
 
@@ -534,8 +535,6 @@ const main = async (): Promise<void> => {
         "-p",
         "--dangerously-skip-permissions",
         "--no-session-persistence",
-        "--plugin-dir",
-        pluginDir,
         "--model",
         MODEL,
         "--max-budget-usd",

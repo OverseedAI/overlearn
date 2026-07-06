@@ -16,7 +16,7 @@ describe("runCli", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("learn say [name] --text <markdown>");
     expect(result.stdout).toContain("learn instructions [name] [--json]");
-    expect(result.stdout).toContain("learn install <claude-code|codex>");
+    expect(result.stdout).not.toMatch(/learn\s+install\b/);
     expect(result.stdout).toContain("learn uninstall <claude-code|codex>");
     expect(result.stdout).toContain("learn status [name] --json");
     expect(result.stdout).toContain("learn resume <name>");
@@ -159,23 +159,29 @@ describe("runCli", () => {
     });
   });
 
-  test("parses harness install and uninstall commands", () => {
+  test("rejects removed harness install command", () => {
+    expect(parseCli(["install"], "1.2.3")).toEqual({
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: "",
+        stderr:
+          "Overlearn now drives the agent directly; install is no longer needed.",
+      },
+    });
+
     expect(parseCli(["install", "claude-code"], "1.2.3")).toEqual({
-      kind: "install",
-      tool: "claude-code",
-      project: false,
-      force: false,
+      kind: "result",
+      result: {
+        exitCode: 1,
+        stdout: "",
+        stderr:
+          "Overlearn now drives the agent directly; install is no longer needed.",
+      },
     });
+  });
 
-    expect(
-      parseCli(["install", "codex", "--project", "--force"], "1.2.3"),
-    ).toEqual({
-      kind: "install",
-      tool: "codex",
-      project: true,
-      force: true,
-    });
-
+  test("parses harness uninstall commands", () => {
     expect(
       parseCli(["uninstall", "claude-code", "--project", "--force"], "1.2.3"),
     ).toEqual({
@@ -187,24 +193,6 @@ describe("runCli", () => {
   });
 
   test("rejects invalid harness commands", () => {
-    expect(parseCli(["install"], "1.2.3")).toEqual({
-      kind: "result",
-      result: {
-        exitCode: 1,
-        stdout: expect.stringContaining("learn install <claude-code|codex>"),
-        stderr: "Usage: learn install <claude-code|codex> [--project] [--force]",
-      },
-    });
-
-    expect(parseCli(["install", "vim"], "1.2.3")).toEqual({
-      kind: "result",
-      result: {
-        exitCode: 1,
-        stdout: expect.stringContaining("learn install <claude-code|codex>"),
-        stderr: "Unknown tool for install: vim. Expected claude-code or codex.",
-      },
-    });
-
     expect(parseCli(["uninstall", "codex", "--unknown"], "1.2.3")).toEqual({
       kind: "result",
       result: {

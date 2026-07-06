@@ -11,9 +11,7 @@ import {
   formatInstructionsJson,
 } from "../instructions";
 import {
-  formatInstallHarnessResult,
   formatUninstallHarnessResult,
-  installHarness,
   uninstallHarness,
 } from "../harness";
 import {
@@ -210,8 +208,8 @@ const main = async (): Promise<CliResult> => {
     const course = basename(turn.courseDir);
 
     // Crit-style wake-time re-prompt: restate the loop discipline at the
-    // moment the agent resumes, instead of trusting skill text from earlier
-    // turns. Stdout stays machine-readable (the turn.json path only).
+    // moment the agent resumes, instead of trusting stale prompt text from
+    // earlier turns. Stdout stays machine-readable (the turn.json path only).
     return {
       exitCode: 0,
       stdout: turn.turnPath,
@@ -254,19 +252,6 @@ const main = async (): Promise<CliResult> => {
     return {
       exitCode: 0,
       stdout: formatEjectInstructionModules(modules),
-    };
-  }
-
-  if (command.kind === "install") {
-    const result = await installHarness({
-      tool: command.tool,
-      scope: command.project ? "project" : "global",
-      force: command.force,
-    });
-
-    return {
-      exitCode: 0,
-      stdout: formatInstallHarnessResult(result),
     };
   }
 

@@ -10,6 +10,7 @@ import {
   buildCoursePermissionPolicy,
   buildTurnPrompt,
   nestedSessionEnvOverride,
+  orchestratedTurnsEnabled,
   parseHarnessCommand,
   resolveHarnessAdapter,
   resolveTurnTimeoutMs,
@@ -625,6 +626,15 @@ describe("daemon turn orchestration helpers", () => {
   test("uses a generous default turn timeout and accepts env override", () => {
     expect(resolveTurnTimeoutMs({})).toBe(600_000);
     expect(resolveTurnTimeoutMs({ OVERLEARN_TURN_TIMEOUT_MS: "25" })).toBe(25);
+  });
+
+  test("enables orchestrated turns unless explicitly opted out", () => {
+    expect(orchestratedTurnsEnabled({})).toBe(true);
+    expect(orchestratedTurnsEnabled({ OVERLEARN_ORCHESTRATED: "1" })).toBe(true);
+    expect(orchestratedTurnsEnabled({ OVERLEARN_ORCHESTRATED: "true" })).toBe(true);
+    expect(orchestratedTurnsEnabled({ OVERLEARN_ORCHESTRATED: "0" })).toBe(false);
+    expect(orchestratedTurnsEnabled({ OVERLEARN_ORCHESTRATED: "false" })).toBe(false);
+    expect(orchestratedTurnsEnabled({ OVERLEARN_ORCHESTRATED: "FALSE" })).toBe(false);
   });
 
   test("prefers course harness selection over env selection", () => {

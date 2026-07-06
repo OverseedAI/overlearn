@@ -71,6 +71,7 @@ const testEnv = (coursesDir: string): Record<string, string> => {
 
   env["OVERLEARN_COURSES_DIR"] = coursesDir;
   env["OVERLEARN_NO_BROWSER"] = "1";
+  env["OVERLEARN_ORCHESTRATED"] = "0";
   env["NO_COLOR"] = "1";
   delete env["FORCE_COLOR"];
 

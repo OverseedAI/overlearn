@@ -76,7 +76,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 export const orchestratedTurnsEnabled = (env: Env = process.env): boolean =>
-  env["OVERLEARN_ORCHESTRATED"] === "1";
+  !["0", "false"].includes(
+    env["OVERLEARN_ORCHESTRATED"]?.trim().toLowerCase() ?? "",
+  );
 
 const parsePositiveInteger = (
   value: string | undefined,

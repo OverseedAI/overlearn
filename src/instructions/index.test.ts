@@ -55,9 +55,10 @@ describe("instructions", () => {
     expect(text).toContain("## module: protocol");
     expect(text).toContain("## module: demos");
     expect(text).toContain("## module: grading");
-    expect(text).toContain("learn wait <course>");
+    expect(text).toContain("The daemon injects this protocol");
+    expect(text).toContain("learn say <course>");
     expect(text).toContain('{"type":"session-done"}');
-    expect(text).toContain("learn stop <course>");
+    expect(text).toContain("The daemon will close the harness session");
   });
 
   test("formats JSON with module metadata and assembled text", () => {

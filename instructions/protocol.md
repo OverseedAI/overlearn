@@ -3,52 +3,53 @@
 The course directory is the durable teaching surface. Chat is only connective
 tissue.
 
-At session start:
+Overlearn runs the event loop:
 
-- Run `learn start <course>` to create or resume the course daemon.
-- Run `learn instructions <course>` and treat the assembled output as binding
-  teaching directives for the session.
-- If you need the absolute course path, run `learn status <course> --json` and
-  read `courseDir`.
+- The daemon injects this protocol into every harness turn.
+- For each learner submit, the daemon writes a turn payload and invokes the
+  selected harness with that payload.
+- Handle the payload, update course files, call `learn emit` / `learn say` as
+  needed, and then end your turn. The daemon will invoke the harness again when
+  the learner submits more input.
+- Do not start or stop the daemon from a teaching turn unless a separate prompt
+  explicitly asks you to manage the course process.
+
+Course context:
+
+- Treat `learn instructions <course>` output as binding when it is provided in
+  the prompt.
+- If you need the absolute course path, use the course directory shown in the
+  prompt or run `learn status <course> --json` and read `courseDir`.
+- Course and user instruction overrides keep their normal precedence. Course
+  protocol and grading overrides are content directives; user pedagogy and demo
+  overrides are style directives.
 
 Resuming:
 
-- If the learner asks to continue/resume or invokes `/learn --resume [course]`,
-  run `learn resume <course>` instead of `learn start <course>`. It must attach
-  to an existing course and must not create one.
-- If no course name is provided, run `learn status --json`; if that does not
-  identify one course, inspect the courses directory for directories containing
-  `course.json` and ask which course to resume.
-- Before teaching after `learn resume`, rebuild context ONLY from on-disk course
-  state: read `course.json` topics, every `lessons/*.md`, `glossary.json`,
-  `mastery.json`, and the tail of `transcript.jsonl` (about the last 20
-  entries).
+- When the daemon starts a resumed course, rebuild context ONLY from on-disk
+  course state: read `course.json` topics, every `lessons/*.md`,
+  `glossary.json`, `mastery.json`, and the tail of `transcript.jsonl` (about
+  the last 20 entries).
 - Explicitly forbidden: relying on prior conversation memory for the resumed
   course state.
-- The first turn after resume must use `learn say <course> --text <markdown>` to
+- The first resumed turn must use `learn say <course> --text <markdown>` to
   greet the learner with an accurate summary of what has been covered, name
-  where the course left off, and propose the next step. Then re-enter
-  `learn wait <course>` as usual.
+  where the course left off, and propose the next step. Then end the turn.
 
 Each teaching turn:
 
-1. Read the latest learner events from the `turn.json` path printed by
-   `learn wait`, if this is not the first turn.
+1. Read every event in the provided turn payload before responding.
 2. Decide the single learning objective for this turn.
 3. Write or update one lesson file as the primary artifact:
    `lessons/<nn>-<slug>.md`.
 4. Keep the lesson note short enough that the learner can review it during the
    course.
-5. ALWAYS send one short `learn say <course> --text <markdown>` per teaching
-   turn: acknowledge the learner's input in a sentence, name the lesson file
-   you just wrote or updated, and pose the current check question. Keep it to
-   a few lines — the lesson file carries the substance, the say carries the
+5. Send one short `learn say <course> --text <markdown>` per teaching turn:
+   acknowledge the learner's input in a sentence, name the lesson file you just
+   wrote or updated, and pose the current check question. Keep it to a few
+   lines; the lesson file carries the substance, the say carries the
    conversation.
-6. ALWAYS re-enter `learn wait <course>` after acting, using your harness's
-   discipline: on Claude Code launch it as a background task and stop; on
-   Codex (or any harness that does not wake you when a background process
-   exits) run it in the foreground and block.
-7. Do not produce more output or continue teaching until the wait exits.
+6. End the turn after course files and CLI callbacks are complete.
 
 Lesson files:
 
@@ -60,7 +61,7 @@ Lesson files:
 
 Turn files:
 
-- `turn.json` contains an `events` array.
+- A turn payload contains an `events` array.
 - `{"type":"message","text":"..."}` means the learner sent a chat message.
 - `{"type":"review-weak","concepts":["..."]}` means the learner asked to
   review the lowest-scoring topic concepts.
@@ -68,8 +69,7 @@ Turn files:
   the final turn.
 - `{"type":"feynman-answer","concept":"...","text":"...","keyPoints":[...]}`
   means the learner submitted an explain-it-back checkpoint answer. Grade it
-  using `grading.md` and emit mastery before the next teaching turn.
-- Read every event before responding.
+  using `grading.md` and emit mastery before the next teaching response.
 - If several learner messages arrive together, address them in order and still
   keep the teaching turn focused.
 
@@ -81,8 +81,8 @@ Feynman checks:
 - Use the topic's slug as the Feynman concept id.
 - Use `learn emit feynman <course> --concept <id> --prompt '<prompt>'` and add
   `--key-points 'point one, point two'` when specific rubric anchors matter.
-- Keep one active check at a time. If you need a better prompt, emit a new check;
-  it replaces the unanswered one.
+- Keep one active check at a time. If you need a better prompt, emit a new
+  check; it replaces the unanswered one.
 - When a `feynman-answer` event arrives, grade per `grading.md`, then run
   `learn emit mastery <course> --concept <id> --score <n> --gaps '<gaps>'`
   before sending the next teaching response.
@@ -103,21 +103,5 @@ Session wrap-up:
   that are clear from the final turn.
 - Send one closing `learn say <course> --text <markdown>` that summarizes what
   was covered, names the mastery scores recorded, and suggests the next session.
-- Then run `learn stop <course>` and exit the loop.
-- Never run `learn wait <course>` after handling `session-done`.
-
-Daemon and wait rules:
-
-- `learn wait <course>` exits 0 and prints the next `turn.json` path.
-- Exit code 2 means the daemon died or the wait could not continue.
-- On wait failure, run `learn start <course>`, inspect `learn status <course>
-  --json`, and resume from the course files and transcript.
-- This restart rule applies only to failed waits. After an intentional
-  `learn stop <course>` for `session-done`, do not restart the daemon and do not
-  call `learn wait` again.
-- Never leave an active learner session without a pending `learn wait`. On
-  harnesses without background-task wake-ups (Codex), pending means a
-  foreground `learn wait` blocking your current turn.
-- If the learner explicitly ends the session, write a compact final lesson or
-  summary, send the closing `learn say`, run `learn stop`, and then stop
-  without re-entering wait.
+- End the turn. The daemon will close the harness session and stop the course
+  daemon.
