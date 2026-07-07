@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { chmod, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -97,6 +97,22 @@ const createCourse = async (
   return (await response.json()) as CourseResource;
 };
 
+const createFakeLoginCommand = async (binDir: string): Promise<string> => {
+  const path = join(binDir, "fake-login");
+  await writeFile(
+    path,
+    [
+      "#!/bin/sh",
+      "printf '{\"event\":\"login-spawn\",\"harness\":\"%s\",\"command\":\"%s\",\"argv\":\"%s\"}\\n' \"$OVERLEARN_LOGIN_HARNESS_ID\" \"$OVERLEARN_LOGIN_COMMAND\" \"$*\" >> \"$OVERLEARN_LOGIN_SPAWN_LOG\"",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await chmod(path, 0o755);
+
+  return path;
+};
+
 const courseState = async (
   daemon: StartedContractDaemon,
   courseId: number,
@@ -135,6 +151,160 @@ afterEach(async () => {
 });
 
 describe(`daemon contract (${runtime.name})`, () => {
+  contractTest(
+    "enforces onboarding transitions and patches settings profile fields",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+
+      const unauthenticated = await fetch(`${daemon.url}/api/onboarding`);
+      expect(unauthenticated.status).toBe(401);
+
+      const initial = (await (
+        await authFetch(daemon, "/api/onboarding")
+      ).json()) as Record<string, unknown>;
+      expect(initial).toMatchObject({ state: "welcome" });
+
+      const illegal = await authFetch(daemon, "/api/onboarding", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ state: "done" }),
+      });
+      expect(illegal.status).toBe(409);
+      await expect(illegal.text()).resolves.toContain(
+        "Illegal onboarding transition",
+      );
+
+      const connect = await authFetch(daemon, "/api/onboarding", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ state: "connect-agent" }),
+      });
+      expect(connect.status).toBe(200);
+      await expect(connect.json()).resolves.toMatchObject({
+        state: "connect-agent",
+      });
+
+      const profilePatch = await authFetch(daemon, "/api/profile", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Hal",
+          preferredHarness: "codex",
+          settings: { tutorialChoice: "later" },
+        }),
+      });
+      expect(profilePatch.status).toBe(200);
+      await expect(profilePatch.json()).resolves.toMatchObject({
+        name: "Hal",
+        preferredHarness: "codex",
+        settings: { tutorialChoice: "later" },
+        dataDir: daemon.dataDir,
+      });
+
+      const tutorialOffer = await authFetch(daemon, "/api/onboarding", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ state: "tutorial-offer" }),
+      });
+      expect(tutorialOffer.status).toBe(200);
+
+      const done = await authFetch(daemon, "/api/onboarding", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ state: "done" }),
+      });
+      expect(done.status).toBe(200);
+      await expect(done.json()).resolves.toMatchObject({ state: "done" });
+
+      const rerun = await authFetch(daemon, "/api/onboarding", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ state: "welcome" }),
+      });
+      expect(rerun.status).toBe(200);
+      await expect(rerun.json()).resolves.toMatchObject({ state: "welcome" });
+    },
+    15_000,
+  );
+
+  contractTest(
+    "returns manual login for interactive agents and spawns browser OAuth login through the seam",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const fakeHarness = await withFakeHarnessPath();
+      const fakeLogin = await createFakeLoginCommand(fakeHarness.binDir);
+      const loginLogPath = join(fakeHarness.binDir, "login.jsonl");
+      const daemon = await start({
+        extraEnv: {
+          PATH: fakeHarness.path,
+          OVERLEARN_HARNESS_LOGIN_CMD: JSON.stringify([fakeLogin, "--fake"]),
+          OVERLEARN_LOGIN_SPAWN_LOG: loginLogPath,
+        },
+      });
+
+      try {
+        const unauthenticated = await fetch(
+          `${daemon.url}/api/harnesses/codex/login`,
+          { method: "POST" },
+        );
+        expect(unauthenticated.status).toBe(401);
+
+        const manual = await authFetch(
+          daemon,
+          "/api/harnesses/claude-code/login",
+          { method: "POST" },
+        );
+        expect(manual.status).toBe(200);
+        await expect(manual.json()).resolves.toMatchObject({
+          manual: true,
+          spawned: false,
+          command: "claude",
+        });
+
+        const spawned = await authFetch(daemon, "/api/harnesses/codex/login", {
+          method: "POST",
+        });
+        expect(spawned.status).toBe(200);
+        await expect(spawned.json()).resolves.toMatchObject({
+          manual: false,
+          spawned: true,
+          command: "codex login",
+        });
+
+        const entries = await waitForLogEntries(
+          loginLogPath,
+          (logs) =>
+            logs.some(
+              (entry) =>
+                entry["event"] === "login-spawn" &&
+                entry["harness"] === "codex" &&
+                entry["command"] === "codex login" &&
+                entry["argv"] === "--fake",
+            ),
+          "login spawn log",
+        );
+        expect(entries).toContainEqual(
+          expect.objectContaining({
+            event: "login-spawn",
+            harness: "codex",
+            command: "codex login",
+            argv: "--fake",
+          }),
+        );
+      } finally {
+        await rm(fakeHarness.binDir, { force: true, recursive: true });
+      }
+    },
+    15_000,
+  );
+
   contractTest(
     "starts app-level, creates/lists courses, streams an MCP-backed turn, and exposes store state",
     async () => {

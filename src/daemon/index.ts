@@ -6,10 +6,15 @@ import {
   type ServerResponse,
 } from "node:http";
 import { dirname, join } from "node:path";
+import { spawn as spawnChildProcess } from "node:child_process";
 
 import packageJson from "../../package.json";
-import { listHarnessAdapters } from "../adapter/registry";
-import type { AdapterDetection } from "../adapter/types";
+import {
+  getHarnessAdapterDefinition,
+  listHarnessAdapters,
+  type HarnessCommand,
+} from "../adapter/registry";
+import type { AdapterDetection, HarnessAdapterId } from "../adapter/types";
 import {
   appendTranscriptEntry,
   appendTurnEvents,
@@ -19,6 +24,7 @@ import {
   flattenTopicTree,
   getActiveFeynmanCheck,
   getCourse,
+  getProfile,
   getStoreDataDir,
   listCourses,
   listDemos,
@@ -27,6 +33,7 @@ import {
   listLessons,
   openStore,
   pageTranscript,
+  patchProfile,
   patchCourse,
   readTopicTree,
   startSession,
@@ -37,6 +44,7 @@ import {
   type GlossaryEntry as StoreGlossaryEntry,
   type Lesson,
   type MasteryEvent,
+  type Profile,
   type Store,
   type Topic,
   type TranscriptEntry as StoreTranscriptEntry,
@@ -91,6 +99,7 @@ type DaemonMetadata = Readonly<{
 
 export type RunDaemonOptions = Readonly<{
   portFile?: string;
+  harnessLoginSpawner?: (input: HarnessLoginSpawnInput) => void;
 }>;
 
 type UiStatus =
@@ -114,12 +123,42 @@ type HarnessSummary = Readonly<{
   authenticated: boolean;
   version?: string;
   selected: boolean;
+  login: Readonly<{
+    command: string;
+    manual: boolean;
+    note: string;
+  }>;
+  install: Readonly<{
+    command: string;
+    docsUrl: string;
+  }>;
 }>;
 
 type HarnessesPayload = Readonly<{
   courseId?: number;
   harnesses: readonly HarnessSummary[];
   switched: boolean;
+}>;
+
+type OnboardingState = "welcome" | "connect-agent" | "tutorial-offer" | "done";
+
+type ProfileResource = Readonly<{
+  name: string | null;
+  onboardingState: OnboardingState;
+  settings: Record<string, unknown>;
+  preferredHarness: string | null;
+  dataDir: string;
+  createdAt: string;
+  updatedAt: string;
+}>;
+
+type HarnessLoginSpawnInput = Readonly<{
+  harnessId: string;
+  command: string;
+  args: readonly string[];
+  displayCommand: string;
+  cwd: string;
+  env: Record<string, string>;
 }>;
 
 type CourseRuntime = {
@@ -154,10 +193,31 @@ type CoursePatchDraft = {
   status?: StoreCourseStatus;
 };
 
+type ProfilePatchDraft = {
+  name?: string | null;
+  onboardingState?: string;
+  settings?: Record<string, unknown>;
+  preferredHarness?: string | null;
+};
+
 const LOCALHOST_BIND_HOST = "127.0.0.1";
 const DAEMON_AUTH_COOKIE = "overlearn_daemon_token";
 const DEFAULT_HARNESS_ID = "claude-code";
 const MAX_AGENT_STREAM_REPLAY = 200;
+const onboardingStates: readonly OnboardingState[] = [
+  "welcome",
+  "connect-agent",
+  "tutorial-offer",
+  "done",
+];
+const legalOnboardingTransitions: Readonly<
+  Record<OnboardingState, readonly OnboardingState[]>
+> = {
+  welcome: ["welcome", "connect-agent"],
+  "connect-agent": ["connect-agent", "tutorial-offer"],
+  "tutorial-offer": ["tutorial-offer", "done"],
+  done: ["done", "welcome"],
+};
 
 const jsonResponse = (value: unknown, init?: ResponseInit): Response =>
   new Response(JSON.stringify(value), {
@@ -192,8 +252,40 @@ const escapeHtml = (value: string): string =>
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 
+const formatCommand = (command: HarnessCommand): string =>
+  [command.command, ...command.args].join(" ");
+
 const formatDaemonUrl = (port: number, path: string): string =>
   `http://${LOCALHOST_BIND_HOST}:${port}${path}`;
+
+const isOnboardingState = (value: unknown): value is OnboardingState =>
+  typeof value === "string" &&
+  onboardingStates.includes(value as OnboardingState);
+
+const normalizeOnboardingState = (value: string): OnboardingState =>
+  isOnboardingState(value) ? value : "welcome";
+
+export const isLegalOnboardingTransition = (
+  current: string,
+  next: string,
+): boolean => {
+  const normalizedCurrent = normalizeOnboardingState(current);
+  if (!isOnboardingState(next)) {
+    return false;
+  }
+
+  return legalOnboardingTransitions[normalizedCurrent].includes(next);
+};
+
+const profileResource = (profile: Profile, dataDir: string): ProfileResource => ({
+  name: profile.name,
+  onboardingState: normalizeOnboardingState(profile.onboardingState),
+  settings: { ...profile.settings },
+  preferredHarness: profile.preferredHarness,
+  dataDir,
+  createdAt: profile.createdAt,
+  updatedAt: profile.updatedAt,
+});
 
 export const daemonMetadataPath = (env: Env = process.env): string =>
   join(getStoreDataDir(env), "daemon.json");
@@ -476,6 +568,22 @@ const optionalStringField = (
   return value;
 };
 
+const optionalRecordField = (
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | undefined => {
+  if (!Object.hasOwn(record, key)) {
+    return undefined;
+  }
+
+  const value = record[key];
+  if (!isRecord(value)) {
+    throw new Error(`${key} must be an object.`);
+  }
+
+  return value;
+};
+
 const requiredStringField = (
   record: Record<string, unknown>,
   key: string,
@@ -486,6 +594,62 @@ const requiredStringField = (
   }
 
   return value;
+};
+
+const parseCommandOverride = (value: string, name: string): readonly string[] => {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new Error(`${name} cannot be empty.`);
+  }
+
+  if (trimmed.startsWith("[")) {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length === 0 ||
+      !parsed.every((entry) => typeof entry === "string" && entry.length > 0)
+    ) {
+      throw new Error(`${name} JSON must be a non-empty string array.`);
+    }
+
+    return parsed;
+  }
+
+  const parts = trimmed.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+  const tokens = parts.map((part) =>
+    part.replace(/^(['"])([\s\S]*)\1$/, "$2"),
+  );
+  if (tokens.length === 0) {
+    throw new Error(`${name} cannot be empty.`);
+  }
+
+  return tokens;
+};
+
+const defaultHarnessLoginSpawner = (input: HarnessLoginSpawnInput): void => {
+  const child = spawnChildProcess(input.command, [...input.args], {
+    cwd: input.cwd,
+    detached: true,
+    env: input.env,
+    stdio: "ignore",
+  });
+  child.unref();
+};
+
+const mergeStringEnv = (...envs: readonly Env[]): Record<string, string> => {
+  const merged: Record<string, string> = {};
+
+  for (const source of envs) {
+    for (const [key, value] of Object.entries(source)) {
+      if (value === undefined) {
+        delete merged[key];
+      } else {
+        merged[key] = value;
+      }
+    }
+  }
+
+  return merged;
 };
 
 const parseCourseStatus = (value: string | null): StoreCourseStatus | undefined => {
@@ -731,70 +895,6 @@ const courseState = (store: Store, courseId: number): Record<string, unknown> | 
   };
 };
 
-const renderCoursePicker = (courses: readonly Course[]): Response => {
-  const rows =
-    courses.length === 0
-      ? '<p class="empty">No courses yet.</p>'
-      : `<ul>${courses
-          .map(
-            (course) =>
-              `<li><a href="/?course=${course.id}">${escapeHtml(course.title)}</a><span>${escapeHtml(course.status)}</span></li>`,
-          )
-          .join("")}</ul>`;
-
-  return new Response(
-    `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>overlearn</title>
-  <style>
-    body { margin: 0; min-height: 100vh; font: 16px system-ui, sans-serif; background: #11110f; color: #ece8dc; }
-    main { width: min(44rem, calc(100vw - 2rem)); margin: 0 auto; padding: 3rem 0; }
-    h1 { font-size: 1.6rem; margin: 0 0 1.5rem; }
-    ul { list-style: none; padding: 0; display: grid; gap: .5rem; }
-    li { display: flex; justify-content: space-between; gap: 1rem; border: 1px solid #33362d; border-radius: 8px; padding: .85rem 1rem; }
-    a { color: #dcefc7; text-decoration: none; font-weight: 700; }
-    span, .empty { color: #aaa493; }
-    form { display: grid; gap: .65rem; margin-top: 2rem; }
-    input, button { font: inherit; border-radius: 8px; border: 1px solid #33362d; padding: .75rem .85rem; }
-    input { background: #1a1b18; color: #ece8dc; }
-    button { background: #8fbf73; color: #11110f; border: 0; font-weight: 700; cursor: pointer; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>overlearn courses</h1>
-    ${rows}
-    <form id="create-course">
-      <input name="title" placeholder="New course title" required>
-      <button type="submit">Create course</button>
-    </form>
-  </main>
-  <script>
-    document.querySelector("#create-course").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const title = new FormData(event.currentTarget).get("title");
-      const response = await fetch("/api/courses", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title })
-      });
-      if (response.ok) {
-        const created = await response.json();
-        location.href = "/?course=" + created.id;
-      }
-    });
-  </script>
-</body>
-</html>`,
-    {
-      headers: { "content-type": "text/html; charset=utf-8" },
-    },
-  );
-};
-
 const selectedHarnessId = (
   store: Store,
   courseId: number | undefined,
@@ -807,7 +907,10 @@ const selectedHarnessId = (
     }
   }
 
-  return env["OVERLEARN_HARNESS"] ?? DEFAULT_HARNESS_ID;
+  const profile = getProfile(store);
+  return (
+    profile.preferredHarness ?? env["OVERLEARN_HARNESS"] ?? DEFAULT_HARNESS_ID
+  );
 };
 
 const detectHarnesses = (): Map<string, AdapterDetection> => {
@@ -834,10 +937,14 @@ const harnessSummaries = (
   const selected = selectedHarnessId(store, courseId, env);
 
   return listHarnessAdapters().map((adapter) => {
+    const definition = getHarnessAdapterDefinition(adapter.id);
     const detection = cache.value?.get(adapter.id) ?? {
       installed: false,
       authenticated: false,
     };
+    if (definition === undefined) {
+      throw new Error(`Missing harness adapter definition: ${adapter.id}`);
+    }
 
     return {
       id: adapter.id,
@@ -846,6 +953,15 @@ const harnessSummaries = (
       authenticated: detection.authenticated,
       ...(detection.version === undefined ? {} : { version: detection.version }),
       selected: adapter.id === selected,
+      login: {
+        command: formatCommand(definition.loginCommand),
+        manual: definition.loginCommand.interactive,
+        note: definition.loginCommand.note,
+      },
+      install: {
+        command: formatCommand(definition.install),
+        docsUrl: definition.install.docsUrl,
+      },
     };
   });
 };
@@ -903,6 +1019,20 @@ const routeCourseRequest = (
   };
 };
 
+const routeHarnessLoginRequest = (path: string): string | undefined => {
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  if (
+    segments.length !== 4 ||
+    segments[0] !== "api" ||
+    segments[1] !== "harnesses" ||
+    segments[3] !== "login"
+  ) {
+    return undefined;
+  }
+
+  return segments[2] === undefined ? undefined : decodeURIComponent(segments[2]);
+};
+
 const demoResponse = (store: Store, courseId: number, file: string): Response => {
   const demo = listDemos(store, courseId).find((candidate) => demoKey(candidate) === file);
   if (demo === undefined) {
@@ -943,10 +1073,29 @@ export const runDaemon = async (
   const activeTurnByCourse = new Map<number, number>();
   const agentStreamReplay: AgentStreamPayload[] = [];
   const harnessDetectionCache: { value?: Map<string, AdapterDetection> } = {};
+  const harnessLoginSpawner =
+    options.harnessLoginSpawner ?? defaultHarnessLoginSpawner;
   let runtime: CourseRuntime | undefined;
   let activeCourseId: number | undefined;
   let port = 0;
   let shuttingDown = false;
+
+  const readProfileResource = (): ProfileResource => {
+    const profile = getProfile(store);
+    const normalized = normalizeOnboardingState(profile.onboardingState);
+    if (profile.onboardingState !== normalized) {
+      return profileResource(
+        patchProfile(store, { onboardingState: normalized }),
+        store.dataDir,
+      );
+    }
+
+    return profileResource(profile, store.dataDir);
+  };
+
+  const patchProfileResource = (
+    patch: ProfilePatchDraft,
+  ): ProfileResource => profileResource(patchProfile(store, patch), store.dataDir);
 
   const statusForCourse = (courseId: number): UiStatusPayload =>
     statuses.get(courseId) ?? {
@@ -1155,7 +1304,10 @@ export const runDaemon = async (
       cwd: store.dataDir,
       mcpBaseUrl,
       env,
-      getHarnessId: () => getCourse(store, course.id)?.harnessId ?? undefined,
+      getHarnessId: () => {
+        const harnessId = getCourse(store, course.id)?.harnessId;
+        return harnessId ?? getProfile(store).preferredHarness ?? undefined;
+      },
       onAgentEvent,
       registerTeachingSession,
       unregisterTeachingSession,
@@ -1363,6 +1515,177 @@ export const runDaemon = async (
     }
 
     return emptyResponse(405);
+  };
+
+  const parsePreferredHarness = (
+    value: string | null | undefined,
+  ): string | null | undefined => {
+    if (value === undefined || value === null) {
+      return value;
+    }
+
+    const adapter = listHarnessAdapters().find(
+      (candidate) => candidate.id === value,
+    );
+    if (adapter === undefined) {
+      throw new Error(`Unknown harness adapter: ${value}`);
+    }
+
+    return value;
+  };
+
+  const handleProfileApi = async (request: Request): Promise<Response> => {
+    if (request.method === "GET") {
+      return jsonResponse(readProfileResource());
+    }
+
+    if (request.method !== "PATCH") {
+      return emptyResponse(405);
+    }
+
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      return textResponse("Profile patch must be an object.", 400);
+    }
+
+    try {
+      const patch: ProfilePatchDraft = {};
+
+      if (Object.hasOwn(body, "name")) {
+        const name = optionalStringField(body, "name");
+        if (name !== undefined) {
+          patch.name = name;
+        }
+      }
+
+      if (Object.hasOwn(body, "settings")) {
+        const settings = optionalRecordField(body, "settings");
+        if (settings !== undefined) {
+          patch.settings = settings;
+        }
+      }
+
+      if (Object.hasOwn(body, "preferredHarness")) {
+        const preferredHarness = parsePreferredHarness(
+          optionalStringField(body, "preferredHarness"),
+        );
+        if (preferredHarness !== undefined) {
+          patch.preferredHarness = preferredHarness;
+        }
+      }
+
+      const profile = patchProfileResource(patch);
+      sseHub.broadcast("harnesses", harnessesPayload(activeCourseId, false, true));
+      return jsonResponse(profile);
+    } catch (error) {
+      return textResponse(
+        error instanceof Error ? error.message : "Invalid profile patch.",
+        400,
+      );
+    }
+  };
+
+  const handleOnboardingApi = async (request: Request): Promise<Response> => {
+    if (request.method === "GET") {
+      const profile = readProfileResource();
+      return jsonResponse({ state: profile.onboardingState, profile });
+    }
+
+    if (request.method !== "POST") {
+      return emptyResponse(405);
+    }
+
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      return textResponse("Onboarding body must be an object.", 400);
+    }
+
+    const state = body["state"];
+    if (!isOnboardingState(state)) {
+      return textResponse(
+        "state must be welcome, connect-agent, tutorial-offer, or done.",
+        400,
+      );
+    }
+
+    const current = readProfileResource().onboardingState;
+    if (!isLegalOnboardingTransition(current, state)) {
+      return textResponse(
+        `Illegal onboarding transition: ${current} -> ${state}.`,
+        409,
+      );
+    }
+
+    const profile = patchProfileResource({ onboardingState: state });
+    return jsonResponse({ state: profile.onboardingState, profile });
+  };
+
+  const handleHarnessLoginApi = (harnessId: string): Response => {
+    const definition = getHarnessAdapterDefinition(harnessId as HarnessAdapterId);
+    if (definition === undefined) {
+      return textResponse(`Unknown harness adapter: ${harnessId}`, 404);
+    }
+
+    const [summary] = harnessSummaries(
+      store,
+      activeCourseId,
+      env,
+      harnessDetectionCache,
+      true,
+    ).filter((candidate) => candidate.id === definition.id);
+    if (summary?.installed !== true) {
+      return textResponse(`${definition.name} is not installed.`, 409);
+    }
+
+    const displayCommand = formatCommand(definition.loginCommand);
+    if (definition.loginCommand.interactive) {
+      return jsonResponse({
+        manual: true,
+        spawned: false,
+        command: displayCommand,
+        note: definition.loginCommand.note,
+      });
+    }
+
+    try {
+      const override = env["OVERLEARN_HARNESS_LOGIN_CMD"];
+      const commandLine =
+        override === undefined
+          ? [definition.loginCommand.command, ...definition.loginCommand.args]
+          : parseCommandOverride(override, "OVERLEARN_HARNESS_LOGIN_CMD");
+      const [command, ...args] = commandLine;
+      if (command === undefined) {
+        throw new Error("OVERLEARN_HARNESS_LOGIN_CMD cannot be empty.");
+      }
+
+      harnessLoginSpawner({
+        harnessId: definition.id,
+        command,
+        args,
+        displayCommand,
+        cwd: store.dataDir,
+        env: mergeStringEnv(process.env, env, {
+          OVERLEARN_LOGIN_HARNESS_ID: definition.id,
+          OVERLEARN_LOGIN_COMMAND: displayCommand,
+          OVERLEARN_LOGIN_COMMAND_JSON: JSON.stringify([
+            definition.loginCommand.command,
+            ...definition.loginCommand.args,
+          ]),
+        }),
+      });
+
+      return jsonResponse({
+        manual: false,
+        spawned: true,
+        command: displayCommand,
+        note: definition.loginCommand.note,
+      });
+    } catch (error) {
+      return textResponse(
+        error instanceof Error ? error.message : "Harness login failed.",
+        500,
+      );
+    }
   };
 
   const handleCourseApi = async (
@@ -1620,6 +1943,19 @@ export const runDaemon = async (
       return jsonResponse({ ok: true });
     }
 
+    if (requestUrl.pathname === "/api/profile") {
+      return await handleProfileApi(request);
+    }
+
+    if (requestUrl.pathname === "/api/onboarding") {
+      return await handleOnboardingApi(request);
+    }
+
+    const harnessLoginId = routeHarnessLoginRequest(requestUrl.pathname);
+    if (harnessLoginId !== undefined && method === "POST") {
+      return handleHarnessLoginApi(harnessLoginId);
+    }
+
     if (method === "GET" && requestUrl.pathname === "/api/harnesses") {
       const courseIdParam = requestUrl.searchParams.get("courseId");
       const courseId =
@@ -1665,6 +2001,40 @@ export const runDaemon = async (
     }
 
     if (method === "GET" && requestUrl.pathname === "/") {
+      const profile = readProfileResource();
+      if (profile.onboardingState !== "done") {
+        const html = renderPage(
+          "overlearn",
+          [],
+          lessonSnapshot([], [], new Set()),
+          [],
+          [],
+          [],
+          [],
+          new Set(),
+          undefined,
+          "agent-working",
+          false,
+          {
+            orchestrated: true,
+            harnesses: harnessSummaries(
+              store,
+              undefined,
+              env,
+              harnessDetectionCache,
+              false,
+            ),
+            profile,
+            dataDir: store.dataDir,
+            onboardingState: profile.onboardingState,
+          },
+        );
+
+        return new Response(html, {
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
       const courseParam = requestUrl.searchParams.get("course");
       if (courseParam !== null) {
         const courseId = Number(courseParam);
@@ -1697,6 +2067,9 @@ export const runDaemon = async (
                 harnessDetectionCache,
                 false,
               ),
+              profile,
+              dataDir: store.dataDir,
+              onboardingState: profile.onboardingState,
             },
           );
 
@@ -1706,7 +2079,36 @@ export const runDaemon = async (
         }
       }
 
-      return renderCoursePicker(listCourses(store, "active"));
+      const html = renderPage(
+        "Course library",
+        [],
+        lessonSnapshot([], [], new Set()),
+        [],
+        [],
+        [],
+        [],
+        new Set(),
+        undefined,
+        "agent-working",
+        false,
+        {
+          orchestrated: true,
+          harnesses: harnessSummaries(
+            store,
+            undefined,
+            env,
+            harnessDetectionCache,
+            false,
+          ),
+          profile,
+          dataDir: store.dataDir,
+          onboardingState: profile.onboardingState,
+        },
+      );
+
+      return new Response(html, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
     }
 
     return textResponse("Not found.", 404);
