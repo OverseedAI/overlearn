@@ -77,6 +77,7 @@ import {
   type TopicNode,
   type TranscriptEntry,
 } from "./ui";
+import { createTutorialCourse } from "./tutorial";
 
 export type DaemonEndpoint = Readonly<{
   host: string;
@@ -1842,6 +1843,18 @@ export const runDaemon = async (
     return jsonResponse({ state: profile.onboardingState, profile });
   };
 
+  const handleTutorialApi = (request: Request): Response => {
+    if (request.method !== "POST") {
+      return emptyResponse(405);
+    }
+
+    const course = createTutorialCourse(store);
+    sseHub.broadcast("courses", coursesPayload());
+    broadcastCourseCollections(course.id);
+
+    return jsonResponse({ courseId: course.id });
+  };
+
   const handleHarnessLoginApi = (harnessId: string): Response => {
     const definition = getHarnessAdapterDefinition(harnessId as HarnessAdapterId);
     if (definition === undefined) {
@@ -2188,6 +2201,10 @@ export const runDaemon = async (
 
     if (requestUrl.pathname === "/api/onboarding") {
       return await handleOnboardingApi(request);
+    }
+
+    if (requestUrl.pathname === "/api/tutorial") {
+      return handleTutorialApi(request);
     }
 
     const harnessLoginId = routeHarnessLoginRequest(requestUrl.pathname);

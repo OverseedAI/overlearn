@@ -52,6 +52,7 @@ describe("renderPage", () => {
     expect(html).toContain('<h1 id="library-title">Course library</h1>');
     expect(html).toContain('id="library-settings"');
     expect(html).toContain('id="course-library-list" class="course-card-grid"');
+    expect(html).toContain('id = "open-tutorial-empty"');
     expect(html).toContain('id="new-course"');
     expect(html).toContain('id="brainstorm-course"');
     expect(html).toContain('id="import-course"');
@@ -152,6 +153,9 @@ describe("renderPage", () => {
     expect(html).toContain('data-onboarding-step="welcome" hidden');
     expect(html).toContain('data-onboarding-step="connect-agent"');
     expect(html).toContain('data-onboarding-step="tutorial-offer" hidden');
+    expect(html).toContain('id="tutorial-start"');
+    expect(html).toContain('id="tutorial-status"');
+    expect(html).not.toContain("Tutorial is coming soon");
     expect(html).toContain('data-harness-state="ready"');
     expect(html).toContain('data-harness-state="installed-unauthenticated"');
     expect(html).toContain('data-harness-state="not-installed"');
@@ -201,6 +205,8 @@ describe("renderPage", () => {
     expect(html).toContain('requestJson("/api/courses?status=draft")');
     expect(html).toContain('requestJson("/api/courses", {');
     expect(html).toContain('requestJson("/api/courses/ideate", {');
+    expect(html).toContain('requestJson("/api/tutorial", { method: "POST" })');
+    expect(html).toContain('openTutorialCourse');
     expect(html).toContain('"/accept-plan"');
     expect(html).toContain('course.status === "active"');
     expect(html).toContain('course.status === "draft"');
