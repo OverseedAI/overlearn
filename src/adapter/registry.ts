@@ -72,7 +72,12 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
     versionArgs: ["--version"],
     install: {
       command: "npm",
-      args: ["install", "-g", "@anthropic-ai/claude-code"],
+      args: [
+        "install",
+        "-g",
+        "@anthropic-ai/claude-code",
+        "@zed-industries/claude-code-acp",
+      ],
       docsUrl: "https://docs.anthropic.com/en/docs/claude-code/setup",
     },
     loginCommand: {
@@ -94,7 +99,12 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
     versionArgs: ["--version"],
     install: {
       command: "npm",
-      args: ["install", "-g", "@openai/codex"],
+      args: [
+        "install",
+        "-g",
+        "@openai/codex",
+        "@agentclientprotocol/codex-acp",
+      ],
       docsUrl: "https://developers.openai.com/codex/cli/",
     },
     loginCommand: {
