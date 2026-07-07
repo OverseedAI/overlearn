@@ -1,29 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import { HarnessItem, useHarnesses } from "@/components/harness-list";
 import { api, ApiError } from "@/lib/api";
 import { useProfile } from "@/lib/profile";
-import type { HarnessSummary } from "@/lib/types";
 
 function errorMessage(cause: unknown): string {
   if (cause instanceof ApiError) {
     return cause.message;
   }
   return cause instanceof Error ? cause.message : String(cause);
-}
-
-function harnessStatusLabel(harness: HarnessSummary): string {
-  if (!harness.installed) {
-    return "Not installed";
-  }
-  if (!harness.authenticated) {
-    return "Not logged in";
-  }
-  return harness.version ? harness.version : "Ready";
 }
 
 function ProfileSection() {
@@ -73,116 +62,9 @@ function ProfileSection() {
   );
 }
 
-function HarnessRow({
-  harness,
-  selected,
-  loggingIn,
-  onSelect,
-  onLogin,
-}: {
-  harness: HarnessSummary;
-  selected: boolean;
-  loggingIn: boolean;
-  onSelect: () => void;
-  onLogin: () => void;
-}) {
-  return (
-    <div className="flex items-start gap-3 py-3">
-      <input
-        id={`harness-${harness.id}`}
-        type="radio"
-        name="preferredHarness"
-        className="mt-1 size-4 shrink-0 accent-primary"
-        checked={selected}
-        disabled={!harness.installed}
-        onChange={onSelect}
-      />
-      <div className="min-w-0 flex-1">
-        <Label
-          htmlFor={`harness-${harness.id}`}
-          className="text-sm font-normal"
-        >
-          {harness.name}
-        </Label>
-        <div className="mt-1 flex items-center gap-2">
-          <Badge
-            variant="secondary"
-            className={
-              harness.authenticated
-                ? "bg-success/15 text-success"
-                : undefined
-            }
-          >
-            {harnessStatusLabel(harness)}
-          </Badge>
-        </div>
-      </div>
-      {harness.installed && !harness.authenticated ? (
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          disabled={loggingIn}
-          onClick={onLogin}
-        >
-          {loggingIn ? "Logging in…" : "Log in"}
-        </Button>
-      ) : null}
-    </div>
-  );
-}
-
 function AgentSection() {
-  const { profile, update } = useProfile();
-  const [harnesses, setHarnesses] = useState<HarnessSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loggingInId, setLoggingInId] = useState<string>();
-
-  const load = useCallback(async (refresh?: boolean) => {
-    setLoading(true);
-    try {
-      const list = await api.listHarnesses(
-        refresh ? { refresh: true } : undefined,
-      );
-      setHarnesses(list);
-    } catch (cause) {
-      toast.error(errorMessage(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const handleSelect = useCallback(
-    async (id: string) => {
-      try {
-        await update({ preferredHarness: id });
-      } catch (cause) {
-        toast.error(errorMessage(cause));
-      }
-    },
-    [update],
-  );
-
-  const handleLogin = useCallback(async (id: string) => {
-    setLoggingInId(id);
-    try {
-      const result = await api.harnessLogin(id);
-      if (result.manual) {
-        toast.info(result.note, { description: result.command });
-      } else {
-        toast.success(result.note);
-      }
-    } catch (cause) {
-      toast.error(errorMessage(cause));
-    } finally {
-      setLoggingInId(undefined);
-      void load();
-    }
-  }, [load]);
+  const { harnesses, loading, load, loggingInId, select, login, selectedId } =
+    useHarnesses();
 
   return (
     <section>
@@ -198,6 +80,11 @@ function AgentSection() {
           Refresh
         </Button>
       </div>
+      <p className="mt-2 text-sm text-pretty text-muted-foreground">
+        Overlearn teaches by driving a coding agent installed on this machine.
+        Every agent it supports is listed below — installed ones can be picked
+        as the default.
+      </p>
       <div className="mt-4 divide-y divide-border">
         {harnesses.length === 0 && loading ? (
           <p className="py-3 text-sm text-muted-foreground">
@@ -205,14 +92,16 @@ function AgentSection() {
           </p>
         ) : null}
         {harnesses.map((harness) => (
-          <HarnessRow
-            key={harness.id}
-            harness={harness}
-            selected={profile?.preferredHarness === harness.id}
-            loggingIn={loggingInId === harness.id}
-            onSelect={() => void handleSelect(harness.id)}
-            onLogin={() => void handleLogin(harness.id)}
-          />
+          <div key={harness.id} className="flex items-start gap-3 py-3">
+            <HarnessItem
+              harness={harness}
+              idPrefix="harness"
+              selected={selectedId === harness.id}
+              loggingIn={loggingInId === harness.id}
+              onSelect={() => void select(harness.id)}
+              onLogin={() => void login(harness.id)}
+            />
+          </div>
         ))}
       </div>
     </section>
