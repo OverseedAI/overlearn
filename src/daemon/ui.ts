@@ -212,8 +212,7 @@ const libraryClientScript = String.raw`
   const onboardingSkip = document.querySelector("#onboarding-skip");
   const tutorialStart = document.querySelector("#tutorial-start");
   const tutorialLater = document.querySelector("#tutorial-later");
-  const tutorialFinish = document.querySelector("#tutorial-finish");
-  const tutorialNote = document.querySelector("#tutorial-coming-soon");
+  const tutorialStatus = document.querySelector("#tutorial-status");
   const libraryScreen = document.querySelector("#library-screen");
   const settingsScreen = document.querySelector("#settings-screen");
   const settingsButton = document.querySelector("#library-settings");
@@ -361,6 +360,21 @@ const libraryClientScript = String.raw`
     if (isRecord(payload.profile)) {
       profile = payload.profile;
     }
+  };
+
+  const openTutorialCourse = async () => {
+    const payload = await requestJson("/api/tutorial", { method: "POST" });
+    const courseId = courseIdNumber(payload?.courseId);
+    if (courseId === undefined) {
+      throw new Error("Tutorial course could not be opened.");
+    }
+
+    await patchProfile({ settings: { tutorialChoice: "start" } });
+    if (!onboardingDone()) {
+      await setOnboardingState("done");
+    }
+
+    openCourse(courseId);
   };
 
   const commandText = (command) =>
@@ -1472,6 +1486,24 @@ const libraryClientScript = String.raw`
           ? "Archived courses will appear here."
           : "Create a course to start learning with a course-scoped agent.";
       empty.append(heading, body);
+      if (libraryStatus !== "archived") {
+        const tutorialButton = document.createElement("button");
+        tutorialButton.id = "open-tutorial-empty";
+        tutorialButton.type = "button";
+        tutorialButton.className = "library-button secondary";
+        tutorialButton.textContent = "Open the tutorial";
+        tutorialButton.addEventListener("click", () => {
+          tutorialButton.disabled = true;
+          setLibraryMessage("Opening tutorial...");
+          void openTutorialCourse().catch((error) => {
+            tutorialButton.disabled = false;
+            libraryError =
+              error instanceof Error ? error.message : "Tutorial could not open.";
+            renderLibrary();
+          });
+        });
+        empty.append(tutorialButton);
+      }
       libraryList.append(empty);
       setLibraryMessage(
         libraryStatus === "archived"
@@ -1899,15 +1931,19 @@ const libraryClientScript = String.raw`
   });
 
   tutorialStart?.addEventListener("click", () => {
-    void patchProfile({ settings: { tutorialChoice: "start" } }).catch(
-      () => undefined,
-    );
-    if (tutorialNote !== null) {
-      tutorialNote.hidden = false;
+    tutorialStart.disabled = true;
+    if (tutorialStatus !== null) {
+      tutorialStatus.hidden = false;
+      tutorialStatus.textContent = "Opening the tutorial...";
     }
-    if (tutorialFinish !== null) {
-      tutorialFinish.hidden = false;
-    }
+    void openTutorialCourse().catch((error) => {
+      tutorialStart.disabled = false;
+      if (tutorialStatus !== null) {
+        tutorialStatus.hidden = false;
+        tutorialStatus.textContent =
+          error instanceof Error ? error.message : "Tutorial could not open.";
+      }
+    });
   });
 
   const finishOnboarding = (choice) => {
@@ -1921,10 +1957,6 @@ const libraryClientScript = String.raw`
 
   tutorialLater?.addEventListener("click", () => {
     finishOnboarding("later");
-  });
-
-  tutorialFinish?.addEventListener("click", () => {
-    finishOnboarding("start");
   });
 
   settingsButton?.addEventListener("click", showSettings);
@@ -7686,12 +7718,11 @@ export const renderPage = (
       <section class="onboarding-panel" data-onboarding-step="tutorial-offer"${onboardingState === "tutorial-offer" ? "" : " hidden"}>
         <p class="onboarding-kicker">Tutorial</p>
         <h2>Start with a quick tutorial?</h2>
-        <p class="onboarding-copy">The guided tutorial will walk through creating a course, letting the agent teach, and reviewing mastery checks.</p>
-        <p id="tutorial-coming-soon" class="library-notice" hidden>Tutorial is coming soon.</p>
+        <p class="onboarding-copy">The guided tutorial opens a small course about Overlearn itself: dialogue turns, topic mastery, Feynman checks, review tools, and creating the next course.</p>
+        <p id="tutorial-status" class="library-notice" hidden></p>
         <div class="library-form-actions">
           <button id="tutorial-start" class="library-button primary" type="button">Start tutorial</button>
           <button id="tutorial-later" class="library-button secondary" type="button">Maybe later</button>
-          <button id="tutorial-finish" class="library-button secondary" type="button" hidden>Go to library</button>
         </div>
       </section>
     </section>

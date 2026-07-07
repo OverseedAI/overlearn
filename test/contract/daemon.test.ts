@@ -35,6 +35,7 @@ type CourseResource = Readonly<{
   status: string;
   description?: string | null;
   harnessId?: string | null;
+  sourceName?: string | null;
 }>;
 
 const ensureLocalhost = async (): Promise<boolean> => {
@@ -246,6 +247,132 @@ describe(`daemon contract (${runtime.name})`, () => {
       });
       expect(rerun.status).toBe(200);
       await expect(rerun.json()).resolves.toMatchObject({ state: "welcome" });
+    },
+    15_000,
+  );
+
+  contractTest(
+    "starts the authored tutorial course from onboarding and runs a teaching turn",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const fakeHarness = await withFakeHarnessPath();
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          PATH: fakeHarness.path,
+          OVERLEARN_HARNESS: "codex",
+          ANTHROPIC_API_KEY: "test-anthropic",
+          OPENAI_API_KEY: "test-openai",
+          GEMINI_API_KEY: "test-gemini",
+        },
+      });
+      const sse = await createSseClient(daemon.url, daemon.token);
+
+      try {
+        const unauthenticated = await fetch(`${daemon.url}/api/tutorial`, {
+          method: "POST",
+        });
+        expect(unauthenticated.status).toBe(401);
+
+        const connect = await authFetch(daemon, "/api/onboarding", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ state: "connect-agent" }),
+        });
+        expect(connect.status).toBe(200);
+
+        const offer = await authFetch(daemon, "/api/onboarding", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ state: "tutorial-offer" }),
+        });
+        expect(offer.status).toBe(200);
+
+        const tutorial = await authFetch(daemon, "/api/tutorial", {
+          method: "POST",
+        });
+        expect(tutorial.status).toBe(200);
+        const payload = (await tutorial.json()) as Record<string, unknown>;
+        expect(typeof payload["courseId"]).toBe("number");
+        const courseId = payload["courseId"] as number;
+
+        const repeated = await authFetch(daemon, "/api/tutorial", {
+          method: "POST",
+        });
+        expect(repeated.status).toBe(200);
+        await expect(repeated.json()).resolves.toMatchObject({ courseId });
+
+        const state = await courseState(daemon, courseId);
+        expect(state["course"]).toMatchObject({
+          id: courseId,
+          title: "Learning Overlearn",
+          status: "active",
+          sourceName: "tutorial",
+        });
+        expect(state["topics"]).toContainEqual(
+          expect.objectContaining({
+            path: "dialogue-loop",
+            title: "Dialogue loop",
+            current: true,
+            body: expect.stringContaining("Your connected agent teaches"),
+          }),
+        );
+        expect(state["topics"]).toContainEqual(
+          expect.objectContaining({
+            path: "next-course",
+            title: "Creating your next course",
+            body: expect.stringContaining("brainstorm wizard"),
+          }),
+        );
+
+        // Mirror the UI's start-tutorial flow: onboarding completes before the
+        // course page opens, otherwise the deep-link guard serves the shell.
+        const advanced = await authFetch(daemon, "/api/onboarding", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ state: "done" }),
+        });
+        expect(advanced.status).toBe(200);
+
+        const opened = await authFetch(daemon, `/?course=${courseId}`);
+        expect(opened.status).toBe(200);
+        await expect(opened.text()).resolves.toContain("Learning Overlearn");
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          courseId,
+          "Teach me how the Overlearn tutorial works.",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === courseId &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "tutorial teaching turn done",
+        );
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.some((entry) => entry["event"] === "session/prompt"),
+          "tutorial prompt log",
+        );
+        const firstPrompt = promptText(
+          logs.find((entry) => entry["event"] === "session/prompt") ?? {},
+        );
+        expect(firstPrompt).toContain("Learning Overlearn");
+        expect(firstPrompt).toContain("Teach me how the Overlearn tutorial works.");
+      } finally {
+        sse.close();
+        await rm(fakeHarness.binDir, { force: true, recursive: true });
+      }
     },
     15_000,
   );
