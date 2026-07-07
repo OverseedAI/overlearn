@@ -156,29 +156,35 @@ const mcpServerConnections = (params: unknown): readonly McpServerConnection[] =
   });
 };
 
-const parseMcpCall = (): FakeMcpCall | undefined => {
-  if (rawMcpCall === undefined || rawMcpCall.trim().length === 0) {
-    return undefined;
-  }
-
-  const parsed = JSON.parse(rawMcpCall) as unknown;
-
+const parseOneMcpCall = (value: unknown): FakeMcpCall => {
   if (
-    !isRecord(parsed) ||
-    typeof parsed["server"] !== "string" ||
-    typeof parsed["tool"] !== "string"
+    !isRecord(value) ||
+    typeof value["server"] !== "string" ||
+    typeof value["tool"] !== "string"
   ) {
     throw new Error("FAKE_ACP_MCP_CALL must include server and tool strings.");
   }
 
   return {
-    server: parsed["server"],
-    tool: parsed["tool"],
-    ...(Object.hasOwn(parsed, "args") ? { args: parsed["args"] } : {}),
+    server: value["server"],
+    tool: value["tool"],
+    ...(Object.hasOwn(value, "args") ? { args: value["args"] } : {}),
   };
 };
 
-const fakeMcpCall = parseMcpCall();
+// Accepts a single call object or an array of calls run in order.
+const parseMcpCalls = (): readonly FakeMcpCall[] => {
+  if (rawMcpCall === undefined || rawMcpCall.trim().length === 0) {
+    return [];
+  }
+
+  const parsed = JSON.parse(rawMcpCall) as unknown;
+  return Array.isArray(parsed)
+    ? parsed.map(parseOneMcpCall)
+    : [parseOneMcpCall(parsed)];
+};
+
+const fakeMcpCalls = parseMcpCalls();
 
 const parseMessageChunks = (): readonly string[] => {
   if (rawMessageChunks === undefined || rawMessageChunks.trim().length === 0) {
@@ -258,10 +264,7 @@ const finishPrompt = (id: JsonRpcId, stopReason: string): void => {
   respond(id, { stopReason });
 };
 
-const runMcpTurn = async (
-  promptId: JsonRpcId,
-  call: FakeMcpCall,
-): Promise<void> => {
+const runMcpCall = async (call: FakeMcpCall): Promise<void> => {
   await sleep(5);
   const toolCallId = `mcp-${call.tool}`;
   const server = configuredMcpServers.find(
@@ -284,7 +287,6 @@ const runMcpTurn = async (
       status: "failed",
       error: `MCP server was not configured: ${call.server}`,
     });
-    finishPrompt(promptId, "end_turn");
     return;
   }
 
@@ -333,14 +335,23 @@ const runMcpTurn = async (
       await client.close();
     }
   }
+};
+
+const runMcpTurn = async (
+  promptId: JsonRpcId,
+  calls: readonly FakeMcpCall[],
+): Promise<void> => {
+  for (const call of calls) {
+    await runMcpCall(call);
+  }
 
   await sleep(5);
   finishPrompt(promptId, "end_turn");
 };
 
 const runNormalTurn = async (promptId: JsonRpcId): Promise<void> => {
-  if (fakeMcpCall !== undefined) {
-    await runMcpTurn(promptId, fakeMcpCall);
+  if (fakeMcpCalls.length > 0) {
+    await runMcpTurn(promptId, fakeMcpCalls);
     return;
   }
 

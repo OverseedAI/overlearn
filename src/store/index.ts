@@ -249,6 +249,11 @@ export type DemoInput = Readonly<{
   position?: number;
 }>;
 
+export const demoFileKey = (demo: Pick<Demo, "id" | "fileName">): string =>
+  demo.fileName !== null && demo.fileName.endsWith(".html")
+    ? demo.fileName
+    : `demo-${demo.id}.html`;
+
 export type TranscriptRole = "learner" | "agent" | "system";
 
 export type TranscriptEntry = Readonly<{

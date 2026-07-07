@@ -6,12 +6,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ProseHtml } from "@/lib/markdown";
+import { LessonHtml } from "@/components/lesson-html";
 import type { GlossaryEntry, LessonSnapshot } from "@/lib/types";
 
 export type RailTab = "lesson" | "glossary";
 
 export function StudyRail({
+  courseId,
   lessons,
   glossary,
   tab,
@@ -19,6 +20,7 @@ export function StudyRail({
   selectedLessonId,
   onSelectLesson,
 }: {
+  courseId: number;
   lessons: LessonSnapshot;
   glossary: GlossaryEntry[];
   tab: RailTab;
@@ -82,7 +84,9 @@ export function StudyRail({
               </div>
             ) : null}
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              {selected ? <ProseHtml html={selected.html} /> : null}
+              {selected ? (
+                <LessonHtml html={selected.html} courseId={courseId} />
+              ) : null}
             </div>
           </>
         )}

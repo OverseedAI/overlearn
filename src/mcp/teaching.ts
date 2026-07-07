@@ -1,5 +1,6 @@
 import {
   appendMasteryEvent,
+  demoFileKey,
   flattenTopicTree,
   getActiveFeynmanCheck,
   getCourse,
@@ -7,6 +8,7 @@ import {
   latestMasteryForTopic,
   listDemos,
   listGlossary,
+  listLessons,
   listTopicsDueForReview,
   pageTranscript,
   patchCourse,
@@ -15,6 +17,7 @@ import {
   replaceTopicTree,
   upsertDemo,
   upsertGlossaryEntry,
+  upsertLesson,
   upsertTopic,
   withStoreTransaction,
   type Course,
@@ -41,6 +44,7 @@ export type TeachingToolName =
   | "get_course_state"
   | "upsert_topic"
   | "emit_demo"
+  | "upsert_lesson"
   | "record_mastery"
   | "feynman_check"
   | "upsert_glossary_entry"
@@ -51,10 +55,17 @@ export type TeachingSessionScope = Readonly<{
   sessionToken?: string;
 }>;
 
+// Structured detail for writes that surface as rich transcript entries
+// (inline demo cards, lesson cards) instead of a plain tool-call row.
+export type TeachingWriteAttachment =
+  | Readonly<{ kind: "demo"; file: string; title?: string }>
+  | Readonly<{ kind: "lesson"; lessonId: string }>;
+
 export type TeachingWriteEvent = Readonly<{
   tool: TeachingToolName;
   courseId: number;
   summary: string;
+  attachment?: TeachingWriteAttachment;
 }>;
 
 export type TeachingServerOptions = Readonly<{
@@ -90,6 +101,7 @@ type TopicPlacementRow = Readonly<{
 type TeachingToolOutput = Readonly<{
   result: McpToolCallResult;
   writeSummary?: string;
+  writeAttachment?: TeachingWriteAttachment;
 }>;
 
 const jsonSchema = (schema: McpJsonObject): McpJsonObject => schema;
@@ -192,6 +204,17 @@ const inputSchemas: Record<TeachingToolName, McpJsonObject> = {
       fileName: stringSchema("Optional stable file name for idempotent updates."),
     },
     ["title", "body"],
+  ),
+  upsert_lesson: objectSchema(
+    {
+      lessonId: stringSchema(
+        "Stable lesson id (slug). Reusing an id updates that lesson.",
+      ),
+      body: stringSchema(
+        'Lesson body markdown. Embed a stored demo with a `:::demo <file.html> "Title"` line.',
+      ),
+    },
+    ["lessonId", "body"],
   ),
   record_mastery: objectSchema(
     {
@@ -913,8 +936,13 @@ const courseStatePayload = (
       topicId: demo.topicId,
       title: demo.title,
       fileName: demo.fileName,
+      file: demoFileKey(demo),
       format: demo.bodyFormat,
       addedAt: demo.addedAt,
+    })),
+    lessons: listLessons(store, courseId).map((lesson) => ({
+      id: lesson.lessonId,
+      updatedAt: lesson.updatedAt,
     })),
     transcriptTail: readTranscriptTail(store, courseId, transcriptLimit),
   };
@@ -966,13 +994,19 @@ const notifyWrite = async (
   courseId: number,
   tool: TeachingToolName,
   summary: string,
+  attachment?: TeachingWriteAttachment,
 ): Promise<void> => {
   if (onWrite === undefined) {
     return;
   }
 
   try {
-    await onWrite({ tool, courseId, summary });
+    await onWrite({
+      tool,
+      courseId,
+      summary,
+      ...(attachment === undefined ? {} : { attachment }),
+    });
   } catch {
     // Notification failures should not hide a committed teaching write.
   }
@@ -1001,6 +1035,7 @@ const createTeachingTool = (
           options.scope.courseId,
           tool.name,
           output.writeSummary,
+          output.writeAttachment,
         );
       }
 
@@ -1153,10 +1188,40 @@ const emitDemoTool = (options: TeachingServerOptions): McpServerTool =>
             topicId: demo.topicId,
             title: demo.title,
             fileName: demo.fileName,
+            file: demoFileKey(demo),
             format: demo.bodyFormat,
           },
         }),
         writeSummary: `emitted demo ${title}`,
+        writeAttachment: { kind: "demo", file: demoFileKey(demo), title },
+      };
+    },
+  });
+
+const upsertLessonTool = (options: TeachingServerOptions): McpServerTool =>
+  createTeachingTool(options, {
+    name: "upsert_lesson",
+    description:
+      "Writes or updates a durable lesson (markdown) shown in the learner's study rail.",
+    knownKeys: ["lessonId", "body"],
+    call: (args) => {
+      const lessonId = requireString(args, "lessonId");
+      const body = requireBodyString(args, "body");
+      const lesson = upsertLesson(options.store, options.scope.courseId, {
+        lessonId,
+        bodyMarkdown: body,
+      });
+
+      return {
+        result: jsonResult({
+          ok: true,
+          lesson: {
+            id: lesson.lessonId,
+            updatedAt: lesson.updatedAt,
+          },
+        }),
+        writeSummary: `wrote lesson ${lesson.lessonId}`,
+        writeAttachment: { kind: "lesson", lessonId: lesson.lessonId },
       };
     },
   });
@@ -1336,6 +1401,7 @@ export const createTeachingMcpServer = (
     getCourseStateTool(options),
     upsertTopicTool(options),
     emitDemoTool(options),
+    upsertLessonTool(options),
     recordMasteryTool(options),
     feynmanCheckTool(options),
     upsertGlossaryEntryTool(options),

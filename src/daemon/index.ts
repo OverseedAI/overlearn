@@ -21,6 +21,7 @@ import {
   clearActiveFeynmanCheck,
   createCourse,
   deleteCourse,
+  demoFileKey,
   endSession as endStoreSession,
   flattenTopicTree,
   getActiveFeynmanCheck,
@@ -705,16 +706,9 @@ const courseResource = (course: Course): Record<string, unknown> => ({
   updatedAt: course.updatedAt,
 });
 
-const demoKey = (demo: Demo): string => {
-  if (demo.fileName !== null && demo.fileName.endsWith(".html")) {
-    return demo.fileName;
-  }
-
-  return `demo-${demo.id}.html`;
-};
 
 const uiDemo = (demo: Demo): DemoEntry => ({
-  file: demoKey(demo),
+  file: demoFileKey(demo),
   ...(demo.title === null ? {} : { title: demo.title }),
   addedAt: demo.addedAt,
 });
@@ -790,6 +784,46 @@ const transcriptPayloadRecord = (
 const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
   const payload = transcriptPayloadRecord(entry);
   const at = entry.ts;
+
+  if (entry.kind === "demo") {
+    const title = payload["title"];
+    return {
+      role: "agent",
+      kind: "demo",
+      file:
+        typeof payload["file"] === "string" && payload["file"].length > 0
+          ? payload["file"]
+          : entry.content,
+      ...(typeof title === "string" && title.length > 0 ? { title } : {}),
+      at,
+      turn: entry.turn,
+    };
+  }
+
+  if (entry.kind === "lesson") {
+    return {
+      role: "agent",
+      kind: "lesson",
+      lesson:
+        typeof payload["lessonId"] === "string" && payload["lessonId"].length > 0
+          ? payload["lessonId"]
+          : entry.content,
+      at,
+      turn: entry.turn,
+    };
+  }
+
+  if (entry.kind === "feynman-check") {
+    return {
+      role: "agent",
+      kind: "feynman-check",
+      concept:
+        typeof payload["concept"] === "string" ? payload["concept"] : "unknown",
+      prompt: entry.content,
+      at,
+      turn: entry.turn,
+    };
+  }
 
   if (entry.kind === "feynman-answer") {
     return {
@@ -883,7 +917,7 @@ const courseView = (store: Store, courseId: number) => {
 
   const demos = listDemos(store, courseId);
   const groupedDemos = demosByTopicId(demos);
-  const demoFiles = new Set(demos.map(demoKey));
+  const demoFiles = new Set(demos.map(demoFileKey));
   const glossary = listGlossary(store, courseId).map(uiGlossaryEntry);
 
   return {
@@ -917,7 +951,7 @@ const courseState = (store: Store, courseId: number): Record<string, unknown> | 
       id: demo.id,
       topicId: demo.topicId,
       fileName: demo.fileName,
-      key: demoKey(demo),
+      key: demoFileKey(demo),
       title: demo.title,
       bodyFormat: demo.bodyFormat,
       addedAt: demo.addedAt,
@@ -1066,7 +1100,7 @@ const routeHarnessLoginRequest = (path: string): string | undefined => {
 };
 
 const demoResponse = (store: Store, courseId: number, file: string): Response => {
-  const demo = listDemos(store, courseId).find((candidate) => demoKey(candidate) === file);
+  const demo = listDemos(store, courseId).find((candidate) => demoFileKey(candidate) === file);
   if (demo === undefined) {
     return textResponse("Demo not found.", 404);
   }
@@ -1204,19 +1238,45 @@ export const runDaemon = async (
   const onTeachingWrite = (event: TeachingWriteEvent): void => {
     flushPendingAgentText(event.courseId);
     const turn = activeTurnByCourse.get(event.courseId);
-    const entry = appendUiTranscript(store, event.courseId, {
-      ...(turn === undefined ? {} : { turn }),
-      role: "system",
-      kind: "tool-call",
-      content: event.summary,
-      payload: {
-        tool: event.tool,
-        summary: event.summary,
-      },
-    });
+    const attachment = event.attachment;
+    // Demo and lesson writes render as rich transcript cards; every other
+    // teaching write keeps its readable tool-call row.
+    const entry =
+      attachment?.kind === "demo"
+        ? appendUiTranscript(store, event.courseId, {
+            ...(turn === undefined ? {} : { turn }),
+            role: "agent",
+            kind: "demo",
+            content: attachment.file,
+            payload: {
+              file: attachment.file,
+              ...(attachment.title === undefined ? {} : { title: attachment.title }),
+            },
+          })
+        : attachment?.kind === "lesson"
+          ? appendUiTranscript(store, event.courseId, {
+              ...(turn === undefined ? {} : { turn }),
+              role: "agent",
+              kind: "lesson",
+              content: attachment.lessonId,
+              payload: { lessonId: attachment.lessonId },
+            })
+          : appendUiTranscript(store, event.courseId, {
+              ...(turn === undefined ? {} : { turn }),
+              role: "system",
+              kind: "tool-call",
+              content: event.summary,
+              payload: {
+                tool: event.tool,
+                summary: event.summary,
+              },
+            });
 
     sseHub.broadcast("message", { courseId: event.courseId, entry });
     sseHub.broadcast("tool-write", event);
+    if (attachment?.kind === "lesson") {
+      sseHub.broadcast("lesson", { courseId: event.courseId });
+    }
     broadcastCourseCollections(event.courseId);
   };
 
