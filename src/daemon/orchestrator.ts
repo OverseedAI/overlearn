@@ -1,5 +1,4 @@
-import { readFile } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { getHarnessAdapter } from "../adapter/registry";
 import type {
@@ -10,24 +9,44 @@ import type {
   PermissionRule,
   SessionRef,
 } from "../adapter/types";
-import type { CoursePaths, TurnFile } from "../course";
 import { assembleInstructionModules, formatInstructions } from "../instructions";
+import { teachingMcpServerName } from "../mcp/teaching";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-export type TurnPromptMode = "teaching" | "wrap-up" | "greeting";
+export type TurnPromptMode = "teaching" | "wrap-up" | "greeting" | "ideation";
+
+export type TurnEvent =
+  | Readonly<{ type: "message"; text: string }>
+  | Readonly<{ type: "nav"; path: string }>
+  | Readonly<{ type: "review-weak"; concepts: readonly string[] }>
+  | Readonly<{ type: "session-done" }>
+  | Readonly<{ type: "harness-swapped"; from: string; to: string }>
+  | Readonly<{
+      type: "feynman-answer";
+      concept: string;
+      text: string;
+      keyPoints: readonly string[];
+    }>
+  | Readonly<{ type: "ideation"; text: string }>;
+
+export type TurnPayload = Readonly<{
+  turn: number;
+  createdAt: string;
+  events: readonly TurnEvent[];
+}>;
 
 export type TurnPromptInput = Readonly<{
-  courseName: string;
-  courseDir: string;
-  turnPath: string;
-  turn: TurnFile;
+  courseId: number;
+  courseTitle: string;
+  turn: TurnPayload;
   instructions: string;
   includeResumeContext: boolean;
   mode: TurnPromptMode;
 }>;
 
 export type AgentStreamPayload = Readonly<{
+  courseId: number;
   turn: number;
   sequence: number;
   event: AgentEvent;
@@ -43,22 +62,37 @@ export type OrchestratorResult =
 
 export type DaemonTurnOrchestrator = Readonly<{
   runTurn: (
-    turnPath: string,
-    turn: TurnFile,
+    turn: TurnPayload,
     mode: TurnPromptMode,
   ) => Promise<OrchestratorResult>;
-  endSession: () => Promise<void>;
-  resetSession: () => Promise<boolean>;
+  endSession: (reason?: string) => Promise<void>;
+  resetSession: (reason?: string) => Promise<boolean>;
+  hasActiveSession: () => boolean;
+}>;
+
+export type ActiveTeachingSessionRegistration = Readonly<{
+  token: string;
+  sessionId?: number;
 }>;
 
 type CreateDaemonTurnOrchestratorOptions = Readonly<{
-  coursePaths: CoursePaths;
+  courseId: number;
+  courseTitle: string;
+  attachedDir?: string | null;
   cwd: string;
+  mcpBaseUrl: string;
   env?: Env;
   adapter?: HarnessAdapter;
   getHarnessId?: () => string | undefined;
   timeoutMs?: number;
   onAgentEvent: (payload: AgentStreamPayload) => void;
+  registerTeachingSession: (
+    input: Readonly<{ courseId: number; harnessId: string }>,
+  ) => ActiveTeachingSessionRegistration;
+  unregisterTeachingSession: (
+    registration: ActiveTeachingSessionRegistration,
+    reason: string,
+  ) => void;
 }>;
 
 type PromptAttemptResult =
@@ -69,16 +103,8 @@ const defaultTurnTimeoutMs = 10 * 60 * 1_000;
 const cancelSettleMs = 500;
 
 const sleep = async (milliseconds: number): Promise<void> => {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-export const orchestratedTurnsEnabled = (env: Env = process.env): boolean =>
-  !["0", "false"].includes(
-    env["OVERLEARN_ORCHESTRATED"]?.trim().toLowerCase() ?? "",
-  );
 
 const parsePositiveInteger = (
   value: string | undefined,
@@ -236,38 +262,6 @@ export const resolveHarnessAdapter = (
   return adapter;
 };
 
-const readCourseJson = async (
-  courseJson: string,
-): Promise<Record<string, unknown>> => {
-  const parsed = JSON.parse(await readFile(courseJson, "utf8")) as unknown;
-  return isRecord(parsed) ? parsed : {};
-};
-
-export const resolveCourseWorkingDirectory = async (
-  paths: CoursePaths,
-): Promise<string> => {
-  const manifest = await readCourseJson(paths.courseJson);
-  const workingDirectory = manifest["workingDirectory"];
-
-  return typeof workingDirectory === "string" &&
-    workingDirectory.trim().length > 0
-    ? resolve(paths.courseDir, workingDirectory)
-    : paths.courseDir;
-};
-
-const courseWriteResources = (courseDir: string): readonly string[] => {
-  const normalized = resolve(courseDir);
-
-  return [`${normalized}/**`];
-};
-
-const courseReadResources = (
-  courseDir: string,
-  workingDirectory: string,
-): readonly string[] => [
-  ...new Set([`${resolve(courseDir)}/**`, `${resolve(workingDirectory)}/**`]),
-];
-
 const permissionRules = (
   actions: readonly string[],
   resources: readonly string[],
@@ -278,29 +272,23 @@ const permissionRules = (
   );
 
 export const buildCoursePermissionPolicy = (
-  courseDir: string,
-  workingDirectory = courseDir,
-): PermissionPolicy => ({
-  allow: [
-    ...permissionRules(
-      ["edit", "write", "write_file", "create", "mkdir", "delete"],
-      courseWriteResources(courseDir),
-      "Course directory writes are pre-approved for this learning session.",
-    ),
-    ...permissionRules(
+  attachedDir?: string | null,
+): PermissionPolicy => {
+  const resources =
+    attachedDir === undefined || attachedDir === null || attachedDir.trim() === ""
+      ? []
+      : [`${resolve(attachedDir)}/**`];
+
+  return {
+    allow: permissionRules(
       ["read", "search"],
-      courseReadResources(courseDir, workingDirectory),
-      "Course and working-directory reads are pre-approved for this learning session.",
+      resources,
+      "Attached directory reads are pre-approved for this learning session.",
     ),
-    ...permissionRules(
-      ["execute", "shell", "bash", "run"],
-      ["learn"],
-      "The learn CLI is pre-approved for course callbacks.",
-    ),
-  ],
-  defaultDecision: "deny",
-  defaultReason: "Permission was not pre-approved by the course daemon.",
-});
+    defaultDecision: "deny",
+    defaultReason: "Permission was not pre-approved by the course daemon.",
+  };
+};
 
 const resumePreamble = (input: TurnPromptInput): string =>
   input.includeResumeContext
@@ -308,44 +296,59 @@ const resumePreamble = (input: TurnPromptInput): string =>
         "## Resume context required",
         "",
         "This is a daemon-supervised resumed harness session.",
-        "Before teaching, rebuild context only from on-disk course state: read course.json, lessons/*.md, glossary.json, mastery.json, and the tail of transcript.jsonl.",
-        "Do not rely on any prior conversation memory for this course.",
-        `Use \`learn say ${input.courseName} --text <markdown>\` to greet the learner with an accurate summary of what has been covered, where the course left off, and the next step.`,
+        `Before teaching, call the \`${teachingMcpServerName}\` MCP tool \`get_course_state\` to rebuild course context from the store.`,
+        "Do not rely on prior conversation memory for this course.",
+        "For a resumed teaching turn or greeting, use the conversation response to greet the learner with an accurate summary, the current course position, and the next step.",
       ].join("\n")
     : "";
 
-const modePreamble = (input: TurnPromptInput): string =>
-  input.mode === "wrap-up"
-    ? [
-        "## Final wrap-up turn",
-        "",
-        "This turn contains a session-done event. Do not start a new teaching objective.",
-        "Mirror the protocol's Session wrap-up semantics: optionally emit final mastery for scores that are clear, then send one closing `learn say` summarizing what was covered, recorded mastery, and a suggested next session.",
-        "Do not run `learn stop` and do not run `learn wait`; the daemon will end the harness session and stop after this prompt completes.",
-      ].join("\n")
-    : input.mode === "greeting"
-      ? [
-          "## Harness swap greeting turn",
-          "",
-          "This turn contains a harness-swapped event. Rebuild context from disk before speaking because the previous harness session's in-context memory is gone.",
-          "Send one short continuity greeting through `learn say`: summarize what has been covered, where the course left off, and the next step.",
-          "Do not start a new teaching objective and do not run `learn wait`; the daemon will pause for the learner after this greeting.",
-        ].join("\n")
-    : [
-        "## Teaching turn",
-        "",
-        "Handle every event in the turn payload in order and keep this turn focused on one learning objective.",
-        "Do not run `learn wait` when finished; the daemon will invoke the harness again after the learner submits.",
-      ].join("\n");
+const modePreamble = (input: TurnPromptInput): string => {
+  if (input.mode === "wrap-up") {
+    return [
+      "## Final wrap-up turn",
+      "",
+      "This turn contains a session-done event. Do not start a new teaching objective.",
+      `Call \`${teachingMcpServerName}.get_course_state\` first, optionally record final mastery with MCP tools when scores are clear, then send one closing conversational response summarizing what was covered, recorded mastery, and a suggested next session.`,
+      "End the turn after the closing response. The daemon will end the harness session and stop.",
+    ].join("\n");
+  }
+
+  if (input.mode === "greeting") {
+    return [
+      "## Harness swap greeting turn",
+      "",
+      `Call \`${teachingMcpServerName}.get_course_state\` first because the previous harness session's in-context memory is gone.`,
+      "Send one short continuity greeting in the conversation: summarize what has been covered, where the course left off, and the next step.",
+      "Do not start a new teaching objective. The daemon will pause for the learner after this greeting.",
+    ].join("\n");
+  }
+
+  if (input.mode === "ideation") {
+    return [
+      "## Course ideation turn",
+      "",
+      `Call \`${teachingMcpServerName}.get_course_state\` first, brainstorm the course shape with the learner's request, then call \`${teachingMcpServerName}.propose_course_plan\` with a coherent draft title, description, and topic tree.`,
+      "After proposing the plan, briefly summarize the direction in the conversation and end the turn.",
+    ].join("\n");
+  }
+
+  return [
+    "## Teaching turn",
+    "",
+    `Call \`${teachingMcpServerName}.get_course_state\` first, then handle every event in the turn payload in order and keep this turn focused on one learning objective.`,
+    `Use only the \`${teachingMcpServerName}\` MCP tools for durable course changes. Speak to the learner through the conversation response.`,
+    "End the turn when the learner-facing response and any MCP writes are complete.",
+  ].join("\n");
+};
 
 export const buildTurnPrompt = (input: TurnPromptInput): string =>
   [
     "# Overlearn daemon turn",
     "",
-    "The daemon owns the event loop for this course. Use `learn say` and `learn emit` exactly as before, but never block on `learn wait` in this supervised mode.",
-    `Course name: ${input.courseName}`,
-    `Course directory: ${input.courseDir}`,
-    `Turn file: ${input.turnPath}`,
+    "The daemon owns the event loop for this course. Your durable interface is only the overlearn-teaching MCP server plus the conversation with the learner.",
+    "Do not write course files directly. Do not run `learn emit`, `learn say`, `learn wait`, `learn stop`, or any other `learn` callback command from this turn.",
+    `Course id: ${input.courseId}`,
+    `Course title: ${input.courseTitle}`,
     resumePreamble(input),
     modePreamble(input),
     "## Teaching protocol",
@@ -353,7 +356,7 @@ export const buildTurnPrompt = (input: TurnPromptInput): string =>
     input.instructions,
     "## Turn payload",
     "",
-    "This JSON is identical to the on-disk turn file.",
+    "Handle this JSON payload exactly once.",
     "",
     "```json",
     JSON.stringify(input.turn, null, 2),
@@ -386,7 +389,8 @@ const terminalError = (event: AgentEvent): OrchestratorResult | undefined =>
 
 const consumePrompt = async (
   events: AsyncIterable<AgentEvent>,
-  turn: TurnFile,
+  courseId: number,
+  turn: TurnPayload,
   nextSequence: () => number,
   shouldBroadcast: () => boolean,
   onAgentEvent: (payload: AgentStreamPayload) => void,
@@ -395,6 +399,7 @@ const consumePrompt = async (
     for await (const event of events) {
       if (shouldBroadcast()) {
         onAgentEvent({
+          courseId,
           turn: turn.turn,
           sequence: nextSequence(),
           event,
@@ -425,7 +430,8 @@ const runPromptWithTimeout = async (
   adapter: HarnessAdapter,
   session: SessionRef,
   prompt: string,
-  turn: TurnFile,
+  courseId: number,
+  turn: TurnPayload,
   timeoutMs: number,
   nextSequence: () => number,
   onAgentEvent: (payload: AgentStreamPayload) => void,
@@ -434,6 +440,7 @@ const runPromptWithTimeout = async (
   let suppressEvents = false;
   const consume = consumePrompt(
     adapter.prompt(session, prompt),
+    courseId,
     turn,
     nextSequence,
     () => !suppressEvents,
@@ -465,7 +472,11 @@ const runPromptWithTimeout = async (
 type ActiveSession = Readonly<{
   adapter: HarnessAdapter;
   session: SessionRef;
+  teachingSession: ActiveTeachingSessionRegistration;
 }>;
+
+const mcpUrl = (baseUrl: string, token: string): string =>
+  `${baseUrl.replace(/\/+$/, "")}/mcp/${encodeURIComponent(token)}`;
 
 export const createDaemonTurnOrchestrator = (
   options: CreateDaemonTurnOrchestratorOptions,
@@ -482,18 +493,19 @@ export const createDaemonTurnOrchestrator = (
     return current;
   };
 
-  const endSession = async (): Promise<void> => {
+  const endSession = async (reason = "ended"): Promise<void> => {
     const current = activeSession;
     activeSession = undefined;
 
     if (current !== undefined) {
       await current.adapter.end(current.session).catch(() => undefined);
+      options.unregisterTeachingSession(current.teachingSession, reason);
     }
   };
 
-  const resetSession = async (): Promise<boolean> => {
+  const resetSession = async (reason = "reset"): Promise<boolean> => {
     const hadActiveSession = activeSession !== undefined;
-    await endSession();
+    await endSession(reason);
     nextTurnNeedsResumeContext = true;
 
     return hadActiveSession;
@@ -506,38 +518,44 @@ export const createDaemonTurnOrchestrator = (
 
     const adapter =
       options.adapter ?? resolveHarnessAdapter(env, options.getHarnessId?.());
-    const session = await adapter.newSession(options.cwd, {
-      permissionPolicy: buildCoursePermissionPolicy(
-        options.coursePaths.courseDir,
-        options.cwd,
-      ),
-      metadata: {
-        courseDir: options.coursePaths.courseDir,
-        orchestrated: true,
-      },
+    const teachingSession = options.registerTeachingSession({
+      courseId: options.courseId,
+      harnessId: adapter.id,
     });
-    activeSession = { adapter, session };
 
-    return activeSession;
+    try {
+      const session = await adapter.newSession(options.cwd, {
+        mcpServers: [
+          {
+            name: teachingMcpServerName,
+            url: mcpUrl(options.mcpBaseUrl, teachingSession.token),
+          },
+        ],
+        permissionPolicy: buildCoursePermissionPolicy(options.attachedDir),
+        metadata: {
+          courseId: options.courseId,
+          orchestrated: true,
+        },
+      });
+      activeSession = { adapter, session, teachingSession };
+
+      return activeSession;
+    } catch (error) {
+      options.unregisterTeachingSession(teachingSession, "session-start-failed");
+      throw error;
+    }
   };
 
   const runAttempt = async (
-    turnPath: string,
-    turn: TurnFile,
+    turn: TurnPayload,
     mode: TurnPromptMode,
     includeResumeContext: boolean,
   ): Promise<OrchestratorResult> => {
     const active = await ensureSession();
-    const instructions = formatInstructions(
-      assembleInstructionModules({
-        courseDir: options.coursePaths.courseDir,
-        env,
-      }),
-    );
+    const instructions = formatInstructions(assembleInstructionModules({ env }));
     const prompt = buildTurnPrompt({
-      courseName: basename(options.coursePaths.courseDir),
-      courseDir: options.coursePaths.courseDir,
-      turnPath,
+      courseId: options.courseId,
+      courseTitle: options.courseTitle,
       turn,
       instructions,
       includeResumeContext,
@@ -547,6 +565,7 @@ export const createDaemonTurnOrchestrator = (
       active.adapter,
       active.session,
       prompt,
+      options.courseId,
       turn,
       timeoutMs,
       nextSequence,
@@ -554,7 +573,7 @@ export const createDaemonTurnOrchestrator = (
     );
 
     if ("timedOut" in result) {
-      await endSession();
+      await endSession("timeout");
       return {
         ok: false,
         reason: "timeout",
@@ -563,37 +582,32 @@ export const createDaemonTurnOrchestrator = (
     }
 
     if (!result.ok) {
-      await endSession();
+      await endSession(result.reason);
     }
 
     return result;
   };
 
   const runTurn = async (
-    turnPath: string,
-    turn: TurnFile,
+    turn: TurnPayload,
     mode: TurnPromptMode,
   ): Promise<OrchestratorResult> => {
     const includeResumeContext = nextTurnNeedsResumeContext;
-    const first = await runAttempt(
-      turnPath,
-      turn,
-      mode,
-      includeResumeContext,
-    );
+    const first = await runAttempt(turn, mode, includeResumeContext);
 
     if (first.ok || first.reason === "timeout") {
       nextTurnNeedsResumeContext = !first.ok;
       return attemptFailureMessage(first);
     }
 
-    const retry = await runAttempt(turnPath, turn, mode, true);
+    const retry = await runAttempt(turn, mode, true);
     nextTurnNeedsResumeContext = !retry.ok;
     return attemptFailureMessage(retry);
   };
 
   return {
     endSession,
+    hasActiveSession: () => activeSession !== undefined,
     resetSession,
     runTurn,
   };

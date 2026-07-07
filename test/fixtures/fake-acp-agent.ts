@@ -38,6 +38,9 @@ const scenario = (process.argv[2] ??
 const sessionId = "fake-session";
 const logPath = process.env["FAKE_ACP_LOG"];
 const permissionPath = process.env["FAKE_ACP_PERMISSION_PATH"] ?? "lesson.md";
+const permissionKind = process.env["FAKE_ACP_PERMISSION_KIND"] ?? "edit";
+const permissionTitle =
+  process.env["FAKE_ACP_PERMISSION_TITLE"] ?? "Write the generated lesson.";
 const crashMarkerPath = process.env["FAKE_ACP_CRASH_MARKER"];
 const rawMcpCall = process.env["FAKE_ACP_MCP_CALL"];
 let nextServerRequestId = 1;
@@ -373,8 +376,8 @@ const requestPermission = async (): Promise<string | undefined> => {
       sessionId,
       toolCall: {
         toolCallId: "tool-1",
-        title: "Write the generated lesson.",
-        kind: "edit",
+        title: permissionTitle,
+        kind: permissionKind,
         locations: [{ path: permissionPath }],
       },
       options: [
@@ -406,8 +409,8 @@ const runPermissionTurn = async (promptId: JsonRpcId): Promise<void> => {
   update({
     sessionUpdate: "tool_call",
     toolCallId: "tool-1",
-    title: "Write the generated lesson.",
-    kind: "edit",
+    title: permissionTitle,
+    kind: permissionKind,
     status: "pending",
     locations: [{ path: permissionPath }],
   });

@@ -1,74 +1,71 @@
 import { spawn } from "node:child_process";
-import { mkdir, readdir, readFile, stat } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdir, rm } from "node:fs/promises";
 import {
   createServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
-import { getHarnessAdapter, listHarnessAdapters } from "../adapter/registry";
+import packageJson from "../../package.json";
+import { listHarnessAdapters } from "../adapter/registry";
 import type { AdapterDetection } from "../adapter/types";
 import {
-  appendAgentTranscript,
-  appendFeynmanAnswerTranscript,
-  appendFeynmanCheckTranscript,
-  appendLessonTranscript,
-  appendLearnerTranscript,
+  appendTranscriptEntry,
+  appendTurnEvents,
   clearActiveFeynmanCheck,
-  clearDaemonMetadata,
-  DEFAULT_COURSE_NAME,
-  ensureCourseScaffold,
-  requireCourse,
-  getCoursePaths,
-  isValidConceptId,
-  isValidTopicPath,
-  latestMasteryScores,
-  isValidDemoFileName,
-  readActiveFeynmanCheck,
-  readCourseManifest,
-  readDaemonMetadata,
-  readGlossary,
-  readMastery,
-  readPendingEvents,
-  readTranscript,
-  resolveCourseDirForWait,
-  selectWeakestTopicConcepts,
-  writeCourseHarness,
-  writeDaemonMetadata,
-  writePendingEvents,
-  writeTurnFile,
+  createCourse,
+  endSession as endStoreSession,
+  flattenTopicTree,
+  getActiveFeynmanCheck,
+  getCourse,
+  getStoreDataDir,
+  listCourses,
+  listDemos,
+  listGlossary,
+  listLatestMasteryScores,
+  listLessons,
+  openStore,
+  pageTranscript,
+  patchCourse,
+  readTopicTree,
+  startSession,
+  type Course,
+  type CourseStatus as StoreCourseStatus,
+  type Demo,
+  type FeynmanCheck,
+  type GlossaryEntry as StoreGlossaryEntry,
+  type Lesson,
+  type MasteryEvent,
+  type Store,
+  type Topic,
+  type TranscriptEntry as StoreTranscriptEntry,
+} from "../store";
+import {
+  createTeachingMcpHttpHandler,
+  teachingTokenFromRequestPath,
+  type TeachingWriteEvent,
+} from "../mcp/teaching";
+import { renderMarkdown } from "./markdown";
+import {
+  createDaemonTurnOrchestrator,
+  type ActiveTeachingSessionRegistration,
+  type AgentStreamPayload,
+  type DaemonTurnOrchestrator,
+  type TurnEvent,
+  type TurnPayload,
+  type TurnPromptMode,
+} from "./orchestrator";
+import {
+  renderPage,
   type ActiveFeynmanCheck,
-  type DaemonMetadata,
-  type CoursePaths,
   type DemoEntry,
   type GlossaryEntry,
   type MasteryEntry,
   type TopicNode,
   type TranscriptEntry,
-  type TurnEvent,
-  type TurnFile,
-} from "../course";
-import {
-  createDaemonTurnOrchestrator,
-  orchestratedTurnsEnabled,
-  resolveCourseWorkingDirectory,
-  type AgentStreamPayload,
-  type DaemonTurnOrchestrator,
-} from "./orchestrator";
-import { watchFeynmanFile } from "./feynman";
-import { watchGlossaryFile } from "./glossary";
-import { watchMasteryFile } from "./mastery";
-import {
-  readLessonSnapshot,
-  isLessonFileName,
-  lessonIdFromFileName,
-  watchLessonDirectory,
-  type LessonEvent,
-} from "./lessons";
-import { renderDemoEmbed, renderMarkdown } from "./markdown";
-import { watchTopicFile } from "./topics";
-import { renderPage } from "./ui";
+} from "./ui";
 
 export type DaemonEndpoint = Readonly<{
   host: string;
@@ -77,11 +74,39 @@ export type DaemonEndpoint = Readonly<{
 
 export type CourseStatus = Readonly<{
   daemonAlive: boolean;
-  waitPending: boolean;
-  courseDir: string | null;
+  waitPending: false;
+  courseDir: null;
+  activeCourseId: number | null;
 }>;
 
+export type AgentMessageSource =
+  | Readonly<{ kind: "text"; text: string }>
+  | Readonly<{ kind: "file"; path: string }>;
+
+export type LearnerTurn = Readonly<{
+  turnPath: string;
+  courseDir: string;
+}>;
+
+export const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
+
+export class LearnCommandError extends Error {
+  readonly exitCode: 1 | 2;
+
+  constructor(exitCode: 1 | 2, message: string) {
+    super(message);
+    this.name = "LearnCommandError";
+    this.exitCode = exitCode;
+  }
+}
+
 type Env = Readonly<Record<string, string | undefined>>;
+
+type DaemonMetadata = Readonly<{
+  pid: number;
+  port: number;
+  startedAt: string;
+}>;
 
 type UiStatus =
   | "waiting-for-agent"
@@ -91,29 +116,10 @@ type UiStatus =
   | "session-ended";
 
 type UiStatusPayload = Readonly<{
+  courseId: number;
   status: UiStatus;
   hasSeenWait: boolean;
   message?: string;
-}>;
-
-export type AgentMessageSource =
-  | Readonly<{ kind: "text"; text: string }>
-  | Readonly<{ kind: "file"; path: string }>;
-
-type Waiter = Readonly<{
-  id: number;
-  resolve: (turnPath: string) => void;
-}>;
-
-type WaitSetup =
-  | Readonly<{ kind: "response"; response: Response }>
-  | Readonly<{ kind: "wait"; response: Promise<Response> }>;
-
-type DaemonHealth = Readonly<{
-  coursePath: string;
-  waitPending: boolean;
-  hasSeenWait: boolean;
-  orchestrated: boolean;
 }>;
 
 type HarnessSummary = Readonly<{
@@ -126,19 +132,42 @@ type HarnessSummary = Readonly<{
 }>;
 
 type HarnessesPayload = Readonly<{
+  courseId?: number;
   harnesses: readonly HarnessSummary[];
   switched: boolean;
 }>;
 
-export class LearnCommandError extends Error {
-  readonly exitCode: 1 | 2;
+type CourseRuntime = {
+  courseId: number;
+  orchestrator: DaemonTurnOrchestrator;
+  runningTurn: boolean;
+};
 
-  constructor(exitCode: 1 | 2, message: string) {
-    super(message);
-    this.name = "LearnCommandError";
-    this.exitCode = exitCode;
-  }
-}
+type TokenScope = Readonly<{
+  courseId: number;
+  sessionId?: number;
+}>;
+
+type MessageTurnEvent = Extract<TurnEvent, { type: "message" }>;
+type FeynmanAnswerTurnEvent = Extract<TurnEvent, { type: "feynman-answer" }>;
+
+type CourseCreateDraft = {
+  title: string;
+  description?: string | null;
+  harnessId?: string | null;
+  attachedDir?: string | null;
+  sourceName?: string | null;
+  status?: StoreCourseStatus;
+};
+
+type CoursePatchDraft = {
+  title?: string;
+  description?: string | null;
+  harnessId?: string | null;
+  attachedDir?: string | null;
+  sourceName?: string | null;
+  status?: StoreCourseStatus;
+};
 
 const LOCALHOST_BIND_HOST = "127.0.0.1";
 const LOCALHOST_PRINT_HOST = "localhost";
@@ -146,13 +175,11 @@ const DAEMON_START_TIMEOUT_MS = 5_000;
 const DAEMON_START_POLL_MS = 50;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
 const DAEMON_STOP_POLL_MS = 50;
-const WAIT_RETRY_DELAY_MS = 250;
 const DEFAULT_HARNESS_ID = "claude-code";
 const MAX_AGENT_STREAM_REPLAY = 200;
-export const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
 
 const sleep = async (milliseconds: number): Promise<void> => {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 };
 
 const jsonResponse = (value: unknown, init?: ResponseInit): Response =>
@@ -164,10 +191,7 @@ const jsonResponse = (value: unknown, init?: ResponseInit): Response =>
     },
   });
 
-const textResponse = (
-  text: string,
-  status: number,
-): Response =>
+const textResponse = (text: string, status: number): Response =>
   new Response(text, {
     status,
     headers: {
@@ -175,14 +199,7 @@ const textResponse = (
     },
   });
 
-const DEMO_CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:;";
-
-const formatPublicUrl = (port: number): string =>
-  `http://${LOCALHOST_PRINT_HOST}:${port}`;
-
-const formatDaemonUrl = (port: number, path: string): string =>
-  `http://${LOCALHOST_BIND_HOST}:${port}${path}`;
+const emptyResponse = (status = 204): Response => new Response(null, { status });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -199,9 +216,67 @@ const isPidAlive = (pid: number): boolean => {
   }
 };
 
+const escapeHtml = (value: string): string =>
+  value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+
+const formatPublicUrl = (port: number): string =>
+  `http://${LOCALHOST_PRINT_HOST}:${port}`;
+
+const formatDaemonUrl = (port: number, path: string): string =>
+  `http://${LOCALHOST_BIND_HOST}:${port}${path}`;
+
+export const daemonMetadataPath = (env: Env = process.env): string =>
+  join(getStoreDataDir(env), "daemon.json");
+
+export const readDaemonMetadata = async (
+  env: Env = process.env,
+): Promise<DaemonMetadata | undefined> => {
+  try {
+    const parsed = JSON.parse(await Bun.file(daemonMetadataPath(env)).text()) as unknown;
+    if (
+      !isRecord(parsed) ||
+      typeof parsed["pid"] !== "number" ||
+      typeof parsed["port"] !== "number" ||
+      typeof parsed["startedAt"] !== "string"
+    ) {
+      return undefined;
+    }
+
+    return {
+      pid: parsed["pid"],
+      port: parsed["port"],
+      startedAt: parsed["startedAt"],
+    };
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return undefined;
+    }
+
+    return undefined;
+  }
+};
+
+const writeDaemonMetadata = async (
+  metadata: DaemonMetadata,
+  env: Env = process.env,
+): Promise<void> => {
+  const path = daemonMetadataPath(env);
+  await mkdir(dirname(path), { recursive: true });
+  await Bun.write(path, `${JSON.stringify(metadata, null, 2)}\n`);
+};
+
+const clearDaemonMetadata = async (env: Env = process.env): Promise<void> => {
+  await rm(daemonMetadataPath(env), { force: true });
+};
+
 const readDaemonHealth = async (
   metadata: DaemonMetadata,
-): Promise<DaemonHealth | undefined> => {
+): Promise<Record<string, unknown> | undefined> => {
   try {
     const response = await fetch(formatDaemonUrl(metadata.port, "/api/health"));
     if (!response.ok) {
@@ -209,70 +284,18 @@ const readDaemonHealth = async (
     }
 
     const body = (await response.json()) as unknown;
-    if (!isRecord(body) || typeof body["coursePath"] !== "string") {
-      return undefined;
-    }
-
-    return {
-      coursePath: body["coursePath"],
-      waitPending: body["waitPending"] === true,
-      hasSeenWait: body["hasSeenWait"] === true,
-      orchestrated: body["orchestrated"] === true,
-    };
+    return isRecord(body) ? body : undefined;
   } catch {
     return undefined;
   }
 };
 
-const waitForDaemonShutdown = async (
-  courseDir: string,
-  pid: number,
-): Promise<boolean> => {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < DAEMON_STOP_TIMEOUT_MS) {
-    if (!isPidAlive(pid) && (await readDaemonMetadata(courseDir)) === undefined) {
-      return true;
-    }
-
-    await sleep(DAEMON_STOP_POLL_MS);
-  }
-
-  return !isPidAlive(pid) && (await readDaemonMetadata(courseDir)) === undefined;
-};
-
-const readCourseDisplayTitle = async (
-  courseJson: string,
-  fallback: string,
-): Promise<string> => {
-  try {
-    const value = JSON.parse(await readFile(courseJson, "utf8")) as unknown;
-    const title = isRecord(value) ? value["title"] : undefined;
-    if (typeof title === "string" && title.trim().length > 0) {
-      return title.trim();
-    }
-  } catch {
-    // Invalid manifests are handled by readCourseManifest; title fallback is best-effort.
-  }
-
-  return fallback;
-};
-
-const healthMatchesCourse = async (
-  courseDir: string,
-  metadata: DaemonMetadata,
-): Promise<boolean> => {
-  const health = await readDaemonHealth(metadata);
-  return health?.coursePath === courseDir;
-};
-
 const isUsableDaemon = async (
-  courseDir: string,
   metadata: DaemonMetadata,
 ): Promise<boolean> =>
-  isPidAlive(metadata.pid) && (await healthMatchesCourse(courseDir, metadata));
+  isPidAlive(metadata.pid) && (await readDaemonHealth(metadata))?.["ok"] === true;
 
-const getDaemonSpawnCommand = (courseDir: string): readonly string[] => {
+const getDaemonSpawnCommand = (): readonly string[] => {
   const executable = process.argv[0] ?? process.execPath;
   const scriptPath = process.argv[1];
 
@@ -280,14 +303,14 @@ const getDaemonSpawnCommand = (courseDir: string): readonly string[] => {
     scriptPath !== undefined &&
     (scriptPath.endsWith(".ts") || scriptPath.endsWith(".js"))
   ) {
-    return [executable, scriptPath, "__daemon", courseDir];
+    return [executable, scriptPath, "__daemon"];
   }
 
-  return [process.execPath, "__daemon", courseDir];
+  return [process.execPath, "__daemon"];
 };
 
-const spawnDaemonProcess = (courseDir: string, env: Env): void => {
-  const [command, ...args] = getDaemonSpawnCommand(courseDir);
+const spawnDaemonProcess = (env: Env): void => {
+  const [command, ...args] = getDaemonSpawnCommand();
   if (command === undefined) {
     throw new LearnCommandError(1, "Unable to determine daemon command.");
   }
@@ -304,17 +327,12 @@ const spawnDaemonProcess = (courseDir: string, env: Env): void => {
   child.unref();
 };
 
-const waitForDaemonMetadata = async (
-  courseDir: string,
-): Promise<DaemonMetadata> => {
+const waitForDaemonMetadata = async (env: Env): Promise<DaemonMetadata> => {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < DAEMON_START_TIMEOUT_MS) {
-    const metadata = await readDaemonMetadata(courseDir);
-    if (
-      metadata !== undefined &&
-      (await isUsableDaemon(courseDir, metadata))
-    ) {
+    const metadata = await readDaemonMetadata(env);
+    if (metadata !== undefined && (await isUsableDaemon(metadata))) {
       return metadata;
     }
 
@@ -322,6 +340,23 @@ const waitForDaemonMetadata = async (
   }
 
   throw new LearnCommandError(1, "Daemon did not start within 5 seconds.");
+};
+
+const waitForDaemonShutdown = async (
+  env: Env,
+  pid: number,
+): Promise<boolean> => {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < DAEMON_STOP_TIMEOUT_MS) {
+    if (!isPidAlive(pid) && (await readDaemonMetadata(env)) === undefined) {
+      return true;
+    }
+
+    await sleep(DAEMON_STOP_POLL_MS);
+  }
+
+  return !isPidAlive(pid) && (await readDaemonMetadata(env)) === undefined;
 };
 
 const openBrowser = (url: string, env: Env): void => {
@@ -338,171 +373,133 @@ const openBrowser = (url: string, env: Env): void => {
     });
     child.unref();
   } catch {
-    // Opening the browser is best-effort by contract.
+    // Opening the browser is best-effort.
   }
 };
 
-const startDaemonForCourse = async (
-  paths: CoursePaths,
-  env: Env = process.env,
-): Promise<string> => {
-  const existingMetadata = await readDaemonMetadata(paths.courseDir);
+const findCourseByName = (store: Store, name: string): Course | undefined =>
+  listCourses(store).find(
+    (course) =>
+      course.status !== "archived" &&
+      (course.sourceName === name || course.title === name),
+  );
 
-  if (
-    existingMetadata !== undefined &&
-    (await isUsableDaemon(paths.courseDir, existingMetadata))
-  ) {
+const createCourseForStart = (name: string | undefined, env: Env): void => {
+  if (name === undefined || name.trim().length === 0) {
+    return;
+  }
+
+  const store = openStore({ env });
+  try {
+    if (findCourseByName(store, name) === undefined) {
+      createCourse(store, {
+        title: name,
+        sourceName: name,
+        status: "active",
+      });
+    }
+  } finally {
+    store.close();
+  }
+};
+
+const startAppDaemon = async (
+  env: Env = process.env,
+  options: Readonly<{ createCourseName?: string }> = {},
+): Promise<string> => {
+  if (options.createCourseName !== undefined) {
+    createCourseForStart(options.createCourseName, env);
+  }
+
+  const existingMetadata = await readDaemonMetadata(env);
+  if (existingMetadata !== undefined && (await isUsableDaemon(existingMetadata))) {
     const url = formatPublicUrl(existingMetadata.port);
     openBrowser(url, env);
     return url;
   }
 
   if (existingMetadata !== undefined) {
-    await clearDaemonMetadata(paths.courseDir);
+    await clearDaemonMetadata(env);
   }
 
-  spawnDaemonProcess(paths.courseDir, env);
-  const metadata = await waitForDaemonMetadata(paths.courseDir);
+  spawnDaemonProcess(env);
+  const metadata = await waitForDaemonMetadata(env);
   const url = formatPublicUrl(metadata.port);
-
   openBrowser(url, env);
 
   return url;
 };
 
 export const startCourseDaemon = async (
-  name = DEFAULT_COURSE_NAME,
-  env: Env = process.env,
-): Promise<string> =>
-  startDaemonForCourse(await ensureCourseScaffold(name, env), env);
-
-export const resumeCourseDaemon = async (
-  name: string,
-  env: Env = process.env,
-): Promise<string> => startDaemonForCourse(await requireCourse(name, env), env);
-
-const parseWaitResponse = async (response: Response): Promise<string> => {
-  const body = (await response.json()) as unknown;
-  if (!isRecord(body) || typeof body["turnPath"] !== "string") {
-    throw new LearnCommandError(2, "Daemon returned an invalid wait response.");
-  }
-
-  return body["turnPath"];
-};
-
-export type LearnerTurn = Readonly<{
-  turnPath: string;
-  courseDir: string;
-}>;
-
-export const waitForLearnerTurn = async (
   name: string | undefined,
   env: Env = process.env,
-  cwd = process.cwd(),
+): Promise<string> =>
+  name === undefined
+    ? startAppDaemon(env)
+    : startAppDaemon(env, { createCourseName: name });
+
+export const resumeCourseDaemon = async (
+  _name: string,
+  env: Env = process.env,
+): Promise<string> => startAppDaemon(env);
+
+export const waitForLearnerTurn = async (
+  ...args: readonly unknown[]
 ): Promise<LearnerTurn> => {
-  const courseDir = await resolveCourseDirForWait(name, env, cwd);
-  const metadata = await readDaemonMetadata(courseDir);
-
-  if (metadata === undefined || !isPidAlive(metadata.pid)) {
-    throw new LearnCommandError(
-      2,
-      `Daemon is not running for course: ${courseDir}`,
-    );
-  }
-
-  let response: Response;
-  for (;;) {
-    try {
-      response = await fetch(formatDaemonUrl(metadata.port, "/api/wait"));
-      break;
-    } catch {
-      // A dropped connection is not proof of death; only give up when the
-      // daemon process is actually gone.
-      if (!isPidAlive(metadata.pid)) {
-        throw new LearnCommandError(
-          2,
-          "Daemon died while waiting for learner input.",
-        );
-      }
-      await sleep(WAIT_RETRY_DELAY_MS);
-    }
-  }
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new LearnCommandError(
-      2,
-      body.trim().length > 0
-        ? `Daemon wait failed: ${body.trim()}`
-        : `Daemon wait failed with HTTP ${response.status}`,
-    );
-  }
-
-  return {
-    turnPath: await parseWaitResponse(response),
-    courseDir,
-  };
+  void args;
+  throw new LearnCommandError(
+    2,
+    "learn wait has been removed. Use the app-level daemon course API instead.",
+  );
 };
 
 export const getCourseStatus = async (
-  name: string | undefined,
+  _name: string | undefined,
   env: Env = process.env,
-  cwd = process.cwd(),
 ): Promise<CourseStatus> => {
-  let courseDir: string;
-  try {
-    courseDir = await resolveCourseDirForWait(name, env, cwd);
-  } catch {
+  const metadata = await readDaemonMetadata(env);
+  if (metadata === undefined || !isPidAlive(metadata.pid)) {
     return {
       daemonAlive: false,
       waitPending: false,
       courseDir: null,
-    };
-  }
-
-  const metadata = await readDaemonMetadata(courseDir);
-  if (metadata === undefined || !isPidAlive(metadata.pid)) {
-    return {
-      daemonAlive: false,
-      waitPending: false,
-      courseDir,
+      activeCourseId: null,
     };
   }
 
   const health = await readDaemonHealth(metadata);
-  if (health?.coursePath !== courseDir) {
+  if (health?.["ok"] !== true) {
     return {
       daemonAlive: false,
       waitPending: false,
-      courseDir,
+      courseDir: null,
+      activeCourseId: null,
     };
   }
 
+  const activeCourseId =
+    typeof health["activeCourseId"] === "number" ? health["activeCourseId"] : null;
+
   return {
     daemonAlive: true,
-    waitPending: health.waitPending,
-    courseDir,
+    waitPending: false,
+    courseDir: null,
+    activeCourseId,
   };
 };
 
-const noDaemonMessage = (courseDir: string): string =>
-  `No daemon is running for course: ${courseDir}`;
-
 export const stopCourseDaemon = async (
-  name: string | undefined,
+  _name: string | undefined,
   env: Env = process.env,
-  cwd = process.cwd(),
 ): Promise<string> => {
-  const courseDir = await resolveCourseDirForWait(name, env, cwd);
-  const metadata = await readDaemonMetadata(courseDir);
-
+  const metadata = await readDaemonMetadata(env);
   if (metadata === undefined) {
-    return noDaemonMessage(courseDir);
+    return "No overlearn daemon is running.";
   }
 
   if (!isPidAlive(metadata.pid)) {
-    await clearDaemonMetadata(courseDir);
-    return noDaemonMessage(courseDir);
+    await clearDaemonMetadata(env);
+    return "No overlearn daemon is running.";
   }
 
   try {
@@ -518,19 +515,16 @@ export const stopCourseDaemon = async (
     try {
       process.kill(metadata.pid, "SIGTERM");
     } catch {
-      await clearDaemonMetadata(courseDir);
-      return noDaemonMessage(courseDir);
+      await clearDaemonMetadata(env);
+      return "No overlearn daemon is running.";
     }
   }
 
-  if (!(await waitForDaemonShutdown(courseDir, metadata.pid))) {
-    throw new LearnCommandError(
-      1,
-      `Daemon did not stop within 5 seconds for course: ${courseDir}`,
-    );
+  if (!(await waitForDaemonShutdown(env, metadata.pid))) {
+    throw new LearnCommandError(1, "Daemon did not stop within 5 seconds.");
   }
 
-  return `Stopped daemon for course: ${courseDir}`;
+  return "Stopped overlearn daemon.";
 };
 
 const readAgentMessageText = async (
@@ -539,336 +533,7 @@ const readAgentMessageText = async (
 ): Promise<string> =>
   source.kind === "text"
     ? source.text
-    : await readFile(resolve(cwd, source.path), "utf8");
-
-const readDemoFileSet = async (
-  demosDir: string,
-): Promise<ReadonlySet<string>> => {
-  let entries: string[];
-  try {
-    entries = await readdir(demosDir);
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "ENOENT"
-    ) {
-      return new Set();
-    }
-
-    throw error;
-  }
-
-  const fileNames = await Promise.all(
-    entries
-      .filter(isValidDemoFileName)
-      .map(async (fileName) => {
-        try {
-          return (await stat(join(demosDir, fileName))).isFile()
-            ? fileName
-            : undefined;
-        } catch (error) {
-          if (
-            typeof error === "object" &&
-            error !== null &&
-            "code" in error &&
-            error.code === "ENOENT"
-          ) {
-            return undefined;
-          }
-
-          throw error;
-        }
-      }),
-  );
-
-  return new Set(
-    fileNames.flatMap((fileName) =>
-      fileName === undefined ? [] : [fileName],
-    ),
-  );
-};
-
-type TranscriptBroadcaster = (entry: TranscriptEntry) => void;
-
-const noopBroadcastTranscriptEntry: TranscriptBroadcaster = () => undefined;
-
-type LessonFileReference = Readonly<{
-  id: string;
-  modifiedAtMs: number;
-}>;
-
-export const lessonTranscriptIds = (
-  transcript: readonly TranscriptEntry[],
-): Set<string> =>
-  new Set(
-    transcript.flatMap((entry) =>
-      entry.kind === "lesson" ? [entry.lesson] : [],
-    ),
-  );
-
-export const latestFeynmanCheckIssuedAt = (
-  transcript: readonly TranscriptEntry[],
-): string | undefined =>
-  transcript.reduce<string | undefined>(
-    (latest, entry) =>
-      entry.kind === "feynman-check" ? entry.at : latest,
-    undefined,
-  );
-
-const lessonIdsFromEvent = (event: LessonEvent): readonly string[] => {
-  if (event.action === "upsert") {
-    return [event.lesson.id];
-  }
-
-  if (event.action === "snapshot") {
-    return event.snapshot.lessons.map((lesson) => lesson.id);
-  }
-
-  return [];
-};
-
-export const appendFirstSeenLessonTranscripts = async (
-  courseDir: string,
-  seenLessonIds: Set<string>,
-  event: LessonEvent,
-  broadcastTranscriptEntry: TranscriptBroadcaster =
-    noopBroadcastTranscriptEntry,
-): Promise<readonly TranscriptEntry[]> => {
-  const entries: TranscriptEntry[] = [];
-
-  for (const lessonId of lessonIdsFromEvent(event)) {
-    if (seenLessonIds.has(lessonId)) {
-      continue;
-    }
-
-    const entry = await appendLessonTranscript(
-      courseDir,
-      lessonId,
-      new Date().toISOString(),
-    );
-    seenLessonIds.add(lessonId);
-    entries.push(entry);
-    broadcastTranscriptEntry(entry);
-  }
-
-  return entries;
-};
-
-const readLessonFileReference = async (
-  lessonsDir: string,
-  fileName: string,
-): Promise<LessonFileReference | undefined> => {
-  if (!isLessonFileName(fileName)) {
-    return undefined;
-  }
-
-  try {
-    const fileStat = await stat(join(lessonsDir, fileName));
-    return fileStat.isFile()
-      ? {
-          id: lessonIdFromFileName(fileName),
-          modifiedAtMs: fileStat.mtimeMs,
-        }
-      : undefined;
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return undefined;
-    }
-
-    throw error;
-  }
-};
-
-const readLessonFileReferences = async (
-  lessonsDir: string,
-): Promise<readonly LessonFileReference[]> => {
-  let fileNames: string[];
-  try {
-    fileNames = await readdir(lessonsDir);
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return [];
-    }
-
-    throw error;
-  }
-
-  const references = await Promise.all(
-    fileNames.map((fileName) => readLessonFileReference(lessonsDir, fileName)),
-  );
-
-  return references
-    .flatMap((reference) => (reference === undefined ? [] : [reference]))
-    .sort((left, right) => {
-      const mtimeCompare = left.modifiedAtMs - right.modifiedAtMs;
-      return mtimeCompare === 0 ? left.id.localeCompare(right.id) : mtimeCompare;
-    });
-};
-
-export const backfillLessonTranscripts = async (
-  courseDir: string,
-  lessonsDir: string,
-  seenLessonIds: Set<string>,
-  broadcastTranscriptEntry: TranscriptBroadcaster =
-    noopBroadcastTranscriptEntry,
-): Promise<readonly TranscriptEntry[]> => {
-  const entries: TranscriptEntry[] = [];
-
-  for (const reference of await readLessonFileReferences(lessonsDir)) {
-    if (seenLessonIds.has(reference.id)) {
-      continue;
-    }
-
-    const entry = await appendLessonTranscript(
-      courseDir,
-      reference.id,
-      new Date(reference.modifiedAtMs).toISOString(),
-    );
-    seenLessonIds.add(reference.id);
-    entries.push(entry);
-    broadcastTranscriptEntry(entry);
-  }
-
-  return entries;
-};
-
-export const appendNewFeynmanCheckTranscript = async (
-  courseDir: string,
-  activeCheck: ActiveFeynmanCheck | undefined,
-  lastRecordedIssuedAt: string | undefined,
-  broadcastTranscriptEntry: TranscriptBroadcaster =
-    noopBroadcastTranscriptEntry,
-): Promise<
-  Readonly<{
-    entry: TranscriptEntry | undefined;
-    lastRecordedIssuedAt: string | undefined;
-  }>
-> => {
-  if (
-    activeCheck === undefined ||
-    activeCheck.issuedAt === lastRecordedIssuedAt
-  ) {
-    return { entry: undefined, lastRecordedIssuedAt };
-  }
-
-  const entry = await appendFeynmanCheckTranscript(
-    courseDir,
-    activeCheck.concept,
-    activeCheck.prompt,
-    activeCheck.issuedAt,
-  );
-  broadcastTranscriptEntry(entry);
-
-  return {
-    entry,
-    lastRecordedIssuedAt: activeCheck.issuedAt,
-  };
-};
-
-export const appendFeynmanAnswerTimelineEntry = async (
-  courseDir: string,
-  concept: string,
-  text: string,
-  at: string,
-  broadcastTranscriptEntry: TranscriptBroadcaster =
-    noopBroadcastTranscriptEntry,
-): Promise<TranscriptEntry> => {
-  const entry = await appendFeynmanAnswerTranscript(
-    courseDir,
-    concept,
-    text,
-    at,
-  );
-  broadcastTranscriptEntry(entry);
-
-  return entry;
-};
-
-const demoFileFromPath = (pathName: string): string | undefined => {
-  if (!pathName.startsWith("/demos/")) {
-    return undefined;
-  }
-
-  const encodedFile = pathName.slice("/demos/".length);
-  if (encodedFile.length === 0 || encodedFile.includes("/")) {
-    return undefined;
-  }
-
-  try {
-    const file = decodeURIComponent(encodedFile);
-    return isValidDemoFileName(file) ? file : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
-const demoResponse = async (
-  demosDir: string,
-  pathName: string,
-): Promise<Response | undefined> => {
-  const file = demoFileFromPath(pathName);
-  if (file === undefined) {
-    return undefined;
-  }
-
-  const filePath = join(demosDir, file);
-
-  try {
-    const fileStat = await stat(filePath);
-    if (!fileStat.isFile()) {
-      return textResponse("Demo not found", 404);
-    }
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "ENOENT"
-    ) {
-      return textResponse("Demo not found", 404);
-    }
-
-    throw error;
-  }
-
-  return new Response(Bun.file(filePath), {
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      // Inline demos are self-contained. The iframe sandbox omits
-      // allow-same-origin, and this CSP blocks network reach-back.
-      "content-security-policy": DEMO_CSP,
-    },
-  });
-};
-
-const notifyAgentMessage = async (
-  metadata: DaemonMetadata,
-  entry: TranscriptEntry,
-): Promise<string | undefined> => {
-  try {
-    const response = await fetch(
-      formatDaemonUrl(metadata.port, "/api/agent-message"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(entry),
-      },
-    );
-
-    if (response.ok) {
-      return undefined;
-    }
-
-    const body = await response.text();
-    return body.trim().length > 0
-      ? `daemon rejected agent message: ${body.trim()}`
-      : `daemon rejected agent message with HTTP ${response.status}`;
-  } catch {
-    return "daemon did not accept the agent message";
-  }
-};
+    : await Bun.file(resolve(cwd, source.path)).text();
 
 export const sayAgentMessage = async (
   name: string | undefined,
@@ -876,48 +541,44 @@ export const sayAgentMessage = async (
   env: Env = process.env,
   cwd = process.cwd(),
 ): Promise<string | undefined> => {
-  const courseDir = await resolveCourseDirForWait(name, env, cwd);
-  const text = await readAgentMessageText(source, cwd);
+  if (name === undefined) {
+    throw new LearnCommandError(1, "learn say now requires a store course name.");
+  }
 
+  const text = await readAgentMessageText(source, cwd);
   if (text.trim().length === 0) {
     throw new LearnCommandError(1, "Agent message text cannot be empty.");
   }
 
-  const at = new Date().toISOString();
-  const entry = await appendAgentTranscript(courseDir, text, at);
+  const store = openStore({ env });
+  try {
+    const course = findCourseByName(store, name);
+    if (course === undefined) {
+      throw new LearnCommandError(1, `No store course found: ${name}`);
+    }
 
-  return notifyAgentTranscriptEntry(courseDir, entry);
+    appendTranscriptEntry(store, course.id, {
+      role: "agent",
+      kind: "text",
+      content: text,
+    });
+    return undefined;
+  } finally {
+    store.close();
+  }
 };
 
 export const notifyAgentTranscriptEntry = async (
-  courseDir: string,
-  entry: TranscriptEntry,
+  ...args: readonly unknown[]
 ): Promise<string | undefined> => {
-  const metadata = await readDaemonMetadata(courseDir);
-
-  if (
-    metadata === undefined ||
-    !(await isUsableDaemon(courseDir, metadata))
-  ) {
-    return `Warning: daemon is not running for course ${courseDir}; appended agent message to transcript only.`;
-  }
-
-  const notifyWarning = await notifyAgentMessage(metadata, entry);
-  return notifyWarning === undefined
-    ? undefined
-    : `Warning: ${notifyWarning}; appended agent message to transcript only.`;
+  void args;
+  return undefined;
 };
 
 const createSseHub = (
-  getStatus: () => UiStatusPayload,
-  getHarnesses: () => HarnessesPayload,
-  getGlossary: () => readonly GlossaryEntry[],
-  getTopics: () => readonly TopicNode[],
-  getUnassignedDemos: () => readonly DemoEntry[],
-  getMasteryScores: () => readonly MasteryEntry[],
-  getDemoFiles: () => ReadonlySet<string>,
-  getActiveFeynmanCheck: () => ActiveFeynmanCheck | undefined,
-  getAgentStreamReplay: () => readonly AgentStreamPayload[],
+  getStatusPayloads: () => readonly UiStatusPayload[],
+  getHarnesses: (courseId?: number) => HarnessesPayload,
+  getCourses: () => unknown,
 ) => {
   const subscribers = new Set<ServerResponse>();
 
@@ -934,1237 +595,1425 @@ const createSseHub = (
     response.write(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`);
   };
 
-  const broadcastStatus = (): void => {
-    const payload = getStatus();
+  const broadcast = (event: string, value: unknown): void => {
     for (const subscriber of subscribers) {
-      writeEvent(subscriber, "status", payload);
+      writeEvent(subscriber, event, value);
     }
   };
 
-  const broadcastHarnesses = (payload: HarnessesPayload): void => {
-    for (const subscriber of subscribers) {
-      writeEvent(subscriber, "harnesses", payload);
-    }
-  };
-
-  const renderTranscriptEntry = (entry: TranscriptEntry) => {
-    const markdownOptions = {
-      glossary: getGlossary(),
-      demoFiles: getDemoFiles(),
-    };
-    const html =
-      entry.kind === "demo"
-        ? renderDemoEmbed(entry.file, entry.title, {
-            demoFiles: getDemoFiles(),
-          })
-        : entry.kind === undefined || entry.kind === "text"
-          ? renderMarkdown(entry.text, markdownOptions)
-          : entry.kind === "feynman-check"
-            ? renderMarkdown(entry.prompt, markdownOptions)
-            : entry.kind === "feynman-answer"
-              ? renderMarkdown(entry.text, markdownOptions)
-              : "";
-
-    return { ...entry, html };
-  };
-
-  const broadcastMessage = (entry: TranscriptEntry): void => {
-    const renderedEntry = renderTranscriptEntry(entry);
-    for (const subscriber of subscribers) {
-      writeEvent(subscriber, "message", renderedEntry);
-    }
-  };
-
-  const broadcastTranscript = (entries: readonly TranscriptEntry[]): void => {
-    const renderedEntries = entries.map(renderTranscriptEntry);
-    for (const subscriber of subscribers) {
-      writeEvent(subscriber, "transcript", { entries: renderedEntries });
-    }
-  };
-
-  const broadcastLesson = (event: LessonEvent): void => {
-    for (const subscriber of subscribers) {
-      writeEvent(subscriber, "lesson", event);
-    }
-  };
-
-  const broadcastGlossary = (entries: readonly GlossaryEntry[]): void => {
-    for (const subscriber of subscribers) {
-      writeEvent(subscriber, "glossary", { entries });
-    }
-  };
-
-  const broadcastTopics = (
-    topics: readonly TopicNode[],
-    unassignedDemos: readonly DemoEntry[],
-  ): void => {
-    for (const subscriber of subscribers) {
-      writeEvent(subscriber, "topics", { topics, unassignedDemos });
-    }
-  };
-
-  const broadcastMastery = (entries: readonly MasteryEntry[]): void => {
-    for (const subscriber of subscribers) {
-      writeEvent(subscriber, "mastery", { entries });
-    }
-  };
-
-  const broadcastFeynman = (
-    activeCheck: ActiveFeynmanCheck | undefined,
-  ): void => {
-    for (const subscriber of subscribers) {
-      writeEvent(subscriber, "feynman", { activeCheck: activeCheck ?? null });
-    }
-  };
-
-  const broadcastAgentStream = (payload: AgentStreamPayload): void => {
-    for (const subscriber of subscribers) {
-      writeEvent(subscriber, "agent-stream", payload);
-    }
-  };
-
-  const connect = (
-    request: IncomingMessage,
-    response: ServerResponse,
-  ): void => {
+  const connect = (_request: IncomingMessage, response: ServerResponse): void => {
     response.writeHead(200, {
       "cache-control": "no-cache",
       connection: "keep-alive",
       "content-type": "text/event-stream",
     });
     subscribers.add(response);
-    writeEvent(response, "status", getStatus());
-    writeEvent(response, "harnesses", getHarnesses());
-    writeEvent(response, "glossary", { entries: getGlossary() });
-    writeEvent(response, "topics", {
-      topics: getTopics(),
-      unassignedDemos: getUnassignedDemos(),
-    });
-    writeEvent(response, "mastery", { entries: getMasteryScores() });
-    writeEvent(response, "feynman", {
-      activeCheck: getActiveFeynmanCheck() ?? null,
-    });
-    for (const payload of getAgentStreamReplay()) {
-      writeEvent(response, "agent-stream", payload);
-    }
 
-    request.on("close", () => {
+    for (const status of getStatusPayloads()) {
+      writeEvent(response, "status", status);
+    }
+    writeEvent(response, "courses", getCourses());
+    writeEvent(response, "harnesses", getHarnesses());
+
+    response.on("close", () => {
       subscribers.delete(response);
     });
   };
 
-  const close = (): void => {
+  const closeAll = (): void => {
     for (const subscriber of subscribers) {
       subscriber.end();
     }
     subscribers.clear();
   };
 
-  return {
-    broadcastAgentStream,
-    broadcastFeynman,
-    broadcastGlossary,
-    broadcastHarnesses,
-    broadcastLesson,
-    broadcastMastery,
-    broadcastMessage,
-    broadcastStatus,
-    broadcastTranscript,
-    broadcastTopics,
-    close,
-    connect,
-  };
+  return { broadcast, closeAll, connect };
 };
 
-const createSerializer = () => {
-  let current = Promise.resolve();
+const readRequestBody = async (request: IncomingMessage): Promise<Uint8Array> => {
+  const chunks: Uint8Array[] = [];
 
-  return async <T>(operation: () => Promise<T>): Promise<T> => {
-    const next = current.then(operation, operation);
-    current = next.then(
-      () => undefined,
-      () => undefined,
-    );
+  for await (const chunk of request) {
+    chunks.push(chunk instanceof Uint8Array ? chunk : Buffer.from(chunk));
+  }
 
-    return next;
-  };
+  const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+  const body = new Uint8Array(length);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return body;
 };
 
-const parseSubmitText = (bodyText: string): string => {
-  const body = JSON.parse(bodyText) as unknown;
-  if (!isRecord(body) || typeof body["text"] !== "string") {
-    throw new Error("Expected JSON body with a text field.");
-  }
+const headersFromIncoming = (
+  request: IncomingMessage,
+): Headers => {
+  const headers = new Headers();
 
-  const text = body["text"].trim();
-  if (text.length === 0) {
-    throw new Error("Message text cannot be empty.");
-  }
-
-  return text;
-};
-
-type NavRequest =
-  | Readonly<{ kind: "nav"; path: string }>
-  | Readonly<{ kind: "review-weak" }>;
-
-const parseNavRequest = (bodyText: string): NavRequest => {
-  const body = JSON.parse(bodyText) as unknown;
-  if (!isRecord(body) || typeof body["path"] !== "string") {
-    throw new Error("Expected JSON body with a path field.");
-  }
-
-  const path = body["path"].trim();
-  if (path.length === 0) {
-    throw new Error("Topic path cannot be empty.");
-  }
-
-  if (path === REVIEW_WEAK_NAV_PATH) {
-    return { kind: "review-weak" };
-  }
-
-  if (!isValidTopicPath(path)) {
-    throw new Error(`Invalid topic path: ${body["path"]}.`);
-  }
-
-  return { kind: "nav", path };
-};
-
-const parseFeynmanAnswer = (
-  bodyText: string,
-): Readonly<{ concept: string; text: string }> => {
-  const body = JSON.parse(bodyText) as unknown;
-  if (
-    !isRecord(body) ||
-    typeof body["concept"] !== "string" ||
-    typeof body["text"] !== "string"
-  ) {
-    throw new Error("Expected JSON body with concept and text fields.");
-  }
-
-  const concept = body["concept"].trim();
-  if (concept.length === 0) {
-    throw new Error("Concept id cannot be empty.");
-  }
-
-  if (!isValidConceptId(concept)) {
-    throw new Error(
-      `Invalid concept id: ${body["concept"]}. Use slash-separated lowercase letters, numbers, and hyphens.`,
-    );
-  }
-
-  const text = body["text"].trim();
-  if (text.length === 0) {
-    throw new Error("Feynman answer cannot be empty.");
-  }
-
-  return { concept, text };
-};
-
-const parseAgentMessage = (bodyText: string): TranscriptEntry => {
-  const body = JSON.parse(bodyText) as unknown;
-  if (!isRecord(body)) {
-    throw new Error("Expected JSON agent message body.");
-  }
-
-  const role = body["role"];
-  const kind = body["kind"];
-  const text = body["text"];
-  const file = body["file"];
-  const title = body["title"];
-  const at = body["at"];
-
-  if (role !== "agent" || typeof at !== "string") {
-    throw new Error("Expected JSON body with agent role and at fields.");
-  }
-
-  if (kind === "demo") {
-    if (
-      typeof file !== "string" ||
-      !isValidDemoFileName(file) ||
-      (title !== undefined &&
-        (typeof title !== "string" || title.trim().length === 0))
-    ) {
-      throw new Error("Expected JSON demo body with a valid file.");
+  for (const [key, value] of Object.entries(request.headers)) {
+    if (value === undefined) {
+      continue;
     }
 
+    if (Array.isArray(value)) {
+      headers.set(key, value.join(", "));
+    } else {
+      headers.set(key, value);
+    }
+  }
+
+  return headers;
+};
+
+const webRequestFromIncoming = async (
+  request: IncomingMessage,
+  port: number,
+): Promise<Request> => {
+  const method = request.method ?? "GET";
+  const url = `http://${LOCALHOST_BIND_HOST}:${port}${request.url ?? "/"}`;
+  const body =
+    method === "GET" || method === "HEAD"
+      ? undefined
+      : await readRequestBody(request);
+
+  return new Request(url, {
+    method,
+    headers: headersFromIncoming(request),
+    ...(body === undefined ? {} : { body }),
+  });
+};
+
+const writeWebResponse = async (
+  target: ServerResponse,
+  response: Response,
+): Promise<void> => {
+  target.writeHead(
+    response.status,
+    Object.fromEntries(response.headers.entries()),
+  );
+
+  if (response.body === null) {
+    target.end();
+    return;
+  }
+
+  const reader = response.body.getReader();
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) {
+      target.end();
+      return;
+    }
+
+    if (!target.write(Buffer.from(chunk.value))) {
+      await new Promise<void>((resolveDrain) => {
+        target.once("drain", () => resolveDrain());
+      });
+    }
+  }
+};
+
+const readJsonBody = async (request: Request): Promise<unknown> => {
+  const text = await request.text();
+  if (text.trim().length === 0) {
+    return {};
+  }
+
+  return JSON.parse(text) as unknown;
+};
+
+const optionalStringField = (
+  record: Record<string, unknown>,
+  key: string,
+): string | null | undefined => {
+  if (!Object.hasOwn(record, key)) {
+    return undefined;
+  }
+
+  const value = record[key];
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    throw new Error(`${key} must be a string or null.`);
+  }
+
+  return value;
+};
+
+const requiredStringField = (
+  record: Record<string, unknown>,
+  key: string,
+): string => {
+  const value = record[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${key} is required.`);
+  }
+
+  return value;
+};
+
+const parseCourseStatus = (value: string | null): StoreCourseStatus | undefined => {
+  if (value === null) {
+    return undefined;
+  }
+
+  if (value === "draft" || value === "active" || value === "archived") {
+    return value;
+  }
+
+  throw new Error("status must be draft, active, or archived.");
+};
+
+const courseResource = (course: Course): Record<string, unknown> => ({
+  id: course.id,
+  title: course.title,
+  description: course.description,
+  harnessId: course.harnessId,
+  attachedDir: course.attachedDir,
+  status: course.status,
+  sourceName: course.sourceName,
+  manifestExtra: course.manifestExtra,
+  createdAt: course.createdAt,
+  updatedAt: course.updatedAt,
+});
+
+const demoKey = (demo: Demo): string => {
+  if (demo.fileName !== null && demo.fileName.endsWith(".html")) {
+    return demo.fileName;
+  }
+
+  return `demo-${demo.id}.html`;
+};
+
+const uiDemo = (demo: Demo): DemoEntry => ({
+  file: demoKey(demo),
+  ...(demo.title === null ? {} : { title: demo.title }),
+  addedAt: demo.addedAt,
+});
+
+const uiGlossaryEntry = (entry: StoreGlossaryEntry): GlossaryEntry => ({
+  term: entry.term,
+  def: entry.definition,
+  ...(entry.lessonId === null ? {} : { lesson: entry.lessonId }),
+  addedAt: entry.addedAt,
+});
+
+const uiMasteryEntry = (entry: MasteryEvent): MasteryEntry => ({
+  concept: entry.concept,
+  score: entry.score,
+  ...(entry.gaps === null ? {} : { gaps: entry.gaps }),
+  at: entry.ts,
+});
+
+const demosByTopicId = (
+  demos: readonly Demo[],
+): ReadonlyMap<number | null, readonly DemoEntry[]> => {
+  const grouped = new Map<number | null, DemoEntry[]>();
+
+  for (const demo of demos) {
+    const existing = grouped.get(demo.topicId) ?? [];
+    existing.push(uiDemo(demo));
+    grouped.set(demo.topicId, existing);
+  }
+
+  return grouped;
+};
+
+const uiTopic = (
+  topic: Topic,
+  groupedDemos: ReadonlyMap<number | null, readonly DemoEntry[]>,
+): TopicNode => ({
+  path: topic.path,
+  title: topic.title,
+  ...(topic.lessonId === null ? {} : { lesson: topic.lessonId }),
+  ...(topic.enteredAt === null ? {} : { enteredAt: topic.enteredAt }),
+  current: topic.isCurrent,
+  demos: groupedDemos.get(topic.id) ?? [],
+  children: topic.children.map((child) => uiTopic(child, groupedDemos)),
+});
+
+const activeFeynman = (check: FeynmanCheck | null): ActiveFeynmanCheck | undefined =>
+  check === null
+    ? undefined
+    : {
+        concept: check.concept,
+        prompt: check.prompt,
+        keyPoints: check.keyPoints,
+        issuedAt: check.issuedAt,
+        ...(check.replacedConcept === null ||
+        check.replacedIssuedAt === null ||
+        check.replacedAt === null
+          ? {}
+          : {
+              replaced: {
+                concept: check.replacedConcept,
+                issuedAt: check.replacedIssuedAt,
+                replacedAt: check.replacedAt,
+              },
+            }),
+      };
+
+const transcriptPayloadRecord = (
+  entry: StoreTranscriptEntry,
+): Record<string, unknown> =>
+  isRecord(entry.payload) ? entry.payload : {};
+
+const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
+  const payload = transcriptPayloadRecord(entry);
+  const at = entry.ts;
+
+  if (entry.kind === "feynman-answer") {
     return {
-      role,
-      kind,
-      file,
-      ...(title === undefined ? {} : { title: title.trim() }),
+      role: "learner",
+      kind: "feynman-answer",
+      concept:
+        typeof payload["concept"] === "string" ? payload["concept"] : "unknown",
+      text: entry.content,
       at,
     };
   }
 
-  if ((kind !== undefined && kind !== "text") || typeof text !== "string") {
-    throw new Error("Expected JSON body with agent role, text, and at fields.");
+  if (entry.kind === "tool-call") {
+    return {
+      role: "system",
+      kind: "tool-call",
+      text: entry.content,
+      at,
+      tool: typeof payload["tool"] === "string" ? payload["tool"] : "tool",
+    };
   }
 
-  if (text.trim().length === 0) {
-    throw new Error("Agent message text cannot be empty.");
+  return {
+    role: entry.role === "agent" ? "agent" : "learner",
+    text: entry.content,
+    at,
+  };
+};
+
+const readTranscriptTail = (
+  store: Store,
+  courseId: number,
+): readonly TranscriptEntry[] => {
+  let afterId: number | undefined;
+  let tail: readonly StoreTranscriptEntry[] = [];
+
+  while (true) {
+    const page = pageTranscript(store, courseId, {
+      ...(afterId === undefined ? {} : { afterId }),
+      limit: 200,
+    });
+    tail = [...tail, ...page.entries].slice(-200);
+
+    if (page.nextAfterId === null) {
+      break;
+    }
+
+    afterId = page.nextAfterId;
   }
 
-  return { role, text, at };
+  return tail.map(uiTranscriptEntry);
 };
 
-const parseHarnessSelection = (bodyText: string): string => {
-  const body = JSON.parse(bodyText) as unknown;
-  if (!isRecord(body) || typeof body["id"] !== "string") {
-    throw new Error("Expected JSON body with an id field.");
+const lessonSnapshot = (
+  lessons: readonly Lesson[],
+  glossary: readonly GlossaryEntry[],
+  demoFiles: ReadonlySet<string>,
+) => {
+  const rendered = lessons.map((lesson) => ({
+    id: lesson.lessonId,
+    html: renderMarkdown(lesson.bodyMarkdown, { glossary, demoFiles }),
+    modifiedAtMs:
+      lesson.sourceMtimeMs ??
+      Date.parse(lesson.updatedAt) ??
+      Date.parse(lesson.createdAt),
+  }));
+  const selected = rendered.reduce<
+    { id: string; modifiedAtMs: number } | undefined
+  >((latest, lesson) => {
+    if (latest === undefined || lesson.modifiedAtMs >= latest.modifiedAtMs) {
+      return { id: lesson.id, modifiedAtMs: lesson.modifiedAtMs };
+    }
+
+    return latest;
+  }, undefined);
+
+  return {
+    lessons: rendered,
+    selectedLessonId: selected?.id,
+  };
+};
+
+const courseView = (store: Store, courseId: number) => {
+  const course = getCourse(store, courseId);
+  if (course === undefined) {
+    return undefined;
   }
 
-  const id = body["id"].trim();
-  if (id.length === 0) {
-    throw new Error("Harness id cannot be empty.");
+  const demos = listDemos(store, courseId);
+  const groupedDemos = demosByTopicId(demos);
+  const demoFiles = new Set(demos.map(demoKey));
+  const glossary = listGlossary(store, courseId).map(uiGlossaryEntry);
+
+  return {
+    course,
+    transcript: readTranscriptTail(store, courseId),
+    lessons: lessonSnapshot(listLessons(store, courseId), glossary, demoFiles),
+    glossary,
+    topics: readTopicTree(store, courseId).map((topic) =>
+      uiTopic(topic, groupedDemos),
+    ),
+    unassignedDemos: groupedDemos.get(null) ?? [],
+    masteryScores: listLatestMasteryScores(store, courseId).map(uiMasteryEntry),
+    demoFiles,
+    activeFeynmanCheck: activeFeynman(getActiveFeynmanCheck(store, courseId)),
+  };
+};
+
+const courseState = (store: Store, courseId: number): Record<string, unknown> | undefined => {
+  const view = courseView(store, courseId);
+  if (view === undefined) {
+    return undefined;
   }
 
-  return id;
+  return {
+    course: courseResource(view.course),
+    lessons: view.lessons,
+    topics: view.topics,
+    glossary: view.glossary,
+    mastery: view.masteryScores,
+    demos: listDemos(store, courseId).map((demo) => ({
+      id: demo.id,
+      topicId: demo.topicId,
+      fileName: demo.fileName,
+      key: demoKey(demo),
+      title: demo.title,
+      bodyFormat: demo.bodyFormat,
+      addedAt: demo.addedAt,
+    })),
+    activeFeynmanCheck: view.activeFeynmanCheck ?? null,
+    transcript: view.transcript,
+  };
 };
 
-const readRequestBody = async (request: IncomingMessage): Promise<string> => {
-  const chunks: string[] = [];
+const renderCoursePicker = (courses: readonly Course[]): Response => {
+  const rows =
+    courses.length === 0
+      ? '<p class="empty">No courses yet.</p>'
+      : `<ul>${courses
+          .map(
+            (course) =>
+              `<li><a href="/?course=${course.id}">${escapeHtml(course.title)}</a><span>${escapeHtml(course.status)}</span></li>`,
+          )
+          .join("")}</ul>`;
 
-  await new Promise<void>((resolve, reject) => {
-    request.setEncoding("utf8");
-    request.on("data", (chunk: string) => {
-      chunks.push(chunk);
-    });
-    request.on("end", () => resolve());
-    request.on("error", reject);
-  });
-
-  return chunks.join("");
-};
-
-const sendResponse = async (
-  target: ServerResponse,
-  response: Response,
-): Promise<void> => {
-  target.statusCode = response.status;
-  response.headers.forEach((value, key) => {
-    target.setHeader(key, value);
-  });
-
-  target.end(await response.text());
-};
-
-type FlushedTurn = Readonly<{
-  turnPath: string;
-  turn: TurnFile;
-}>;
-
-const readWrittenTurnFile = async (turnPath: string): Promise<TurnFile> =>
-  JSON.parse(await readFile(turnPath, "utf8")) as TurnFile;
-
-export const runDaemon = async (courseDir: string): Promise<void> => {
-  const coursePaths = getCoursePaths(courseDir);
-  const coursePath = coursePaths.courseDir;
-  const orchestrated = orchestratedTurnsEnabled(process.env);
-
-  // Resumed/fetched courses have no runtime dir yet; watchers below need it.
-  await mkdir(coursePaths.turnsDir, { recursive: true });
-
-  let manifest = await readCourseManifest(coursePath);
-  let glossaryEntries = await readGlossary(coursePath);
-  let topicTree = manifest.topics;
-  let unassignedDemos = manifest.unassignedDemos;
-  let masteryScores = latestMasteryScores(await readMastery(coursePath));
-  let demoFileSet = await readDemoFileSet(coursePaths.demosDir);
-  let activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
-  const initialTranscript = await readTranscript(coursePath);
-  const seenLessonIds = lessonTranscriptIds(initialTranscript);
-  let lastRecordedFeynmanCheckIssuedAt =
-    latestFeynmanCheckIssuedAt(initialTranscript);
-
-  let status: UiStatus = orchestrated ? "waiting-for-agent" : "agent-working";
-  let statusMessage: string | undefined;
-  let hasSeenWait = orchestrated;
-  let waiter: Waiter | undefined;
-  let nextWaiterId = 1;
-  let harnessDetectionCache:
-    | ReadonlyMap<string, AdapterDetection>
-    | undefined;
-  const agentStreamReplay: AgentStreamPayload[] = [];
-
-  const selectedHarnessId = (): string =>
-    manifest.harness ?? process.env["OVERLEARN_HARNESS"] ?? DEFAULT_HARNESS_ID;
-
-  const detectHarnesses = (): ReadonlyMap<string, AdapterDetection> => {
-    const detections = new Map<string, AdapterDetection>();
-
-    for (const adapter of listHarnessAdapters()) {
-      detections.set(adapter.id, adapter.detect());
-    }
-
-    return detections;
-  };
-
-  const harnessSummaries = (refresh = false): readonly HarnessSummary[] => {
-    const adapters = listHarnessAdapters();
-    if (harnessDetectionCache === undefined || refresh) {
-      harnessDetectionCache = detectHarnesses();
-    }
-
-    const selected = selectedHarnessId();
-    return adapters.map((adapter) => {
-      const detection = harnessDetectionCache?.get(adapter.id) ?? {
-        installed: false,
-        authenticated: false,
-      };
-
-      return {
-        id: adapter.id,
-        name: adapter.name,
-        installed: detection.installed,
-        authenticated: detection.authenticated,
-        ...(detection.version === undefined ? {} : { version: detection.version }),
-        selected: adapter.id === selected,
-      };
-    });
-  };
-
-  const serialize = createSerializer();
-  const harnessesPayload = (switched: boolean): HarnessesPayload => ({
-    harnesses: harnessSummaries(false),
-    switched,
-  });
-  const sseHub = createSseHub(
-    () =>
-      statusMessage === undefined
-        ? { status, hasSeenWait }
-        : { status, hasSeenWait, message: statusMessage },
-    () => harnessesPayload(false),
-    () => glossaryEntries,
-    () => topicTree,
-    () => unassignedDemos,
-    () => masteryScores,
-    () => demoFileSet,
-    () => activeFeynmanCheck,
-    () => agentStreamReplay,
-  );
-  const rememberAgentStream = (payload: AgentStreamPayload): void => {
-    agentStreamReplay.push(payload);
-    if (agentStreamReplay.length > MAX_AGENT_STREAM_REPLAY) {
-      agentStreamReplay.splice(
-        0,
-        agentStreamReplay.length - MAX_AGENT_STREAM_REPLAY,
-      );
-    }
-
-    sseHub.broadcastAgentStream(payload);
-
-    if (payload.event.type === "done" || payload.event.type === "error") {
-      agentStreamReplay.splice(0);
-    }
-  };
-  const orchestrator: DaemonTurnOrchestrator | undefined = orchestrated
-    ? createDaemonTurnOrchestrator({
-        coursePaths,
-        cwd: await resolveCourseWorkingDirectory(coursePaths),
-        env: process.env,
-        getHarnessId: selectedHarnessId,
-        onAgentEvent: rememberAgentStream,
-      })
-    : undefined;
-
-  await backfillLessonTranscripts(
-    coursePath,
-    coursePaths.lessonsDir,
-    seenLessonIds,
-    sseHub.broadcastMessage,
-  );
-  const bootFeynmanResult = await appendNewFeynmanCheckTranscript(
-    coursePath,
-    activeFeynmanCheck,
-    lastRecordedFeynmanCheckIssuedAt,
-    sseHub.broadcastMessage,
-  );
-  lastRecordedFeynmanCheckIssuedAt =
-    bootFeynmanResult.lastRecordedIssuedAt;
-
-  const refreshGlossary = async (): Promise<void> => {
-    await serialize(async () => {
-      glossaryEntries = await readGlossary(coursePath);
-      demoFileSet = await readDemoFileSet(coursePaths.demosDir);
-      sseHub.broadcastGlossary(glossaryEntries);
-
-      const [transcript, lessons] = await Promise.all([
-        readTranscript(coursePath),
-        readLessonSnapshot(
-          coursePaths.lessonsDir,
-          glossaryEntries,
-          demoFileSet,
-        ),
-      ]);
-
-      sseHub.broadcastLesson({ action: "snapshot", snapshot: lessons });
-      sseHub.broadcastTranscript(transcript);
-    });
-  };
-  const refreshTopics = async (): Promise<void> => {
-    await serialize(async () => {
-      manifest = await readCourseManifest(coursePath);
-      topicTree = manifest.topics;
-      unassignedDemos = manifest.unassignedDemos;
-      demoFileSet = await readDemoFileSet(coursePaths.demosDir);
-      sseHub.broadcastTopics(topicTree, unassignedDemos);
-    });
-  };
-  const refreshMastery = async (): Promise<void> => {
-    await serialize(async () => {
-      masteryScores = latestMasteryScores(await readMastery(coursePath));
-      sseHub.broadcastMastery(masteryScores);
-    });
-  };
-  const refreshFeynman = async (): Promise<void> => {
-    await serialize(async () => {
-      activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
-      const result = await appendNewFeynmanCheckTranscript(
-        coursePath,
-        activeFeynmanCheck,
-        lastRecordedFeynmanCheckIssuedAt,
-        sseHub.broadcastMessage,
-      );
-      lastRecordedFeynmanCheckIssuedAt = result.lastRecordedIssuedAt;
-      sseHub.broadcastFeynman(activeFeynmanCheck);
-    });
-  };
-
-  const lessonWatcher = watchLessonDirectory({
-    lessonsDir: coursePaths.lessonsDir,
-    getGlossary: () => glossaryEntries,
-    getDemoFiles: () => demoFileSet,
-    emit: async (event) => {
-      await serialize(async () => {
-        const entries = await appendFirstSeenLessonTranscripts(
-          coursePath,
-          seenLessonIds,
-          event,
-        );
-
-        sseHub.broadcastLesson(event);
-        for (const entry of entries) {
-          sseHub.broadcastMessage(entry);
-        }
+  return new Response(
+    `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>overlearn</title>
+  <style>
+    body { margin: 0; min-height: 100vh; font: 16px system-ui, sans-serif; background: #11110f; color: #ece8dc; }
+    main { width: min(44rem, calc(100vw - 2rem)); margin: 0 auto; padding: 3rem 0; }
+    h1 { font-size: 1.6rem; margin: 0 0 1.5rem; }
+    ul { list-style: none; padding: 0; display: grid; gap: .5rem; }
+    li { display: flex; justify-content: space-between; gap: 1rem; border: 1px solid #33362d; border-radius: 8px; padding: .85rem 1rem; }
+    a { color: #dcefc7; text-decoration: none; font-weight: 700; }
+    span, .empty { color: #aaa493; }
+    form { display: grid; gap: .65rem; margin-top: 2rem; }
+    input, button { font: inherit; border-radius: 8px; border: 1px solid #33362d; padding: .75rem .85rem; }
+    input { background: #1a1b18; color: #ece8dc; }
+    button { background: #8fbf73; color: #11110f; border: 0; font-weight: 700; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>overlearn courses</h1>
+    ${rows}
+    <form id="create-course">
+      <input name="title" placeholder="New course title" required>
+      <button type="submit">Create course</button>
+    </form>
+  </main>
+  <script>
+    document.querySelector("#create-course").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const title = new FormData(event.currentTarget).get("title");
+      const response = await fetch("/api/courses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title })
       });
+      if (response.ok) {
+        const created = await response.json();
+        location.href = "/?course=" + created.id;
+      }
+    });
+  </script>
+</body>
+</html>`,
+    {
+      headers: { "content-type": "text/html; charset=utf-8" },
     },
-    onError: (error) => {
-      console.error(
-        error instanceof Error
-          ? `Lesson watcher error: ${error.message}`
-          : "Lesson watcher error.",
-      );
-    },
-  });
-  const glossaryWatcher = watchGlossaryFile({
-    glossaryJson: coursePaths.glossaryJson,
-    emit: refreshGlossary,
-    onError: (error) => {
-      console.error(
-        error instanceof Error
-          ? `Glossary watcher error: ${error.message}`
-          : "Glossary watcher error.",
-      );
-    },
-  });
-  const topicWatcher = watchTopicFile({
-    courseJson: coursePaths.courseJson,
-    emit: refreshTopics,
-    onError: (error) => {
-      console.error(
-        error instanceof Error
-          ? `Topic watcher error: ${error.message}`
-          : "Topic watcher error.",
-      );
-    },
-  });
-  const masteryWatcher = watchMasteryFile({
-    masteryJson: coursePaths.masteryJson,
-    emit: refreshMastery,
-    onError: (error) => {
-      console.error(
-        error instanceof Error
-          ? `Mastery watcher error: ${error.message}`
-          : "Mastery watcher error.",
-      );
-    },
-  });
-  const feynmanWatcher = watchFeynmanFile({
-    activeFeynmanJson: coursePaths.activeFeynmanJson,
-    emit: refreshFeynman,
-    onError: (error) => {
-      console.error(
-        error instanceof Error
-          ? `Feynman watcher error: ${error.message}`
-          : "Feynman watcher error.",
-      );
-    },
-  });
+  );
+};
 
-  const setStatus = (
-    nextStatus: UiStatus,
-    message: string | undefined = undefined,
-  ): void => {
-    status = nextStatus;
-    statusMessage = message;
-    if (nextStatus === "agent-failed") {
-      hasSeenWait = true;
+const selectedHarnessId = (
+  store: Store,
+  courseId: number | undefined,
+  env: Env,
+): string => {
+  if (courseId !== undefined) {
+    const course = getCourse(store, courseId);
+    if (course?.harnessId !== null && course?.harnessId !== undefined) {
+      return course.harnessId;
     }
-    sseHub.broadcastStatus();
-  };
+  }
 
-  const statusAfterTurnEvents = (events: readonly TurnEvent[]): UiStatus =>
-    events.some((event) => event.type === "session-done")
-      ? "wrapping-up"
-      : "agent-working";
+  return env["OVERLEARN_HARNESS"] ?? DEFAULT_HARNESS_ID;
+};
 
-  const flushPendingTurnPath = async (): Promise<string | undefined> => {
-    const events = await readPendingEvents(coursePath);
-    if (events.length === 0) {
-      return undefined;
-    }
+const detectHarnesses = (): Map<string, AdapterDetection> => {
+  const detections = new Map<string, AdapterDetection>();
 
-    const turnPath = await writeTurnFile(coursePath, events);
-    await writePendingEvents(coursePath, []);
-    setStatus(statusAfterTurnEvents(events));
+  for (const adapter of listHarnessAdapters()) {
+    detections.set(adapter.id, adapter.detect());
+  }
 
-    return turnPath;
-  };
+  return detections;
+};
 
-  const flushPendingTurn = async (): Promise<FlushedTurn | undefined> => {
-    const turnPath = await flushPendingTurnPath();
-    if (turnPath === undefined) {
-      return undefined;
-    }
+const harnessSummaries = (
+  store: Store,
+  courseId: number | undefined,
+  env: Env,
+  cache: { value?: Map<string, AdapterDetection> },
+  refresh = false,
+): readonly HarnessSummary[] => {
+  if (cache.value === undefined || refresh) {
+    cache.value = detectHarnesses();
+  }
+
+  const selected = selectedHarnessId(store, courseId, env);
+
+  return listHarnessAdapters().map((adapter) => {
+    const detection = cache.value?.get(adapter.id) ?? {
+      installed: false,
+      authenticated: false,
+    };
 
     return {
-      turnPath,
-      turn: await readWrittenTurnFile(turnPath),
+      id: adapter.id,
+      name: adapter.name,
+      installed: detection.installed,
+      authenticated: detection.authenticated,
+      ...(detection.version === undefined ? {} : { version: detection.version }),
+      selected: adapter.id === selected,
     };
+  });
+};
+
+const nextTurnNumber = (store: Store, courseId: number): number => {
+  const transcriptRow = store.db
+    .query(
+      "SELECT COALESCE(MAX(turn), 0) AS turn FROM transcript WHERE course_id = ?1",
+    )
+    .get(courseId) as { turn: number | bigint } | undefined;
+  const eventsRow = store.db
+    .query(
+      "SELECT COALESCE(MAX(turn), 0) AS turn FROM turn_events WHERE course_id = ?1",
+    )
+    .get(courseId) as { turn: number | bigint } | undefined;
+  const transcriptTurn =
+    typeof transcriptRow?.turn === "bigint"
+      ? Number(transcriptRow.turn)
+      : (transcriptRow?.turn ?? 0);
+  const eventsTurn =
+    typeof eventsRow?.turn === "bigint"
+      ? Number(eventsRow.turn)
+      : (eventsRow?.turn ?? 0);
+
+  return Math.max(transcriptTurn, eventsTurn) + 1;
+};
+
+const appendUiTranscript = (
+  store: Store,
+  courseId: number,
+  input: Parameters<typeof appendTranscriptEntry>[2],
+): TranscriptEntry => uiTranscriptEntry(appendTranscriptEntry(store, courseId, input));
+
+const routeCourseRequest = (
+  path: string,
+): Readonly<{ courseId: number; rest: readonly string[] }> | undefined => {
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  if (segments[0] !== "api" || segments[1] !== "courses") {
+    return undefined;
+  }
+
+  const rawCourseId = segments[2];
+  if (rawCourseId === undefined) {
+    return undefined;
+  }
+
+  const courseId = Number(rawCourseId);
+  if (!Number.isInteger(courseId) || courseId <= 0) {
+    return undefined;
+  }
+
+  return {
+    courseId,
+    rest: segments.slice(3),
+  };
+};
+
+const demoResponse = (store: Store, courseId: number, file: string): Response => {
+  const demo = listDemos(store, courseId).find((candidate) => demoKey(candidate) === file);
+  if (demo === undefined) {
+    return textResponse("Demo not found.", 404);
+  }
+
+  if (demo.bodyFormat === "html") {
+    return new Response(demo.body, {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy":
+          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:;",
+      },
+    });
+  }
+
+  const html =
+    demo.bodyFormat === "markdown"
+      ? renderMarkdown(demo.body)
+      : `<pre>${escapeHtml(demo.body)}</pre>`;
+
+  return new Response(`<!doctype html><meta charset="utf-8">${html}`, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline';",
+    },
+  });
+};
+
+export const runDaemon = async (env: Env = process.env): Promise<void> => {
+  const store = openStore({ env });
+  const tokenScopes = new Map<string, TokenScope>();
+  const statuses = new Map<number, UiStatusPayload>();
+  const activeTurnByCourse = new Map<number, number>();
+  const agentStreamReplay: AgentStreamPayload[] = [];
+  const harnessDetectionCache: { value?: Map<string, AdapterDetection> } = {};
+  let runtime: CourseRuntime | undefined;
+  let activeCourseId: number | undefined;
+  let port = 0;
+  let shuttingDown = false;
+
+  const statusForCourse = (courseId: number): UiStatusPayload =>
+    statuses.get(courseId) ?? {
+      courseId,
+      status: "waiting-for-agent",
+      hasSeenWait: true,
+    };
+
+  const setStatus = (
+    courseId: number,
+    status: UiStatus,
+    message?: string,
+  ): void => {
+    const payload = {
+      courseId,
+      status,
+      hasSeenWait: true,
+      ...(message === undefined ? {} : { message }),
+    };
+    statuses.set(courseId, payload);
+    sseHub.broadcast("status", payload);
   };
 
-  let orchestratedTurnRunning = false;
+  const coursesPayload = (): Record<string, unknown> => ({
+    courses: listCourses(store).map(courseResource),
+    activeCourseId: activeCourseId ?? null,
+  });
 
-  const drainOrchestratedTurns = async (): Promise<void> => {
-    if (orchestrator === undefined || orchestratedTurnRunning) {
+  const harnessesPayload = (
+    courseId: number | undefined,
+    switched: boolean,
+    refresh = false,
+  ): HarnessesPayload => ({
+    ...(courseId === undefined ? {} : { courseId }),
+    harnesses: harnessSummaries(store, courseId, env, harnessDetectionCache, refresh),
+    switched,
+  });
+
+  const sseHub = createSseHub(
+    () => [...statuses.values()],
+    (courseId) => harnessesPayload(courseId, false),
+    coursesPayload,
+  );
+
+  const broadcastCourseCollections = (courseId: number): void => {
+    const view = courseView(store, courseId);
+    if (view === undefined) {
       return;
     }
 
-    orchestratedTurnRunning = true;
-
-    try {
-      while (true) {
-        const flushed = await serialize(async () => {
-          const events = await readPendingEvents(coursePath);
-          if (events.length === 0) {
-            return undefined;
-          }
-
-          const turn = await flushPendingTurn();
-          if (turn === undefined) {
-            return undefined;
-          }
-
-          const finalTurn = turn.turn.events.some(
-            (event) => event.type === "session-done",
-          );
-          const greetingTurn = turn.turn.events.some(
-            (event) => event.type === "harness-swapped",
-          );
-          setStatus(finalTurn ? "wrapping-up" : "agent-working");
-
-          return { ...turn, finalTurn, greetingTurn };
-        });
-
-        if (flushed === undefined) {
-          await serialize(async () => {
-            if (status === "agent-working") {
-              setStatus("waiting-for-agent");
-            }
-          });
-          return;
-        }
-
-        const result = await orchestrator.runTurn(
-          flushed.turnPath,
-          flushed.turn,
-          flushed.finalTurn
-            ? "wrap-up"
-            : flushed.greetingTurn
-              ? "greeting"
-              : "teaching",
-        );
-
-        if (!result.ok) {
-          setStatus("agent-failed", result.message);
-          return;
-        }
-
-        if (flushed.finalTurn) {
-          await orchestrator.endSession();
-          requestShutdown();
-          return;
-        }
-
-        const hasPending = await serialize(async () => {
-          const pendingEvents = await readPendingEvents(coursePath);
-          if (pendingEvents.length === 0) {
-            setStatus("waiting-for-agent");
-            return false;
-          }
-
-          return true;
-        });
-
-        if (!hasPending) {
-          return;
-        }
-      }
-    } finally {
-      orchestratedTurnRunning = false;
-      if (status !== "wrapping-up" && status !== "session-ended") {
-        const pendingEvents = await readPendingEvents(coursePath).catch(
-          () => [],
-        );
-        if (pendingEvents.length > 0) {
-          requestOrchestratedTurn();
-        }
-      }
-    }
-  };
-
-  const requestOrchestratedTurn = (): void => {
-    if (orchestrator === undefined) {
-      return;
-    }
-
-    void drainOrchestratedTurns().catch((error: unknown) => {
-      const message =
-        error instanceof Error ? error.message : "Agent orchestration failed.";
-      setStatus("agent-failed", message);
+    sseHub.broadcast("transcript", {
+      courseId,
+      entries: view.transcript,
+    });
+    sseHub.broadcast("glossary", {
+      courseId,
+      entries: view.glossary,
+    });
+    sseHub.broadcast("topics", {
+      courseId,
+      topics: view.topics,
+      unassignedDemos: view.unassignedDemos,
+    });
+    sseHub.broadcast("mastery", {
+      courseId,
+      entries: view.masteryScores,
+    });
+    sseHub.broadcast("feynman", {
+      courseId,
+      activeCheck: view.activeFeynmanCheck ?? null,
     });
   };
 
-  const maybeResolveWaiter = async (): Promise<void> => {
-    if (orchestrated) {
-      requestOrchestratedTurn();
-      return;
-    }
+  const onTeachingWrite = (event: TeachingWriteEvent): void => {
+    const turn = activeTurnByCourse.get(event.courseId);
+    const entry = appendUiTranscript(store, event.courseId, {
+      ...(turn === undefined ? {} : { turn }),
+      role: "system",
+      kind: "tool-call",
+      content: event.summary,
+      payload: {
+        tool: event.tool,
+        summary: event.summary,
+      },
+    });
 
-    if (waiter === undefined) {
-      return;
-    }
-
-    const turnPath = await flushPendingTurnPath();
-    if (turnPath === undefined) {
-      return;
-    }
-
-    const currentWaiter = waiter;
-    waiter = undefined;
-    currentWaiter.resolve(turnPath);
+    sseHub.broadcast("message", { courseId: event.courseId, entry });
+    sseHub.broadcast("tool-write", event);
+    broadcastCourseCollections(event.courseId);
   };
 
-  const handleWait = async (
-    onAbort: (listener: () => void) => void,
-  ): Promise<Response> => {
-    if (orchestrated) {
+  const teachingMcpHandler = createTeachingMcpHttpHandler({
+    store,
+    resolveScope: (token) => {
+      const scope = tokenScopes.get(token);
+      return scope === undefined ? null : { courseId: scope.courseId };
+    },
+    onWrite: onTeachingWrite,
+  });
+
+  const registerTeachingSession = (
+    input: Readonly<{ courseId: number; harnessId: string }>,
+  ): ActiveTeachingSessionRegistration => {
+    const token = randomBytes(32).toString("base64url");
+    const session = startSession(store, {
+      courseId: input.courseId,
+      harnessId: input.harnessId,
+    });
+
+    tokenScopes.set(token, {
+      courseId: input.courseId,
+      sessionId: session.id,
+    });
+
+    return { token, sessionId: session.id };
+  };
+
+  const unregisterTeachingSession = (
+    registration: ActiveTeachingSessionRegistration,
+    reason: string,
+  ): void => {
+    tokenScopes.delete(registration.token);
+
+    if (registration.sessionId !== undefined) {
+      endStoreSession(store, registration.sessionId, reason);
+    }
+  };
+
+  const revokeTeachingTokensForCourse = (courseId: number, reason: string): void => {
+    for (const [token, scope] of [...tokenScopes.entries()]) {
+      if (scope.courseId !== courseId) {
+        continue;
+      }
+
+      tokenScopes.delete(token);
+      if (scope.sessionId !== undefined) {
+        endStoreSession(store, scope.sessionId, reason);
+      }
+    }
+  };
+
+  const appendAgentEventTranscript = (payload: AgentStreamPayload): void => {
+    const event = payload.event;
+
+    if (event.type === "text") {
+      const entry = appendUiTranscript(store, payload.courseId, {
+        turn: payload.turn,
+        role: "agent",
+        kind: "text",
+        content: event.text,
+      });
+      sseHub.broadcast("message", { courseId: payload.courseId, entry });
+      return;
+    }
+
+    if (
+      event.type === "tool-call" &&
+      (event.status === "completed" || event.status === "failed")
+    ) {
+      const tool = event.name ?? event.id;
+      const summary =
+        event.status === "failed"
+          ? `${tool} failed${event.error === undefined ? "" : `: ${event.error}`}`
+          : `${tool} completed`;
+      const entry = appendUiTranscript(store, payload.courseId, {
+        turn: payload.turn,
+        role: "system",
+        kind: "tool-call",
+        content: summary,
+        payload: {
+          tool,
+          status: event.status,
+        },
+      });
+      sseHub.broadcast("message", { courseId: payload.courseId, entry });
+    }
+  };
+
+  const onAgentEvent = (payload: AgentStreamPayload): void => {
+    const terminalWrapUp =
+      payload.event.type === "done" &&
+      statuses.get(payload.courseId)?.status === "wrapping-up";
+    if (terminalWrapUp) {
+      revokeTeachingTokensForCourse(payload.courseId, "done");
+    }
+    if (payload.event.type === "error") {
+      revokeTeachingTokensForCourse(payload.courseId, "agent-crashed");
+    }
+
+    agentStreamReplay.push(payload);
+    agentStreamReplay.splice(0, Math.max(0, agentStreamReplay.length - MAX_AGENT_STREAM_REPLAY));
+    appendAgentEventTranscript(payload);
+    sseHub.broadcast("agent-stream", payload);
+  };
+
+  const ensureRuntime = (course: Course): CourseRuntime => {
+    if (runtime !== undefined && runtime.courseId === course.id) {
+      return runtime;
+    }
+
+    const mcpBaseUrl = formatDaemonUrl(port, "");
+    const orchestrator = createDaemonTurnOrchestrator({
+      courseId: course.id,
+      courseTitle: course.title,
+      attachedDir: course.attachedDir,
+      cwd: store.dataDir,
+      mcpBaseUrl,
+      env,
+      getHarnessId: () => getCourse(store, course.id)?.harnessId ?? undefined,
+      onAgentEvent,
+      registerTeachingSession,
+      unregisterTeachingSession,
+    });
+
+    runtime = {
+      courseId: course.id,
+      orchestrator,
+      runningTurn: false,
+    };
+    activeCourseId = course.id;
+
+    return runtime;
+  };
+
+  const rejectDifferentActiveCourse = (courseId: number): Response | undefined => {
+    if (activeCourseId !== undefined && activeCourseId !== courseId) {
+      // v1 keeps one active learning session explicit: callers must finish or
+      // shut down the active course before starting another course.
       return textResponse(
-        "learn wait is disabled while daemon orchestration is enabled.",
+        `Course ${activeCourseId} already has the active learning session.`,
         409,
       );
     }
 
-    const setup = await serialize(async (): Promise<WaitSetup> => {
-      hasSeenWait = true;
-      setStatus("waiting-for-agent");
+    return undefined;
+  };
 
-      const immediateTurnPath = await flushPendingTurnPath();
-      if (immediateTurnPath !== undefined) {
-        return {
-          kind: "response",
-          response: jsonResponse({ turnPath: immediateTurnPath }),
-        };
-      }
+  const runCourseTurn = (
+    course: Course,
+    events: readonly TurnEvent[],
+    mode: TurnPromptMode,
+    existingTurn?: number,
+  ): Response => {
+    const activeCourseRejection = rejectDifferentActiveCourse(course.id);
+    if (activeCourseRejection !== undefined) {
+      return activeCourseRejection;
+    }
 
-      if (waiter !== undefined) {
-        return {
-          kind: "response",
-          response: textResponse("Another learn wait is already pending.", 409),
-        };
-      }
+    const currentRuntime = ensureRuntime(course);
+    if (currentRuntime.runningTurn) {
+      return textResponse("A turn is already running for this course.", 409);
+    }
 
-      const waiterId = nextWaiterId;
-      nextWaiterId += 1;
+    const turn: TurnPayload = {
+      turn: existingTurn ?? nextTurnNumber(store, course.id),
+      createdAt: new Date().toISOString(),
+      events,
+    };
+    currentRuntime.runningTurn = true;
+    activeTurnByCourse.set(course.id, turn.turn);
+    setStatus(course.id, mode === "wrap-up" ? "wrapping-up" : "agent-working");
+    appendTurnEvents(store, course.id, {
+      turn: turn.turn,
+      status: "pending",
+      createdAt: turn.createdAt,
+      events: turn.events.map((event) => ({ ...event })),
+      importedFrom: null,
+    });
 
-      const response = new Promise<Response>((resolveResponse) => {
-        waiter = {
-          id: waiterId,
-          resolve: (turnPath) => {
-            resolveResponse(jsonResponse({ turnPath }));
-          },
-        };
+    void (async () => {
+      const result = await currentRuntime.orchestrator.runTurn(turn, mode);
+      appendTurnEvents(store, course.id, {
+        turn: turn.turn,
+        status: "completed",
+        createdAt: new Date().toISOString(),
+        events: turn.events.map((event) => ({ ...event })),
+        importedFrom: null,
       });
 
-      onAbort(() => {
-        if (waiter?.id === waiterId) {
-          waiter = undefined;
-          setStatus("agent-working");
+      currentRuntime.runningTurn = false;
+      activeTurnByCourse.delete(course.id);
+
+      if (!result.ok) {
+        setStatus(course.id, "agent-failed", result.message);
+        return;
+      }
+
+      if (mode === "wrap-up") {
+        await currentRuntime.orchestrator.endSession("done");
+        runtime = undefined;
+        setStatus(course.id, "session-ended");
+        setTimeout(() => {
+          void shutdown();
+        }, 250);
+        return;
+      }
+
+      setStatus(course.id, "waiting-for-agent");
+      broadcastCourseCollections(course.id);
+    })().catch((error) => {
+      currentRuntime.runningTurn = false;
+      activeTurnByCourse.delete(course.id);
+      setStatus(
+        course.id,
+        "agent-failed",
+        error instanceof Error ? error.message : "Agent turn failed.",
+      );
+    });
+
+    return jsonResponse({ ok: true, turn: turn.turn });
+  };
+
+  const parseSubmit = async (request: Request): Promise<MessageTurnEvent> => {
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      throw new Error("Submit body must be an object.");
+    }
+
+    return {
+      type: "message",
+      text: requiredStringField(body, "text"),
+    };
+  };
+
+  const parseNav = async (request: Request, courseId: number): Promise<TurnEvent> => {
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      throw new Error("Nav body must be an object.");
+    }
+
+    const path = requiredStringField(body, "path");
+    if (path === REVIEW_WEAK_NAV_PATH) {
+      const weakest = flattenTopicTree(readTopicTree(store, courseId))
+        .flatMap((topic) => {
+          const score = listLatestMasteryScores(store, courseId).find(
+            (entry) => entry.concept === topic.path || entry.concept === topic.path.split("/").at(-1),
+          );
+          return score === undefined ? [] : [score];
+        })
+        .sort((left, right) => left.score - right.score)
+        .slice(0, 3)
+        .map((entry) => entry.concept);
+
+      return { type: "review-weak", concepts: weakest };
+    }
+
+    return { type: "nav", path };
+  };
+
+  const parseFeynmanAnswer = async (
+    request: Request,
+  ): Promise<FeynmanAnswerTurnEvent> => {
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      throw new Error("Feynman answer body must be an object.");
+    }
+
+    const keyPoints = body["keyPoints"];
+    if (!Array.isArray(keyPoints) || !keyPoints.every((entry) => typeof entry === "string")) {
+      throw new Error("keyPoints must be an array of strings.");
+    }
+
+    return {
+      type: "feynman-answer",
+      concept: requiredStringField(body, "concept"),
+      text: requiredStringField(body, "text"),
+      keyPoints,
+    };
+  };
+
+  const handleCoursesRoot = async (
+    request: Request,
+    requestUrl: URL,
+  ): Promise<Response> => {
+    if (request.method === "GET") {
+      const status = parseCourseStatus(requestUrl.searchParams.get("status"));
+      return jsonResponse(listCourses(store, status).map(courseResource));
+    }
+
+    if (request.method === "POST") {
+      const body = await readJsonBody(request);
+      if (!isRecord(body)) {
+        return textResponse("Course body must be an object.", 400);
+      }
+
+      try {
+        const input: CourseCreateDraft = {
+          title: requiredStringField(body, "title"),
+        };
+        const description = optionalStringField(body, "description");
+        const harnessId = optionalStringField(body, "harnessId");
+        const attachedDir = optionalStringField(body, "attachedDir");
+        const sourceName = optionalStringField(body, "sourceName");
+
+        if (description !== undefined) {
+          input.description = description;
         }
-      });
+        if (harnessId !== undefined) {
+          input.harnessId = harnessId;
+        }
+        if (attachedDir !== undefined) {
+          input.attachedDir = attachedDir;
+        }
+        if (sourceName !== undefined) {
+          input.sourceName = sourceName;
+        }
 
-      return { kind: "wait", response };
-    });
+        const course = createCourse(store, input);
+        sseHub.broadcast("courses", coursesPayload());
+        return jsonResponse(courseResource(course), { status: 201 });
+      } catch (error) {
+        return textResponse(error instanceof Error ? error.message : "Invalid course.", 400);
+      }
+    }
 
-    return setup.kind === "response" ? setup.response : await setup.response;
+    return emptyResponse(405);
   };
 
-  const handleSubmit = async (bodyText: string): Promise<Response> => {
-    let text: string;
-    try {
-      text = parseSubmitText(bodyText);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Invalid submit request.";
-      return textResponse(message, 400);
+  const handleCourseApi = async (
+    request: Request,
+    _requestUrl: URL,
+    courseId: number,
+    rest: readonly string[],
+  ): Promise<Response> => {
+    const course = getCourse(store, courseId);
+    if (course === undefined) {
+      return textResponse("Course not found.", 404);
     }
 
-    await serialize(async () => {
-      const at = new Date().toISOString();
-      const event: TurnEvent = { type: "message", text };
-      const pendingEvents = await readPendingEvents(coursePath);
-
-      await writePendingEvents(coursePath, [...pendingEvents, event]);
-      const entry = await appendLearnerTranscript(coursePath, text, at);
-      sseHub.broadcastMessage(entry);
-      await maybeResolveWaiter();
-
-      if (waiter === undefined) {
-        setStatus("agent-working");
-      }
-    });
-
-    return jsonResponse({ ok: true });
-  };
-
-  const handleDone = async (): Promise<Response> => {
-    await serialize(async () => {
-      const event: TurnEvent = { type: "session-done" };
-      const pendingEvents = await readPendingEvents(coursePath);
-      await writePendingEvents(coursePath, [...pendingEvents, event]);
-      await maybeResolveWaiter();
-      setStatus("wrapping-up");
-    });
-
-    return jsonResponse({ ok: true });
-  };
-
-  const handleNav = async (bodyText: string): Promise<Response> => {
-    let navRequest: NavRequest;
-    try {
-      navRequest = parseNavRequest(bodyText);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Invalid nav request.";
-      return textResponse(message, 400);
-    }
-
-    await serialize(async () => {
-      let queuedEvent: TurnEvent;
-      if (navRequest.kind === "review-weak") {
-        manifest = await readCourseManifest(coursePath);
-        topicTree = manifest.topics;
-        unassignedDemos = manifest.unassignedDemos;
-        masteryScores = latestMasteryScores(await readMastery(coursePath));
-        sseHub.broadcastTopics(topicTree, unassignedDemos);
-        sseHub.broadcastMastery(masteryScores);
-        queuedEvent = {
-          type: "review-weak",
-          concepts: selectWeakestTopicConcepts(topicTree, masteryScores, 3),
-        };
-      } else {
-        queuedEvent = { type: "nav", path: navRequest.path };
-      }
-      const pendingEvents = await readPendingEvents(coursePath);
-
-      await writePendingEvents(coursePath, [...pendingEvents, queuedEvent]);
-      await maybeResolveWaiter();
-
-      if (waiter === undefined) {
-        setStatus("agent-working");
-      }
-    });
-
-    return jsonResponse({ ok: true });
-  };
-
-  const handleFeynmanAnswer = async (bodyText: string): Promise<Response> => {
-    let answer: Readonly<{ concept: string; text: string }>;
-    try {
-      answer = parseFeynmanAnswer(bodyText);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Invalid Feynman answer.";
-      return textResponse(message, 400);
-    }
-
-    let response: Response = jsonResponse({ ok: true });
-
-    await serialize(async () => {
-      const active = await readActiveFeynmanCheck(coursePath);
-      activeFeynmanCheck = active;
-
-      if (active === undefined) {
-        response = textResponse("No active Feynman check.", 409);
-        return;
+    if (rest.length === 0) {
+      if (request.method === "GET") {
+        return jsonResponse(courseState(store, courseId));
       }
 
-      if (active.concept !== answer.concept) {
-        response = textResponse("Active Feynman check changed.", 409);
-        return;
+      if (request.method === "PATCH") {
+        const body = await readJsonBody(request);
+        if (!isRecord(body)) {
+          return textResponse("Course patch must be an object.", 400);
+        }
+
+        try {
+          const patch: CoursePatchDraft = {};
+
+          if (Object.hasOwn(body, "title")) {
+            patch.title = requiredStringField(body, "title");
+          }
+          if (Object.hasOwn(body, "description")) {
+            const description = optionalStringField(body, "description");
+            if (description !== undefined) {
+              patch.description = description;
+            }
+          }
+          if (Object.hasOwn(body, "harnessId")) {
+            const harnessId = optionalStringField(body, "harnessId");
+            if (harnessId !== undefined) {
+              patch.harnessId = harnessId;
+            }
+          }
+          if (Object.hasOwn(body, "attachedDir")) {
+            const attachedDir = optionalStringField(body, "attachedDir");
+            if (attachedDir !== undefined) {
+              patch.attachedDir = attachedDir;
+            }
+          }
+          if (Object.hasOwn(body, "sourceName")) {
+            const sourceName = optionalStringField(body, "sourceName");
+            if (sourceName !== undefined) {
+              patch.sourceName = sourceName;
+            }
+          }
+          if (Object.hasOwn(body, "status")) {
+            const status = parseCourseStatus(
+              optionalStringField(body, "status") ?? null,
+            );
+            if (status !== undefined) {
+              patch.status = status;
+            }
+          }
+
+          const patched = patchCourse(store, courseId, patch);
+          sseHub.broadcast("courses", coursesPayload());
+          return jsonResponse(courseResource(patched));
+        } catch (error) {
+          return textResponse(error instanceof Error ? error.message : "Invalid course patch.", 400);
+        }
       }
 
-      const event: TurnEvent = {
-        type: "feynman-answer",
-        concept: active.concept,
-        text: answer.text,
-        keyPoints: active.keyPoints,
-      };
-      const pendingEvents = await readPendingEvents(coursePath);
-      const at = new Date().toISOString();
-
-      await writePendingEvents(coursePath, [...pendingEvents, event]);
-      const checkResult = await appendNewFeynmanCheckTranscript(
-        coursePath,
-        active,
-        lastRecordedFeynmanCheckIssuedAt,
-        sseHub.broadcastMessage,
-      );
-      lastRecordedFeynmanCheckIssuedAt =
-        checkResult.lastRecordedIssuedAt;
-      await appendFeynmanAnswerTimelineEntry(
-        coursePath,
-        active.concept,
-        answer.text,
-        at,
-        sseHub.broadcastMessage,
-      );
-      await clearActiveFeynmanCheck(coursePath);
-      activeFeynmanCheck = undefined;
-      sseHub.broadcastFeynman(activeFeynmanCheck);
-      await maybeResolveWaiter();
-
-      if (waiter === undefined) {
-        setStatus("agent-working");
+      if (request.method === "DELETE") {
+        const archived = patchCourse(store, courseId, { status: "archived" });
+        sseHub.broadcast("courses", coursesPayload());
+        return jsonResponse(courseResource(archived));
       }
-    });
-
-    return response;
-  };
-
-  const handleAgentMessage = async (bodyText: string): Promise<Response> => {
-    let entry: TranscriptEntry;
-    try {
-      entry = parseAgentMessage(bodyText);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Invalid agent message.";
-      return textResponse(message, 400);
     }
 
-    if (entry.kind === "demo") {
-      demoFileSet = await readDemoFileSet(coursePaths.demosDir);
+    const [action, extra] = rest;
+
+    if (action === "submit" && extra === undefined && request.method === "POST") {
+      try {
+        const event = await parseSubmit(request);
+        const turn = nextTurnNumber(store, courseId);
+        const entry = appendUiTranscript(store, courseId, {
+          turn,
+          role: "learner",
+          kind: "text",
+          content: event.text,
+        });
+        sseHub.broadcast("message", { courseId, entry });
+        return runCourseTurn(course, [event], "teaching", turn);
+      } catch (error) {
+        return textResponse(error instanceof Error ? error.message : "Invalid submit request.", 400);
+      }
     }
 
-    sseHub.broadcastMessage(entry);
-    return jsonResponse({ ok: true });
-  };
-
-  const handleHarnessSelection = async (bodyText: string): Promise<Response> => {
-    let id: string;
-    try {
-      id = parseHarnessSelection(bodyText);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Invalid harness request.";
-      return textResponse(message, 400);
+    if (action === "nav" && extra === undefined && request.method === "POST") {
+      try {
+        return runCourseTurn(course, [await parseNav(request, courseId)], "teaching");
+      } catch (error) {
+        return textResponse(error instanceof Error ? error.message : "Invalid nav request.", 400);
+      }
     }
 
-    if (getHarnessAdapter(id) === undefined) {
-      return textResponse(`Unknown harness adapter: ${id}`, 400);
+    if (action === "done" && extra === undefined && request.method === "POST") {
+      return runCourseTurn(course, [{ type: "session-done" }], "wrap-up");
     }
 
-    let selectionResponse: Response = jsonResponse({ ok: true });
-    let shouldRunSwapGreeting = false;
+    if (
+      action === "feynman-answer" &&
+      extra === undefined &&
+      request.method === "POST"
+    ) {
+      try {
+        const event = await parseFeynmanAnswer(request);
+        const turn = nextTurnNumber(store, courseId);
+        const entry = appendUiTranscript(store, courseId, {
+          turn,
+          role: "learner",
+          kind: "feynman-answer",
+          content: event.text,
+          payload: {
+            concept: event.concept,
+            keyPoints: event.keyPoints,
+          },
+        });
+        clearActiveFeynmanCheck(store, courseId);
+        sseHub.broadcast("message", { courseId, entry });
+        broadcastCourseCollections(courseId);
+        return runCourseTurn(course, [event], "teaching", turn);
+      } catch (error) {
+        return textResponse(error instanceof Error ? error.message : "Invalid Feynman answer.", 400);
+      }
+    }
 
-    await serialize(async () => {
-      if (
-        orchestrated &&
-        (orchestratedTurnRunning ||
-          status === "agent-working" ||
-          status === "wrapping-up")
-      ) {
-        selectionResponse = textResponse(
+    if (action === "harness" && extra === undefined && request.method === "POST") {
+      const body = await readJsonBody(request);
+      if (!isRecord(body)) {
+        return textResponse("Harness body must be an object.", 400);
+      }
+
+      const id = requiredStringField(body, "id");
+      const adapter = listHarnessAdapters().find((candidate) => candidate.id === id);
+      if (adapter === undefined) {
+        return textResponse(`Unknown harness adapter: ${id}`, 400);
+      }
+
+      if (runtime?.runningTurn === true) {
+        return textResponse(
           "Cannot change harness while a turn is running. Try again after the agent stops.",
           409,
         );
-        return;
       }
 
-      const previousHarnessId = selectedHarnessId();
-      const selectionChanged = previousHarnessId !== id;
-
-      manifest = await writeCourseHarness(coursePath, id);
-      topicTree = manifest.topics;
-      unassignedDemos = manifest.unassignedDemos;
-      sseHub.broadcastTopics(topicTree, unassignedDemos);
-
-      const swappedActiveSession =
-        selectionChanged && orchestrator !== undefined
-          ? await orchestrator.resetSession()
+      const previousHarnessId = selectedHarnessId(store, courseId, env);
+      patchCourse(store, courseId, { harnessId: id });
+      const currentRuntime = runtime;
+      const hadActiveSession =
+        currentRuntime !== undefined && currentRuntime.courseId === courseId
+          ? await currentRuntime.orchestrator.resetSession("harness-swap")
           : false;
+      const payload = harnessesPayload(courseId, hadActiveSession, true);
+      sseHub.broadcast("harnesses", payload);
 
-      if (swappedActiveSession) {
-        const pendingEvents = await readPendingEvents(coursePath);
-        await writePendingEvents(coursePath, [
-          ...pendingEvents,
-          { type: "harness-swapped", from: previousHarnessId, to: id },
-        ]);
+      if (hadActiveSession) {
+        runCourseTurn(
+          getCourse(store, courseId) ?? course,
+          [{ type: "harness-swapped", from: previousHarnessId, to: id }],
+          "greeting",
+        );
       }
 
-      sseHub.broadcastHarnesses(harnessesPayload(swappedActiveSession));
-      shouldRunSwapGreeting = swappedActiveSession;
-      selectionResponse = jsonResponse({
+      return jsonResponse({
         ok: true,
-        harness: manifest.harness,
-        swapped: swappedActiveSession,
+        harness: id,
+        swapped: hadActiveSession,
       });
-    });
-
-    if (shouldRunSwapGreeting) {
-      requestOrchestratedTurn();
     }
 
-    return selectionResponse;
+    if (action === "activate" && extra === undefined && request.method === "POST") {
+      const activeCourseRejection = rejectDifferentActiveCourse(courseId);
+      if (activeCourseRejection !== undefined) {
+        return activeCourseRejection;
+      }
+
+      ensureRuntime(course);
+      return jsonResponse({ ok: true, activeCourseId: courseId });
+    }
+
+    if (action === "demos" && extra !== undefined && request.method === "GET") {
+      return demoResponse(store, courseId, decodeURIComponent(extra));
+    }
+
+    return textResponse("Not found.", 404);
   };
 
-  const server = createServer((request, response) => {
-    void (async () => {
-      const method = request.method ?? "GET";
-      const requestUrl = new URL(
-        request.url ?? "/",
-        `http://${LOCALHOST_BIND_HOST}`,
+  const healthPayload = (): Record<string, unknown> => ({
+    ok: true,
+    orchestrated: true,
+    version: packageJson.version,
+    activeCourseId: activeCourseId ?? null,
+    waitPending: false,
+    hasSeenWait: true,
+    dataDir: store.dataDir,
+  });
+
+  const shutdown = async (): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+
+    shuttingDown = true;
+    if (runtime !== undefined) {
+      await runtime.orchestrator.endSession("shutdown");
+      runtime = undefined;
+    }
+    tokenScopes.clear();
+    await clearDaemonMetadata(env);
+    sseHub.closeAll();
+    await new Promise<void>((resolveClose) => {
+      server.close(() => resolveClose());
+    });
+    store.close();
+  };
+
+  const handleRequest = async (request: Request): Promise<Response> => {
+    const requestUrl = new URL(request.url);
+    const method = request.method;
+
+    if (method === "GET" && requestUrl.pathname === "/api/health") {
+      return jsonResponse(healthPayload());
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/api/shutdown") {
+      setTimeout(() => {
+        void shutdown();
+      }, 0);
+      return jsonResponse({ ok: true });
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/api/harnesses") {
+      const courseIdParam = requestUrl.searchParams.get("courseId");
+      const courseId =
+        courseIdParam === null || courseIdParam.length === 0
+          ? activeCourseId
+          : Number(courseIdParam);
+      const validCourseId =
+        typeof courseId === "number" && Number.isInteger(courseId)
+          ? courseId
+          : undefined;
+      return jsonResponse(
+        harnessSummaries(
+          store,
+          validCourseId,
+          env,
+          harnessDetectionCache,
+          requestUrl.searchParams.get("refresh") === "1",
+        ),
       );
+    }
 
-      if (method === "GET" && requestUrl.pathname.startsWith("/demos/")) {
-        await sendResponse(
-          response,
-          (await demoResponse(coursePaths.demosDir, requestUrl.pathname)) ??
-            textResponse("Invalid demo path", 400),
-        );
-        return;
+    if (requestUrl.pathname === "/api/courses") {
+      return await handleCoursesRoot(request, requestUrl);
+    }
+
+    const courseRoute = routeCourseRequest(requestUrl.pathname);
+    if (courseRoute !== undefined) {
+      return await handleCourseApi(
+        request,
+        requestUrl,
+        courseRoute.courseId,
+        courseRoute.rest,
+      );
+    }
+
+    if (requestUrl.pathname.startsWith("/mcp/")) {
+      const token = teachingTokenFromRequestPath(request);
+      if (token === undefined || !tokenScopes.has(token)) {
+        return textResponse("Unknown teaching session token.", 404);
       }
 
-      if (method === "GET" && requestUrl.pathname === "/") {
-        manifest = await readCourseManifest(coursePath);
-        topicTree = manifest.topics;
-        unassignedDemos = manifest.unassignedDemos;
-        glossaryEntries = await readGlossary(coursePath);
-        masteryScores = latestMasteryScores(await readMastery(coursePath));
-        activeFeynmanCheck = await readActiveFeynmanCheck(coursePath);
-        demoFileSet = await readDemoFileSet(coursePaths.demosDir);
-        const [transcript, lessons] = await Promise.all([
-          readTranscript(coursePath),
-          readLessonSnapshot(
-            coursePaths.lessonsDir,
-            glossaryEntries,
-            demoFileSet,
-          ),
-        ]);
-        const displayTitle = await readCourseDisplayTitle(
-          coursePaths.courseJson,
-          manifest.name,
-        );
-        await sendResponse(
-          response,
-          new Response(
-            renderPage(
-              displayTitle,
-              transcript,
-              lessons,
-              glossaryEntries,
-              topicTree,
-              unassignedDemos,
-              masteryScores,
-              demoFileSet,
-              activeFeynmanCheck,
-              status,
-              hasSeenWait,
-              {
-                orchestrated,
-                harnesses: harnessSummaries(false),
-              },
-            ),
+      return await teachingMcpHandler(request);
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/") {
+      const courseParam = requestUrl.searchParams.get("course");
+      if (courseParam !== null) {
+        const courseId = Number(courseParam);
+        if (Number.isInteger(courseId)) {
+          const view = courseView(store, courseId);
+          if (view === undefined) {
+            return textResponse("Course not found.", 404);
+          }
+
+          statuses.set(courseId, statusForCourse(courseId));
+          const html = renderPage(
+            view.course.title,
+            view.transcript,
+            view.lessons,
+            view.glossary,
+            view.topics,
+            view.unassignedDemos,
+            view.masteryScores,
+            view.demoFiles,
+            view.activeFeynmanCheck,
+            statusForCourse(courseId).status,
+            true,
             {
-              headers: { "content-type": "text/html; charset=utf-8" },
+              courseId,
+              orchestrated: true,
+              harnesses: harnessSummaries(
+                store,
+                courseId,
+                env,
+                harnessDetectionCache,
+                false,
+              ),
             },
-          ),
-        );
-        return;
+          );
+
+          return new Response(html, {
+            headers: { "content-type": "text/html; charset=utf-8" },
+          });
+        }
       }
 
-      if (method === "GET" && requestUrl.pathname === "/api/health") {
-        await sendResponse(
-          response,
-          jsonResponse({
-            ok: true,
-            coursePath,
-            name: manifest.name,
-            waitPending: waiter !== undefined,
-            hasSeenWait,
-            orchestrated,
-          }),
-        );
-        return;
-      }
+      return renderCoursePicker(listCourses(store, "active"));
+    }
 
-      if (method === "GET" && requestUrl.pathname === "/api/harnesses") {
-        const refresh =
-          requestUrl.searchParams.get("refresh") === "1" ||
-          requestUrl.searchParams.get("refresh") === "true";
-        await sendResponse(response, jsonResponse(harnessSummaries(refresh)));
-        return;
-      }
+    return textResponse("Not found.", 404);
+  };
 
-      if (method === "GET" && requestUrl.pathname === "/api/events") {
-        sseHub.connect(request, response);
-        return;
+  const server = createServer((incoming, outgoing) => {
+    if (incoming.url === "/api/events" && incoming.method === "GET") {
+      sseHub.connect(incoming, outgoing);
+      for (const replay of agentStreamReplay) {
+        outgoing.write(`event: agent-stream\ndata: ${JSON.stringify(replay)}\n\n`);
       }
+      return;
+    }
 
-      if (method === "GET" && requestUrl.pathname === "/api/wait") {
-        await sendResponse(
-          response,
-          await handleWait((listener) => {
-            request.on("close", listener);
-          }),
-        );
-        return;
-      }
-
-      if (method === "POST" && requestUrl.pathname === "/api/submit") {
-        const bodyText = await readRequestBody(request);
-        await sendResponse(response, await handleSubmit(bodyText));
-        return;
-      }
-
-      if (method === "POST" && requestUrl.pathname === "/api/done") {
-        await sendResponse(response, await handleDone());
-        return;
-      }
-
-      if (method === "POST" && requestUrl.pathname === "/api/nav") {
-        const bodyText = await readRequestBody(request);
-        await sendResponse(response, await handleNav(bodyText));
-        return;
-      }
-
-      if (method === "POST" && requestUrl.pathname === "/api/feynman-answer") {
-        const bodyText = await readRequestBody(request);
-        await sendResponse(response, await handleFeynmanAnswer(bodyText));
-        return;
-      }
-
-      if (method === "POST" && requestUrl.pathname === "/api/agent-message") {
-        const bodyText = await readRequestBody(request);
-        await sendResponse(response, await handleAgentMessage(bodyText));
-        return;
-      }
-
-      if (method === "POST" && requestUrl.pathname === "/api/harness") {
-        const bodyText = await readRequestBody(request);
-        await sendResponse(response, await handleHarnessSelection(bodyText));
-        return;
-      }
-
-      if (method === "POST" && requestUrl.pathname === "/api/shutdown") {
-        await sendResponse(response, jsonResponse({ ok: true }));
-        requestShutdown();
-        return;
-      }
-
-      await sendResponse(response, textResponse("Not found", 404));
-    })().catch((error: unknown) => {
-      if (response.writableEnded) {
-        return;
-      }
-
-      const message =
-        error instanceof Error ? error.message : "Internal daemon error.";
-      void sendResponse(response, textResponse(message, 500));
+    void (async () => {
+      const request = await webRequestFromIncoming(incoming, port);
+      const response = await handleRequest(request);
+      await writeWebResponse(outgoing, response);
+    })().catch(async (error) => {
+      const message = error instanceof Error ? error.message : "Internal daemon error.";
+      await writeWebResponse(outgoing, textResponse(message, 500));
     });
   });
 
-  // /api/wait long-polls can sit idle indefinitely; Node's default
-  // requestTimeout (5 min) would destroy the socket mid-wait.
-  server.requestTimeout = 0;
+  server.keepAliveTimeout = 0;
+  server.headersTimeout = 0;
 
-  let cleanupStarted = false;
-  const cleanup = async (): Promise<void> => {
-    if (cleanupStarted) {
-      return;
-    }
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, LOCALHOST_BIND_HOST, () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        rejectListen(new Error("Daemon did not bind to a TCP port."));
+        return;
+      }
 
-    cleanupStarted = true;
-    lessonWatcher.close();
-    glossaryWatcher.close();
-    topicWatcher.close();
-    masteryWatcher.close();
-    feynmanWatcher.close();
-    sseHub.close();
-    server.close();
-    await orchestrator?.endSession();
-    await clearDaemonMetadata(coursePath);
+      port = address.port;
+      resolveListen();
+    });
+  });
+
+  await writeDaemonMetadata(
+    {
+      pid: process.pid,
+      port,
+      startedAt: new Date().toISOString(),
+    },
+    env,
+  );
+
+  const cleanup = (): void => {
+    void shutdown();
   };
+  process.once("SIGTERM", cleanup);
+  process.once("SIGINT", cleanup);
 
-  let shutdownStarted = false;
-  const requestShutdown = (): void => {
-    if (shutdownStarted) {
-      return;
-    }
-
-    shutdownStarted = true;
-    void (async () => {
-      setStatus("session-ended");
-      await sleep(50);
-      await cleanup();
-    })().finally(() => process.exit(0));
-  };
-
-  process.once("SIGTERM", () => {
-    void cleanup().finally(() => process.exit(0));
+  await new Promise<void>((resolveClosed) => {
+    server.once("close", () => resolveClosed());
   });
-  process.once("SIGINT", () => {
-    void cleanup().finally(() => process.exit(0));
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, LOCALHOST_BIND_HOST, () => resolve());
-  });
-
-  const address = server.address();
-  if (address === null || typeof address === "string") {
-    throw new Error("Daemon server did not bind a TCP port.");
-  }
-
-  const port = address.port;
-
-  await writeDaemonMetadata(coursePath, {
-    pid: process.pid,
-    port,
-    startedAt: new Date().toISOString(),
-  });
-
-  await new Promise<never>(() => undefined);
 };

@@ -87,7 +87,7 @@ export type CliCommand =
             json: boolean;
           }>;
     }>
-  | Readonly<{ kind: "daemon"; courseDir: string }>;
+  | Readonly<{ kind: "daemon" }>;
 
 const formatHelp = (version: string): string =>
   [
@@ -1046,12 +1046,12 @@ export const parseCli = (
   }
 
   if (arg === "__daemon") {
-    const [courseDir, extra] = rest;
-    if (courseDir === undefined || extra !== undefined) {
-      return result(1, "", "Usage: learn __daemon <course-dir>");
+    const [extra] = rest;
+    if (extra !== undefined) {
+      return result(1, "", "Usage: learn __daemon");
     }
 
-    return { kind: "daemon", courseDir };
+    return { kind: "daemon" };
   }
 
   return result(1, formatHelp(version), `Unknown option: ${arg}`);

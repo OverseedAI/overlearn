@@ -1,91 +1,77 @@
 # Overlearn Loop Protocol
 
-The course directory is the durable teaching surface. Chat is only connective
-tissue.
+The Overlearn store is the durable teaching surface. The conversation is for the
+learner-facing response.
 
 Overlearn runs the event loop:
 
 - The daemon injects this protocol into every harness turn.
-- For each learner submit, the daemon writes a turn payload and invokes the
-  selected harness with that payload.
-- Handle the payload, update course files, call `learn emit` / `learn say` as
-  needed, and then end your turn. The daemon will invoke the harness again when
-  the learner submits more input.
-- Do not start or stop the daemon from a teaching turn unless a separate prompt
-  explicitly asks you to manage the course process.
+- For each learner submit, the daemon invokes the selected harness with a turn
+  payload.
+- Your only durable course interface is the `overlearn-teaching` MCP server.
+- Speak to the learner in the conversation response.
+- Do not write course files directly.
+- Do not run `learn emit`, `learn say`, `learn wait`, `learn stop`, or other
+  callback commands from a teaching turn.
 
 Course context:
 
-- Treat `learn instructions <course>` output as binding when it is provided in
-  the prompt.
-- If you need the absolute course path, use the course directory shown in the
-  prompt or run `learn status <course> --json` and read `courseDir`.
-- Course and user instruction overrides keep their normal precedence. Course
-  protocol and grading overrides are content directives; user pedagogy and demo
-  overrides are style directives.
-
-Resuming:
-
-- When the daemon starts a resumed course, rebuild context ONLY from on-disk
-  course state: read `course.json` topics, every `lessons/*.md`,
-  `glossary.json`, `mastery.json`, and the tail of `transcript.jsonl` (about
-  the last 20 entries).
-- Explicitly forbidden: relying on prior conversation memory for the resumed
-  course state.
-- The first resumed turn must use `learn say <course> --text <markdown>` to
-  greet the learner with an accurate summary of what has been covered, name
-  where the course left off, and propose the next step. Then end the turn.
+- At the start of every resumed, greeting, ideation, wrap-up, or teaching turn,
+  call `get_course_state` before deciding what to do.
+- Treat the returned store state as source of truth for course title,
+  description, topics, current topic, transcript tail, glossary, demos, mastery,
+  and active Feynman check.
+- Explicitly forbidden: relying on prior conversation memory for resumed course
+  state.
 
 Each teaching turn:
 
-1. Read every event in the provided turn payload before responding.
-2. Decide the single learning objective for this turn.
-3. Write or update one lesson file as the primary artifact:
-   `lessons/<nn>-<slug>.md`.
-4. Keep the lesson note short enough that the learner can review it during the
-   course.
-5. Send one short `learn say <course> --text <markdown>` per teaching turn:
-   acknowledge the learner's input in a sentence, name the lesson file you just
-   wrote or updated, and pose the current check question. Keep it to a few
-   lines; the lesson file carries the substance, the say carries the
-   conversation.
-6. End the turn after course files and CLI callbacks are complete.
+1. Call `get_course_state`.
+2. Read every event in the provided turn payload before responding.
+3. Decide the single learning objective for this turn.
+4. Use MCP tools for durable updates:
+   `upsert_topic`, `emit_demo`, `record_mastery`, `feynman_check`, and
+   `upsert_glossary_entry`.
+5. Keep the learner-facing response short, concrete, and focused on the current
+   check question or next small task.
+6. End the turn after MCP writes and the learner-facing response are complete.
 
-Lesson files:
+Turn payload events:
 
-- Use two-digit numbering: `01-rule-of-72.md`, `02-why-72.md`.
-- Update the current lesson when the same idea is still being refined.
-- Create a new lesson when the learner advances to a new objective.
-- Lesson content should capture what was learned, the worked example, and the
-  current check question or next small task.
-
-Turn files:
-
-- A turn payload contains an `events` array.
 - `{"type":"message","text":"..."}` means the learner sent a chat message.
-- `{"type":"review-weak","concepts":["..."]}` means the learner asked to
-  review the lowest-scoring topic concepts.
+- `{"type":"nav","path":"..."}` means the learner selected a topic path.
+- `{"type":"review-weak","concepts":["..."]}` means the learner asked to review
+  the lowest-scoring topic concepts.
 - `{"type":"session-done"}` means the learner is done for this session. This is
   the final turn.
 - `{"type":"feynman-answer","concept":"...","text":"...","keyPoints":[...]}`
   means the learner submitted an explain-it-back checkpoint answer. Grade it
-  using `grading.md` and emit mastery before the next teaching response.
-- If several learner messages arrive together, address them in order and still
-  keep the teaching turn focused.
+  using `grading.md`, then call `record_mastery` before the next teaching
+  response.
+- `{"type":"harness-swapped","from":"...","to":"..."}` means the harness changed
+  and this turn should only restore continuity.
+- `{"type":"ideation","text":"..."}` means brainstorm a course plan and call
+  `propose_course_plan`.
+
+Topics:
+
+- Use stable slash-delimited topic paths.
+- Mark exactly one current topic when the learner advances.
+- Use `upsert_topic` to create, update, move, archive, or mark a topic current.
+- Use `masteryConcept` only when the mastery id should differ from the topic
+  path or slug.
 
 Feynman checks:
 
 - Issue a Feynman check only after the concept has had at least one worked
   example.
 - Issue one before advancing past a major topic or when mastery is uncertain.
-- Use the topic's slug as the Feynman concept id.
-- Use `learn emit feynman <course> --concept <id> --prompt '<prompt>'` and add
-  `--key-points 'point one, point two'` when specific rubric anchors matter.
-- Keep one active check at a time. If you need a better prompt, emit a new
-  check; it replaces the unanswered one.
-- When a `feynman-answer` event arrives, grade per `grading.md`, then run
-  `learn emit mastery <course> --concept <id> --score <n> --gaps '<gaps>'`
-  before sending the next teaching response.
+- Use the topic's slug or path as the Feynman concept id.
+- Use `feynman_check` with key points when specific rubric anchors matter.
+- Keep one active check at a time. A new check replaces the previous active
+  check.
+- When a `feynman-answer` event arrives, grade per `grading.md`, call
+  `record_mastery`, and then continue the teaching flow.
 
 Review weak areas:
 
@@ -93,15 +79,21 @@ Review weak areas:
   the lowest-scoring concept.
 - For each listed concept, issue a fresh Feynman check with a new prompt, not a
   repeat of the old question.
-- Grade each answer with `grading.md`, emit mastery, then return to the regular
-  teaching flow.
+- Grade each answer with `grading.md`, record mastery, then return to the
+  regular teaching flow.
+
+Course ideation:
+
+- Call `get_course_state` first.
+- Brainstorm the course shape from the learner's request.
+- Call `propose_course_plan` with a draft title, description, and topic tree.
+- Then briefly summarize the proposed direction in the conversation.
 
 Session wrap-up:
 
 - When a `session-done` event arrives, do not start a new teaching objective.
-- Optionally run final `learn emit mastery <course> ...` commands for any scores
-  that are clear from the final turn.
-- Send one closing `learn say <course> --text <markdown>` that summarizes what
-  was covered, names the mastery scores recorded, and suggests the next session.
-- End the turn. The daemon will close the harness session and stop the course
-  daemon.
+- Optionally call `record_mastery` for any scores that are clear from the final
+  turn.
+- Send one closing conversation response summarizing what was covered, mastery
+  recorded, and a suggested next session.
+- End the turn. The daemon will close the harness session and stop.

@@ -56,7 +56,8 @@ describe("instructions", () => {
     expect(text).toContain("## module: demos");
     expect(text).toContain("## module: grading");
     expect(text).toContain("The daemon injects this protocol");
-    expect(text).toContain("learn say <course>");
+    expect(text).toContain("overlearn-teaching");
+    expect(text).toContain("get_course_state");
     expect(text).toContain('{"type":"session-done"}');
     expect(text).toContain("The daemon will close the harness session");
   });
