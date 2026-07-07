@@ -106,12 +106,34 @@ type HarnessUiOption = Readonly<{
   authenticated: boolean;
   version?: string;
   selected: boolean;
+  login?: Readonly<{
+    command: string;
+    manual: boolean;
+    note: string;
+  }>;
+  install?: Readonly<{
+    command: string;
+    docsUrl: string;
+  }>;
+}>;
+
+type OnboardingUiState = "welcome" | "connect-agent" | "tutorial-offer" | "done";
+
+type ProfileUi = Readonly<{
+  name: string | null;
+  onboardingState: OnboardingUiState;
+  settings: Readonly<Record<string, unknown>>;
+  preferredHarness: string | null;
+  dataDir: string;
 }>;
 
 type RenderPageOptions = Readonly<{
   courseId?: number;
   orchestrated?: boolean;
   harnesses?: readonly HarnessUiOption[];
+  profile?: ProfileUi;
+  dataDir?: string;
+  onboardingState?: OnboardingUiState;
 }>;
 
 const topicConceptIds = (topic: TopicNode): readonly string[] => {
@@ -174,8 +196,33 @@ const escapeScriptJson = (value: unknown): string => {
 const libraryClientScript = String.raw`
 (() => {
   const currentCourseId = __LIBRARY_COURSE_ID__;
+  let onboardingState = __ONBOARDING_STATE__;
+  let profile = __PROFILE__;
+  const dataDir = __DATA_DIR__;
   const appShell = document.querySelector(".shell");
+  const onboardingScreen = document.querySelector("#onboarding-screen");
+  const onboardingPanels = [...document.querySelectorAll("[data-onboarding-step]")];
+  const onboardingNameInput = document.querySelector("#onboarding-name");
+  const onboardingWelcomeContinue = document.querySelector("#onboarding-welcome-continue");
+  const onboardingHarnessList = document.querySelector("#onboarding-harness-list");
+  const onboardingHarnessStatus = document.querySelector("#onboarding-harness-status");
+  const onboardingRecheckButtons = [...document.querySelectorAll("[data-onboarding-recheck]")];
+  const onboardingConnectContinue = document.querySelector("#onboarding-connect-continue");
+  const onboardingSkip = document.querySelector("#onboarding-skip");
+  const tutorialStart = document.querySelector("#tutorial-start");
+  const tutorialLater = document.querySelector("#tutorial-later");
+  const tutorialFinish = document.querySelector("#tutorial-finish");
+  const tutorialNote = document.querySelector("#tutorial-coming-soon");
   const libraryScreen = document.querySelector("#library-screen");
+  const settingsScreen = document.querySelector("#settings-screen");
+  const settingsButton = document.querySelector("#library-settings");
+  const settingsForm = document.querySelector("#settings-form");
+  const settingsNameInput = document.querySelector("#settings-name");
+  const settingsHarnessSelect = document.querySelector("#settings-harness");
+  const settingsDataDir = document.querySelector("#settings-data-dir");
+  const settingsStatus = document.querySelector("#settings-status");
+  const settingsBack = document.querySelector("#settings-back");
+  const rerunOnboarding = document.querySelector("#rerun-onboarding");
   const courseViewElements = [...document.querySelectorAll("[data-course-view]")];
   const libraryList = document.querySelector("#course-library-list");
   const libraryStatusText = document.querySelector("#library-status");
@@ -243,6 +290,55 @@ const libraryClientScript = String.raw`
   const harnessReady = (harness) =>
     harness.installed === true && harness.authenticated === true;
 
+  const onboardingDone = () => onboardingState === "done";
+
+  const patchProfile = async (body) => {
+    profile = await requestJson("/api/profile", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return profile;
+  };
+
+  const setOnboardingState = async (state) => {
+    const payload = await requestJson("/api/onboarding", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state }),
+    });
+    onboardingState = payload.state;
+    if (isRecord(payload.profile)) {
+      profile = payload.profile;
+    }
+  };
+
+  const commandText = (command) =>
+    typeof command === "string" && command.length > 0 ? command : "";
+
+  const harnessLoginCommand = (harness) =>
+    commandText(harness?.login?.command);
+
+  const harnessInstallCommand = (harness) =>
+    commandText(harness?.install?.command);
+
+  const copyText = async (text, statusElement) => {
+    if (text.length === 0) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      if (statusElement !== null) {
+        statusElement.textContent = "Copied.";
+      }
+    } catch {
+      if (statusElement !== null) {
+        statusElement.textContent = text;
+      }
+    }
+  };
+
   const harnessStateText = (harness) => {
     if (!isRecord(harness)) {
       return "ready";
@@ -257,6 +353,192 @@ const libraryClientScript = String.raw`
     }
 
     return typeof harness.version === "string" ? harness.version : "ready";
+  };
+
+  const onboardingHarnessState = (harness) => {
+    if (!isRecord(harness) || harness.installed !== true) {
+      return "not-installed";
+    }
+
+    if (harness.authenticated !== true) {
+      return "installed-unauthenticated";
+    }
+
+    return "ready";
+  };
+
+  const createCommandRow = (command, statusElement) => {
+    const row = document.createElement("div");
+    row.className = "onboarding-command-row";
+
+    const code = document.createElement("code");
+    code.textContent = command;
+
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "library-button secondary";
+    copy.textContent = "Copy";
+    copy.addEventListener("click", () => {
+      void copyText(command, statusElement);
+    });
+
+    row.append(code, copy);
+    return row;
+  };
+
+  const selectPreferredHarness = async (harness) => {
+    if (!harnessReady(harness)) {
+      return;
+    }
+
+    await patchProfile({ preferredHarness: harness.id });
+    harnesses = harnesses.map((candidate) => ({
+      ...candidate,
+      selected: candidate.id === harness.id,
+    }));
+    renderLibraryHarnessPicker(harness.id);
+    renderSettingsHarnessPicker();
+    renderOnboardingHarnesses();
+  };
+
+  const loginHarness = async (harness, statusElement) => {
+    const response = await fetch(
+      "/api/harnesses/" + encodeURIComponent(String(harness.id)) + "/login",
+      { method: "POST" },
+    );
+    const text = await response.text();
+    const payload =
+      text.length === 0
+        ? undefined
+        : (() => {
+            try {
+              return JSON.parse(text);
+            } catch {
+              return undefined;
+            }
+          })();
+    if (!response.ok) {
+      statusElement.textContent = text.length === 0 ? "Login failed." : text;
+      return;
+    }
+
+    if (payload?.manual === true) {
+      statusElement.textContent =
+        "Run " + String(payload.command ?? harnessLoginCommand(harness)) + " in your terminal.";
+      return;
+    }
+
+    statusElement.textContent = "Login launched. Re-check when it finishes.";
+  };
+
+  const renderOnboardingHarnesses = () => {
+    if (onboardingHarnessList === null || onboardingHarnessStatus === null) {
+      return;
+    }
+
+    onboardingHarnessList.replaceChildren();
+    const readyHarnesses = harnesses.filter(harnessReady);
+    if (onboardingConnectContinue !== null) {
+      onboardingConnectContinue.disabled = readyHarnesses.length === 0;
+    }
+    onboardingHarnessStatus.textContent =
+      readyHarnesses.length === 0
+        ? "No ready agents yet. You can log in, install one, or skip for now."
+        : "Ready agents can be used as your default.";
+
+    for (const harness of harnesses) {
+      const state = onboardingHarnessState(harness);
+      const card = document.createElement("article");
+      card.className = "onboarding-harness-card";
+      card.dataset.harnessId = harness.id;
+      card.dataset.harnessState = state;
+
+      const header = document.createElement("div");
+      header.className = "onboarding-harness-header";
+
+      const title = document.createElement("h3");
+      title.textContent = String(harness.name ?? harness.id);
+
+      const badge = document.createElement("span");
+      badge.className = "course-status-badge";
+      badge.textContent =
+        state === "ready"
+          ? "ready"
+          : state === "installed-unauthenticated"
+            ? "not logged in"
+            : "not installed";
+
+      header.append(title, badge);
+
+      const body = document.createElement("p");
+      body.textContent =
+        state === "ready"
+          ? "Installed and authenticated."
+          : state === "installed-unauthenticated"
+            ? "Installed, but Overlearn did not find local auth."
+            : "Overlearn did not find the agent command on PATH.";
+
+      const status = document.createElement("p");
+      status.className = "onboarding-card-status";
+
+      const actions = document.createElement("div");
+      actions.className = "library-form-actions";
+
+      if (state === "ready") {
+        const select = document.createElement("button");
+        select.type = "button";
+        select.className = "library-button primary";
+        select.dataset.onboardingSelectHarness = harness.id;
+        select.textContent = harness.selected ? "Preferred" : "Use as preferred";
+        select.disabled = harness.selected === true;
+        select.addEventListener("click", () => {
+          void selectPreferredHarness(harness);
+        });
+        actions.append(select);
+      } else if (state === "installed-unauthenticated") {
+        const login = document.createElement("button");
+        login.type = "button";
+        login.className = "library-button primary";
+        login.textContent = "Log in";
+        login.addEventListener("click", () => {
+          void loginHarness(harness, status);
+        });
+        actions.append(login);
+
+        const command = harnessLoginCommand(harness);
+        if (command.length > 0) {
+          card.append(createCommandRow(command, status));
+        }
+      } else {
+        const command = harnessInstallCommand(harness);
+        if (command.length > 0) {
+          card.append(createCommandRow(command, status));
+        }
+
+        if (typeof harness?.install?.docsUrl === "string") {
+          const docs = document.createElement("a");
+          docs.className = "onboarding-docs-link";
+          docs.href = harness.install.docsUrl;
+          docs.target = "_blank";
+          docs.rel = "noreferrer";
+          docs.textContent = "Docs";
+          actions.append(docs);
+        }
+      }
+
+      const recheck = document.createElement("button");
+      recheck.type = "button";
+      recheck.className = "library-button secondary";
+      recheck.textContent = "Re-check";
+      recheck.addEventListener("click", () => {
+        void refreshLibraryHarnesses(true);
+      });
+      actions.append(recheck);
+
+      card.prepend(header, body);
+      card.append(actions, status);
+      onboardingHarnessList.append(card);
+    }
   };
 
   const renderLibraryHarnessPicker = (selectedId) => {
@@ -284,18 +566,22 @@ const libraryClientScript = String.raw`
       typeof selectedId === "string" && selectedId.length > 0 ? selectedId : "";
   };
 
-  const refreshLibraryHarnesses = async () => {
+  const refreshLibraryHarnesses = async (refresh = false) => {
     try {
-      const payload = await requestJson("/api/harnesses");
+      const payload = await requestJson("/api/harnesses" + (refresh ? "?refresh=1" : ""));
       harnesses = Array.isArray(payload)
         ? payload
         : Array.isArray(payload?.harnesses)
           ? payload.harnesses
           : [];
       renderLibraryHarnessPicker(harnessSelect.value);
+      renderSettingsHarnessPicker();
+      renderOnboardingHarnesses();
     } catch {
       harnesses = [];
       renderLibraryHarnessPicker();
+      renderSettingsHarnessPicker();
+      renderOnboardingHarnesses();
     }
   };
 
@@ -709,8 +995,121 @@ const libraryClientScript = String.raw`
     }
   };
 
+  const renderSettingsHarnessPicker = () => {
+    if (settingsHarnessSelect === null) {
+      return;
+    }
+
+    settingsHarnessSelect.replaceChildren();
+
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "No preference";
+    settingsHarnessSelect.append(empty);
+
+    for (const harness of harnesses) {
+      if (!isRecord(harness) || typeof harness.id !== "string") {
+        continue;
+      }
+
+      const option = document.createElement("option");
+      option.value = harness.id;
+      option.textContent =
+        String(harness.name ?? harness.id) + " - " + harnessStateText(harness);
+      option.disabled = !harnessReady(harness);
+      settingsHarnessSelect.append(option);
+    }
+
+    settingsHarnessSelect.value =
+      typeof profile?.preferredHarness === "string"
+        ? profile.preferredHarness
+        : "";
+  };
+
+  const populateSettings = () => {
+    if (
+      settingsNameInput === null ||
+      settingsHarnessSelect === null ||
+      settingsDataDir === null
+    ) {
+      return;
+    }
+
+    settingsNameInput.value =
+      typeof profile?.name === "string" ? profile.name : "";
+    settingsDataDir.value =
+      typeof profile?.dataDir === "string" ? profile.dataDir : dataDir;
+    renderSettingsHarnessPicker();
+  };
+
+  const hideAllPrimaryScreens = () => {
+    if (onboardingScreen !== null) {
+      onboardingScreen.hidden = true;
+    }
+    if (settingsScreen !== null) {
+      settingsScreen.hidden = true;
+    }
+    if (libraryScreen !== null) {
+      libraryScreen.hidden = true;
+    }
+    for (const element of courseViewElements) {
+      element.hidden = true;
+    }
+  };
+
+  const applyOnboardingStep = () => {
+    if (onboardingScreen === null) {
+      return;
+    }
+
+    for (const panel of onboardingPanels) {
+      panel.hidden = panel.dataset.onboardingStep !== onboardingState;
+    }
+
+    if (onboardingNameInput !== null) {
+      onboardingNameInput.value =
+        typeof profile?.name === "string" ? profile.name : "";
+    }
+
+    renderOnboardingHarnesses();
+  };
+
+  const setOnboardingVisible = () => {
+    hideAllPrimaryScreens();
+    if (onboardingScreen !== null) {
+      onboardingScreen.hidden = false;
+    }
+    appShell?.classList.add("library-mode");
+    document.body.classList.add("library-open");
+    applyOnboardingStep();
+  };
+
+  const setSettingsVisible = () => {
+    hideAllPrimaryScreens();
+    if (settingsScreen !== null) {
+      settingsScreen.hidden = false;
+    }
+    appShell?.classList.add("library-mode");
+    document.body.classList.add("library-open");
+    populateSettings();
+  };
+
   const setLibraryVisible = (visible) => {
+    if (!onboardingDone()) {
+      if (!location.hash.startsWith("#onboarding")) {
+        history.replaceState({ screen: "onboarding" }, "", "#onboarding");
+      }
+      setOnboardingVisible();
+      return;
+    }
+
     libraryScreen.hidden = !visible;
+    if (settingsScreen !== null) {
+      settingsScreen.hidden = true;
+    }
+    if (onboardingScreen !== null) {
+      onboardingScreen.hidden = true;
+    }
     for (const element of courseViewElements) {
       element.hidden = visible;
     }
@@ -728,7 +1127,31 @@ const libraryClientScript = String.raw`
     setLibraryVisible(true);
   };
 
+  const showSettings = () => {
+    if (!onboardingDone()) {
+      history.replaceState({ screen: "onboarding" }, "", "#onboarding");
+      setOnboardingVisible();
+      return;
+    }
+
+    history.pushState({ screen: "settings" }, "", "#settings");
+    setSettingsVisible();
+  };
+
   const applyRoute = () => {
+    if (!onboardingDone()) {
+      if (!location.hash.startsWith("#onboarding")) {
+        history.replaceState({ screen: "onboarding" }, "", "#onboarding");
+      }
+      setOnboardingVisible();
+      return;
+    }
+
+    if (location.hash === "#settings") {
+      setSettingsVisible();
+      return;
+    }
+
     if (location.hash === "#library" || currentCourseId === null) {
       setLibraryVisible(true);
       return;
@@ -856,6 +1279,127 @@ const libraryClientScript = String.raw`
     importNotice.textContent = "Import is coming soon.";
   });
 
+  onboardingWelcomeContinue?.addEventListener("click", () => {
+    void (async () => {
+      const name =
+        onboardingNameInput === null ? "" : onboardingNameInput.value.trim();
+      if (name.length > 0) {
+        await patchProfile({ name });
+      }
+      await setOnboardingState("connect-agent");
+      history.replaceState({ screen: "onboarding" }, "", "#onboarding");
+      applyRoute();
+    })().catch(() => undefined);
+  });
+
+  for (const button of onboardingRecheckButtons) {
+    button.addEventListener("click", () => {
+      void refreshLibraryHarnesses(true);
+    });
+  }
+
+  onboardingConnectContinue?.addEventListener("click", () => {
+    void (async () => {
+      const ready = harnesses.filter(harnessReady);
+      if (ready.length === 0) {
+        return;
+      }
+
+      const selectedReady = ready.find((harness) => harness.selected === true);
+      const preferred = selectedReady ?? ready[0];
+      if (preferred !== undefined && profile?.preferredHarness !== preferred.id) {
+        await patchProfile({ preferredHarness: preferred.id });
+      }
+
+      await setOnboardingState("tutorial-offer");
+      applyRoute();
+    })().catch(() => undefined);
+  });
+
+  onboardingSkip?.addEventListener("click", () => {
+    void (async () => {
+      await patchProfile({ settings: { skippedAgentConnect: true } });
+      await setOnboardingState("tutorial-offer");
+      applyRoute();
+    })().catch(() => undefined);
+  });
+
+  tutorialStart?.addEventListener("click", () => {
+    void patchProfile({ settings: { tutorialChoice: "start" } }).catch(
+      () => undefined,
+    );
+    if (tutorialNote !== null) {
+      tutorialNote.hidden = false;
+    }
+    if (tutorialFinish !== null) {
+      tutorialFinish.hidden = false;
+    }
+  });
+
+  const finishOnboarding = (choice) => {
+    void (async () => {
+      await patchProfile({ settings: { tutorialChoice: choice } });
+      await setOnboardingState("done");
+      history.replaceState({ screen: "library" }, "", "#library");
+      setLibraryVisible(true);
+    })().catch(() => undefined);
+  };
+
+  tutorialLater?.addEventListener("click", () => {
+    finishOnboarding("later");
+  });
+
+  tutorialFinish?.addEventListener("click", () => {
+    finishOnboarding("start");
+  });
+
+  settingsButton?.addEventListener("click", showSettings);
+  settingsBack?.addEventListener("click", showLibrary);
+
+  settingsForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void (async () => {
+      if (
+        settingsNameInput === null ||
+        settingsHarnessSelect === null ||
+        settingsStatus === null
+      ) {
+        return;
+      }
+
+      settingsStatus.hidden = false;
+      settingsStatus.textContent = "Saving settings...";
+      await patchProfile({
+        name:
+          settingsNameInput.value.trim().length === 0
+            ? null
+            : settingsNameInput.value.trim(),
+        preferredHarness:
+          settingsHarnessSelect.value.length === 0
+            ? null
+            : settingsHarnessSelect.value,
+      });
+      settingsStatus.textContent = "Settings saved.";
+      renderLibraryHarnessPicker();
+      renderSettingsHarnessPicker();
+      renderOnboardingHarnesses();
+    })().catch((error) => {
+      if (settingsStatus !== null) {
+        settingsStatus.hidden = false;
+        settingsStatus.textContent =
+          error instanceof Error ? error.message : "Settings could not be saved.";
+      }
+    });
+  });
+
+  rerunOnboarding?.addEventListener("click", () => {
+    void (async () => {
+      await setOnboardingState("welcome");
+      history.replaceState({ screen: "onboarding" }, "", "#onboarding");
+      applyRoute();
+    })().catch(() => undefined);
+  });
+
   cancelButton?.addEventListener("click", closeCourseForm);
 
   courseForm.addEventListener("submit", (event) => {
@@ -902,6 +1446,8 @@ const libraryClientScript = String.raw`
           ? payload.harnesses
           : harnesses;
       renderLibraryHarnessPicker(harnessSelect.value);
+      renderSettingsHarnessPicker();
+      renderOnboardingHarnesses();
     });
 
     const refreshFromCoursePayload = (event) => {
@@ -922,6 +1468,8 @@ const libraryClientScript = String.raw`
   }
 
   renderLibraryHarnessPicker();
+  renderSettingsHarnessPicker();
+  renderOnboardingHarnesses();
   applyRoute();
 })();
 `;
@@ -3522,6 +4070,74 @@ const renderHarnessOptions = (harnesses: readonly HarnessUiOption[]): string =>
     })
     .join("");
 
+const onboardingHarnessState = (harness: HarnessUiOption): string => {
+  if (!harness.installed) {
+    return "not-installed";
+  }
+
+  return harness.authenticated ? "ready" : "installed-unauthenticated";
+};
+
+const renderCommandRow = (command: string): string =>
+  command.length === 0
+    ? ""
+    : `<div class="onboarding-command-row"><code>${escapeHtml(
+        command,
+      )}</code><button class="library-button secondary" type="button">Copy</button></div>`;
+
+const renderOnboardingHarnessCards = (
+  harnesses: readonly HarnessUiOption[],
+): string =>
+  harnesses
+    .map((harness) => {
+      const state = onboardingHarnessState(harness);
+      const badge =
+        state === "ready"
+          ? "ready"
+          : state === "installed-unauthenticated"
+            ? "not logged in"
+            : "not installed";
+      const body =
+        state === "ready"
+          ? "Installed and authenticated."
+          : state === "installed-unauthenticated"
+            ? "Installed, but Overlearn did not find local auth."
+            : "Overlearn did not find the agent command on PATH.";
+      const selectButton =
+        state !== "ready"
+          ? ""
+          : `<button class="library-button primary" type="button" data-onboarding-select-harness="${escapeHtml(
+              harness.id,
+            )}"${harness.selected ? " disabled" : ""}>${
+              harness.selected ? "Preferred" : "Use as preferred"
+            }</button>`;
+      const loginCommand = harness.login?.command ?? "";
+      const loginButton =
+        state === "installed-unauthenticated"
+          ? '<button class="library-button primary" type="button">Log in</button>'
+          : "";
+      const installCommand = harness.install?.command ?? "";
+      const installDocs =
+        state === "not-installed" && harness.install?.docsUrl !== undefined
+          ? `<a class="onboarding-docs-link" href="${escapeHtml(
+              harness.install.docsUrl,
+            )}" target="_blank" rel="noreferrer">Docs</a>`
+          : "";
+      const command =
+        state === "installed-unauthenticated"
+          ? renderCommandRow(loginCommand)
+          : state === "not-installed"
+            ? renderCommandRow(installCommand)
+            : "";
+
+      return `<article class="onboarding-harness-card" data-harness-id="${escapeHtml(
+        harness.id,
+      )}" data-harness-state="${state}"><div class="onboarding-harness-header"><h3>${escapeHtml(
+        harness.name,
+      )}</h3><span class="course-status-badge">${badge}</span></div><p>${body}</p>${command}<div class="library-form-actions">${selectButton}${loginButton}${installDocs}<button class="library-button secondary" type="button">Re-check</button></div><p class="onboarding-card-status"></p></article>`;
+    })
+    .join("");
+
 const renderStatusText = (
   status: UiRenderStatus,
   hasSeenWait: boolean,
@@ -3607,6 +4223,24 @@ export const renderPage = (
         : "Done Learning";
   const orchestrated = options.orchestrated === true;
   const harnesses = options.harnesses ?? [];
+  const hasReadyHarness = harnesses.some(harnessReady);
+  const dataDir = options.dataDir ?? options.profile?.dataDir ?? "";
+  const profile =
+    options.profile ??
+    ({
+      name: null,
+      onboardingState: "done",
+      settings: {},
+      preferredHarness: null,
+      dataDir,
+    } satisfies ProfileUi);
+  const onboardingState =
+    options.onboardingState ?? profile.onboardingState ?? "done";
+  const onboardingHidden = onboardingState === "done" ? " hidden" : "";
+  const libraryHidden =
+    onboardingState === "done" && options.courseId === undefined ? "" : " hidden";
+  const courseViewHidden =
+    onboardingState === "done" && options.courseId !== undefined ? "" : " hidden";
   const selectedHarnessOption = selectedHarness(harnesses);
   const harnessHidden = orchestrated ? "" : " hidden";
   const agentActivitySkeleton = orchestrated
@@ -3625,7 +4259,10 @@ export const renderPage = (
   const libraryScript = libraryClientScript.replace(
     "__LIBRARY_COURSE_ID__",
     escapeScriptJson(options.courseId ?? null),
-  );
+  )
+    .replace("__ONBOARDING_STATE__", escapeScriptJson(onboardingState))
+    .replace("__PROFILE__", escapeScriptJson(profile))
+    .replace("__DATA_DIR__", escapeScriptJson(dataDir));
   const script = clientScript
     .replace(
       "__TRANSCRIPT__",
@@ -4188,6 +4825,155 @@ export const renderPage = (
       color: var(--heading);
       font-size: 1.05rem;
       font-weight: 600;
+    }
+
+    .onboarding-screen,
+    .settings-screen {
+      display: grid;
+      gap: 1rem;
+      width: min(100%, 52rem);
+      margin: 0 auto;
+      padding: 1rem 0 2rem;
+    }
+
+    .onboarding-panel {
+      display: grid;
+      gap: 0.85rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 1.25rem;
+    }
+
+    .onboarding-kicker {
+      margin: 0;
+      color: var(--accent-soft-text);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .onboarding-panel h1,
+    .onboarding-panel h2 {
+      margin: 0;
+      color: var(--heading);
+      font-size: 1.35rem;
+      line-height: 1.2;
+    }
+
+    .onboarding-copy,
+    .onboarding-warning,
+    .onboarding-card-status {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .onboarding-warning {
+      color: var(--warn-text);
+    }
+
+    .onboarding-label {
+      display: grid;
+      gap: 0.25rem;
+      color: var(--secondary);
+      font-size: 0.9rem;
+      font-weight: 700;
+    }
+
+    .onboarding-label span {
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    .onboarding-input,
+    .settings-form input,
+    .settings-form select {
+      width: 100%;
+      min-height: 2.35rem;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: var(--card);
+      color: var(--text);
+      padding: 0.55rem 0.65rem;
+      font: inherit;
+    }
+
+    .onboarding-harness-list {
+      display: grid;
+      gap: 0.75rem;
+    }
+
+    .onboarding-harness-card {
+      display: grid;
+      gap: 0.7rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--card);
+      padding: 1rem;
+    }
+
+    .onboarding-harness-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+
+    .onboarding-harness-header h3 {
+      margin: 0;
+      color: var(--heading);
+      font-size: 1rem;
+      line-height: 1.25;
+    }
+
+    .onboarding-harness-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .onboarding-command-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .onboarding-command-row code {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--body-text);
+      padding: 0.55rem 0.65rem;
+      font-size: 0.86rem;
+      white-space: nowrap;
+    }
+
+    .onboarding-docs-link {
+      display: inline-flex;
+      min-height: 2.35rem;
+      align-items: center;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      color: var(--secondary);
+      padding: 0 0.75rem;
+      font-size: 0.9rem;
+      font-weight: 600;
+      text-decoration: none;
+    }
+
+    .settings-form {
+      grid-template-columns: minmax(8rem, 12rem) minmax(0, 1fr);
+      align-items: center;
+    }
+
+    .settings-form label {
+      color: var(--secondary);
+      font-size: 0.9rem;
+      font-weight: 700;
     }
 
     .app-header {
@@ -5957,11 +6743,13 @@ export const renderPage = (
         flex: 1 1 auto;
       }
 
-      .library-course-form {
+      .library-course-form,
+      .settings-form {
         grid-template-columns: 1fr;
       }
 
-      .library-course-form label {
+      .library-course-form label,
+      .settings-form label {
         line-height: 1.25;
       }
 
@@ -6093,7 +6881,84 @@ export const renderPage = (
 </head>
 <body>
   <main class="shell">
-    <section id="library-screen" class="library-screen" aria-labelledby="library-title" hidden>
+    <section id="onboarding-screen" class="onboarding-screen" aria-labelledby="onboarding-title"${onboardingHidden}>
+      <a class="wordmark" href="/" aria-label="Homepage"><strong>overlearn</strong></a>
+
+      <section class="onboarding-panel" data-onboarding-step="welcome"${onboardingState === "welcome" ? "" : " hidden"}>
+        <p class="onboarding-kicker">Welcome</p>
+        <h1 id="onboarding-title">Set up overlearn</h1>
+        <p class="onboarding-copy">Overlearn turns your existing AI subscription into a local learning workspace: connect an agent, build course threads, and keep the durable notes, mastery checks, and demos on this machine.</p>
+        <label class="onboarding-label" for="onboarding-name">Name <span>optional</span></label>
+        <input id="onboarding-name" class="onboarding-input" name="name" type="text" autocomplete="name" value="${escapeHtml(
+          profile.name ?? "",
+        )}">
+        <div class="library-form-actions">
+          <button id="onboarding-welcome-continue" class="library-button primary" type="button">Continue</button>
+        </div>
+      </section>
+
+      <section class="onboarding-panel" data-onboarding-step="connect-agent"${onboardingState === "connect-agent" ? "" : " hidden"}>
+        <p class="onboarding-kicker">Connect your agent</p>
+        <h2>Choose a default agent</h2>
+        <p id="onboarding-harness-status" class="library-status" aria-live="polite">${hasReadyHarness ? "Ready agents can be used as your default." : "No ready agents yet. You can log in, install one, or skip for now."}</p>
+        <div id="onboarding-harness-list" class="onboarding-harness-list">${renderOnboardingHarnessCards(
+          harnesses,
+        )}</div>
+        <p class="onboarding-warning">Skipping means new courses will use the default agent once one is available.</p>
+        <div class="library-form-actions">
+          <button id="onboarding-connect-continue" class="library-button primary" type="button"${hasReadyHarness ? "" : " disabled"}>Continue</button>
+          <button id="onboarding-skip" class="library-button secondary" type="button">Skip for now</button>
+        </div>
+      </section>
+
+      <section class="onboarding-panel" data-onboarding-step="tutorial-offer"${onboardingState === "tutorial-offer" ? "" : " hidden"}>
+        <p class="onboarding-kicker">Tutorial</p>
+        <h2>Start with a quick tutorial?</h2>
+        <p class="onboarding-copy">The guided tutorial will walk through creating a course, letting the agent teach, and reviewing mastery checks.</p>
+        <p id="tutorial-coming-soon" class="library-notice" hidden>Tutorial is coming soon.</p>
+        <div class="library-form-actions">
+          <button id="tutorial-start" class="library-button primary" type="button">Start tutorial</button>
+          <button id="tutorial-later" class="library-button secondary" type="button">Maybe later</button>
+          <button id="tutorial-finish" class="library-button secondary" type="button" hidden>Go to library</button>
+        </div>
+      </section>
+    </section>
+
+    <section id="settings-screen" class="settings-screen" aria-labelledby="settings-title" hidden>
+      <header class="library-header">
+        <div class="library-heading">
+          <a class="wordmark" href="/" aria-label="Homepage"><strong>overlearn</strong></a>
+          <div>
+            <h1 id="settings-title">Settings</h1>
+            <p id="settings-status" class="library-status" aria-live="polite" hidden></p>
+          </div>
+        </div>
+        <div class="library-actions">
+          <button id="settings-back" class="library-button secondary" type="button">Library</button>
+        </div>
+      </header>
+      <form id="settings-form" class="library-form-panel settings-form">
+        <label for="settings-name">Name</label>
+        <input id="settings-name" name="name" type="text" autocomplete="name" value="${escapeHtml(
+          profile.name ?? "",
+        )}">
+
+        <label for="settings-harness">Preferred agent</label>
+        <select id="settings-harness" name="preferredHarness"></select>
+
+        <label for="settings-data-dir">Data location</label>
+        <input id="settings-data-dir" name="dataDir" type="text" value="${escapeHtml(
+          dataDir,
+        )}" readonly>
+
+        <div class="library-form-actions">
+          <button class="library-button primary" type="submit">Save settings</button>
+          <button id="rerun-onboarding" class="library-button secondary" type="button">Re-run onboarding</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="library-screen" class="library-screen" aria-labelledby="library-title"${libraryHidden}>
       <header class="library-header">
         <div class="library-heading">
           <a class="wordmark" href="/" aria-label="Homepage"><strong>overlearn</strong></a>
@@ -6103,6 +6968,7 @@ export const renderPage = (
           </div>
         </div>
         <div class="library-actions">
+          <button id="library-settings" class="library-button secondary" type="button" aria-label="Settings" title="Settings">&#9881;</button>
           <button id="new-course" class="library-button primary" type="button">New course</button>
           <button id="import-course" class="library-button secondary" type="button">Import</button>
         </div>
@@ -6145,7 +7011,7 @@ export const renderPage = (
       </section>
     </section>
 
-    <header class="app-header" data-course-view>
+    <header class="app-header" data-course-view${courseViewHidden}>
       <div class="header-brand">
         <a class="wordmark" href="/" aria-label="Homepage"><strong>overlearn</strong></a>
         <button id="back-to-library" class="back-to-library" type="button">Library</button>
@@ -6210,7 +7076,7 @@ export const renderPage = (
       </div>
     </header>
 
-    <div class="workspace" data-course-view>
+    <div class="workspace" data-course-view${courseViewHidden}>
       <section class="stream-pane" aria-label="Teaching stream">
         <div class="stream-header">
           <h2>Teaching stream</h2>

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { daemonMetadataPath } from "./index";
+import { daemonMetadataPath, isLegalOnboardingTransition } from "./index";
 
 describe("app daemon helpers", () => {
   test("uses the store data dir for daemon metadata", async () => {
@@ -16,5 +16,17 @@ describe("app daemon helpers", () => {
     } finally {
       await rm(dataDir, { force: true, recursive: true });
     }
+  });
+
+  test("validates onboarding transitions and normalizes legacy new state", () => {
+    expect(isLegalOnboardingTransition("new", "connect-agent")).toBe(true);
+    expect(isLegalOnboardingTransition("welcome", "connect-agent")).toBe(true);
+    expect(isLegalOnboardingTransition("connect-agent", "tutorial-offer")).toBe(
+      true,
+    );
+    expect(isLegalOnboardingTransition("tutorial-offer", "done")).toBe(true);
+    expect(isLegalOnboardingTransition("done", "welcome")).toBe(true);
+    expect(isLegalOnboardingTransition("welcome", "done")).toBe(false);
+    expect(isLegalOnboardingTransition("connect-agent", "done")).toBe(false);
   });
 });

@@ -12,6 +12,28 @@ type Env = Readonly<Record<string, string | undefined>>;
 
 export type HarnessAdapterRegistryOverride = AcpAdapterOverride;
 
+export type HarnessCommand = Readonly<{
+  command: string;
+  args: readonly string[];
+}>;
+
+export type HarnessInstallGuidance = HarnessCommand &
+  Readonly<{
+    docsUrl: string;
+  }>;
+
+export type HarnessLoginCommand = HarnessCommand &
+  Readonly<{
+    interactive: boolean;
+    note: string;
+  }>;
+
+export type HarnessAdapterDefinition = AcpAdapterDefinition &
+  Readonly<{
+    install: HarnessInstallGuidance;
+    loginCommand: HarnessLoginCommand;
+  }>;
+
 const userHome = (env: Env): string => resolve(env["HOME"] ?? homedir());
 
 const claudeAuthPaths = (env: Env): readonly string[] => {
@@ -41,13 +63,24 @@ const geminiAuthPaths = (env: Env): readonly string[] => {
   ];
 };
 
-export const harnessAdapterDefinitions: readonly AcpAdapterDefinition[] = [
+export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
   {
     id: "claude-code",
     name: "Claude Code",
     command: "claude-code-acp",
     args: [],
     versionArgs: ["--version"],
+    install: {
+      command: "npm",
+      args: ["install", "-g", "@anthropic-ai/claude-code"],
+      docsUrl: "https://docs.anthropic.com/en/docs/claude-code/setup",
+    },
+    loginCommand: {
+      command: "claude",
+      args: [],
+      interactive: true,
+      note: "Claude Code opens an interactive terminal login flow, so Overlearn shows the command to run yourself.",
+    },
     auth: {
       env: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
       paths: claudeAuthPaths,
@@ -59,6 +92,17 @@ export const harnessAdapterDefinitions: readonly AcpAdapterDefinition[] = [
     command: "codex-acp",
     args: [],
     versionArgs: ["--version"],
+    install: {
+      command: "npm",
+      args: ["install", "-g", "@openai/codex"],
+      docsUrl: "https://developers.openai.com/codex/cli/",
+    },
+    loginCommand: {
+      command: "codex",
+      args: ["login"],
+      interactive: false,
+      note: "Codex login uses browser OAuth, so Overlearn can launch it without collecting credentials.",
+    },
     auth: {
       env: ["OPENAI_API_KEY"],
       paths: codexAuthPaths,
@@ -70,6 +114,17 @@ export const harnessAdapterDefinitions: readonly AcpAdapterDefinition[] = [
     command: "gemini",
     args: ["--experimental-acp"],
     versionArgs: ["--version"],
+    install: {
+      command: "npm",
+      args: ["install", "-g", "@google/gemini-cli"],
+      docsUrl: "https://github.com/google-gemini/gemini-cli",
+    },
+    loginCommand: {
+      command: "gemini",
+      args: [],
+      interactive: true,
+      note: "Gemini opens an interactive terminal auth flow, so Overlearn shows the command to run yourself.",
+    },
     auth: {
       env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
       paths: geminiAuthPaths,
@@ -98,3 +153,8 @@ export const getHarnessAdapter = (
     ? undefined
     : createAcpHarnessAdapter(definition, override);
 };
+
+export const getHarnessAdapterDefinition = (
+  id: HarnessAdapterId,
+): HarnessAdapterDefinition | undefined =>
+  harnessAdapterDefinitions.find((candidate) => candidate.id === id);

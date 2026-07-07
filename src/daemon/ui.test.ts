@@ -50,6 +50,7 @@ describe("renderPage", () => {
 
     expect(html).toContain('id="library-screen" class="library-screen"');
     expect(html).toContain('<h1 id="library-title">Course library</h1>');
+    expect(html).toContain('id="library-settings"');
     expect(html).toContain('id="course-library-list" class="course-card-grid"');
     expect(html).toContain('id="new-course"');
     expect(html).toContain('id="import-course"');
@@ -63,10 +64,130 @@ describe("renderPage", () => {
     expect(html).toContain('id="back-to-library"');
   });
 
+  test("renders saved onboarding steps and the three harness card states", () => {
+    const html = renderPage(
+      "Display Title",
+      [],
+      emptyLessons,
+      [],
+      [],
+      [],
+      [],
+      new Set(),
+      undefined,
+      "agent-working",
+      false,
+      {
+        onboardingState: "connect-agent",
+        profile: {
+          name: "Hal",
+          onboardingState: "connect-agent",
+          settings: {},
+          preferredHarness: "claude-code",
+          dataDir: "/tmp/overlearn",
+        },
+        harnesses: [
+          {
+            id: "claude-code",
+            name: "Claude Code",
+            installed: true,
+            authenticated: true,
+            selected: true,
+            login: {
+              command: "claude",
+              manual: true,
+              note: "Manual login.",
+            },
+            install: {
+              command: "npm install -g @anthropic-ai/claude-code",
+              docsUrl: "https://docs.anthropic.com/en/docs/claude-code/setup",
+            },
+          },
+          {
+            id: "codex",
+            name: "Codex",
+            installed: true,
+            authenticated: false,
+            selected: false,
+            login: {
+              command: "codex login",
+              manual: false,
+              note: "Browser OAuth.",
+            },
+            install: {
+              command: "npm install -g @openai/codex",
+              docsUrl: "https://developers.openai.com/codex/cli/",
+            },
+          },
+          {
+            id: "gemini",
+            name: "Gemini",
+            installed: false,
+            authenticated: false,
+            selected: false,
+            login: {
+              command: "gemini",
+              manual: true,
+              note: "Manual login.",
+            },
+            install: {
+              command: "npm install -g @google/gemini-cli",
+              docsUrl: "https://github.com/google-gemini/gemini-cli",
+            },
+          },
+        ],
+      },
+    );
+
+    expect(html).toContain('id="onboarding-screen"');
+    expect(html).toContain('data-onboarding-step="welcome" hidden');
+    expect(html).toContain('data-onboarding-step="connect-agent"');
+    expect(html).toContain('data-onboarding-step="tutorial-offer" hidden');
+    expect(html).toContain('data-harness-state="ready"');
+    expect(html).toContain('data-harness-state="installed-unauthenticated"');
+    expect(html).toContain('data-harness-state="not-installed"');
+    expect(html).toContain("codex login");
+    expect(html).toContain("npm install -g @google/gemini-cli");
+    expect(html).toContain('id="onboarding-skip"');
+  });
+
+  test("renders settings controls for profile, preferred harness, data dir, and rerun", () => {
+    const html = renderPage(
+      "Display Title",
+      [],
+      emptyLessons,
+      [],
+      [],
+      [],
+      [],
+      new Set(),
+      undefined,
+      "agent-working",
+      false,
+      {
+        profile: {
+          name: "Hal",
+          onboardingState: "done",
+          settings: {},
+          preferredHarness: "codex",
+          dataDir: "/tmp/overlearn",
+        },
+        dataDir: "/tmp/overlearn",
+      },
+    );
+
+    expect(html).toContain('id="settings-screen"');
+    expect(html).toContain('id="settings-name"');
+    expect(html).toContain('id="settings-harness"');
+    expect(html).toContain('id="settings-data-dir"');
+    expect(html).toContain('value="/tmp/overlearn" readonly');
+    expect(html).toContain('id="rerun-onboarding"');
+  });
+
   test("wires library endpoints, history, and live SSE refreshes", () => {
     const html = renderEmptyPage();
 
-    expect(html).toContain('requestJson("/api/harnesses")');
+    expect(html).toContain('requestJson("/api/harnesses" +');
     expect(html).toContain('"/api/courses?status=" + encodeURIComponent(status)');
     expect(html).toContain('requestJson("/api/courses", {');
     expect(html).toContain('method: "POST"');
