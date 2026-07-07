@@ -411,6 +411,11 @@ const libraryClientScript = String.raw`
       await navigator.clipboard.writeText(text);
       if (statusElement !== null) {
         statusElement.textContent = "Copied.";
+        setTimeout(() => {
+          if (statusElement.textContent === "Copied.") {
+            statusElement.textContent = "";
+          }
+        }, 2000);
       }
     } catch {
       if (statusElement !== null) {
@@ -456,7 +461,7 @@ const libraryClientScript = String.raw`
 
     const copy = document.createElement("button");
     copy.type = "button";
-    copy.className = "library-button secondary";
+    copy.className = "library-button secondary compact";
     copy.textContent = "Copy";
     copy.addEventListener("click", () => {
       void copyText(command, statusElement);
@@ -567,7 +572,7 @@ const libraryClientScript = String.raw`
       if (state === "ready") {
         const select = document.createElement("button");
         select.type = "button";
-        select.className = "library-button primary";
+        select.className = "library-button secondary compact";
         select.dataset.onboardingSelectHarness = harness.id;
         select.textContent = harness.selected ? "Preferred" : "Use as preferred";
         select.disabled = harness.selected === true;
@@ -578,7 +583,7 @@ const libraryClientScript = String.raw`
       } else if (state === "installed-unauthenticated") {
         const login = document.createElement("button");
         login.type = "button";
-        login.className = "library-button primary";
+        login.className = "library-button secondary compact";
         login.textContent = "Log in";
         login.addEventListener("click", () => {
           void loginHarness(harness, status);
@@ -608,7 +613,7 @@ const libraryClientScript = String.raw`
 
       const recheck = document.createElement("button");
       recheck.type = "button";
-      recheck.className = "library-button secondary";
+      recheck.className = "library-button secondary compact";
       recheck.textContent = "Re-check";
       recheck.addEventListener("click", () => {
         void refreshLibraryHarnesses(true);
@@ -4924,7 +4929,7 @@ const renderCommandRow = (command: string): string =>
     ? ""
     : `<div class="onboarding-command-row"><code>${escapeHtml(
         command,
-      )}</code><button class="library-button secondary" type="button">Copy</button></div>`;
+      )}</code><button class="library-button secondary compact" type="button">Copy</button></div>`;
 
 const renderOnboardingHarnessCards = (
   harnesses: readonly HarnessUiOption[],
@@ -4947,7 +4952,7 @@ const renderOnboardingHarnessCards = (
       const selectButton =
         state !== "ready"
           ? ""
-          : `<button class="library-button primary" type="button" data-onboarding-select-harness="${escapeHtml(
+          : `<button class="library-button secondary compact" type="button" data-onboarding-select-harness="${escapeHtml(
               harness.id,
             )}"${harness.selected ? " disabled" : ""}>${
               harness.selected ? "Preferred" : "Use as preferred"
@@ -4955,7 +4960,7 @@ const renderOnboardingHarnessCards = (
       const loginCommand = harness.login?.command ?? "";
       const loginButton =
         state === "installed-unauthenticated"
-          ? '<button class="library-button primary" type="button">Log in</button>'
+          ? '<button class="library-button secondary compact" type="button">Log in</button>'
           : "";
       const installCommand = harness.install?.command ?? "";
       const installDocs =
@@ -4975,7 +4980,7 @@ const renderOnboardingHarnessCards = (
         harness.id,
       )}" data-harness-state="${state}"><div class="onboarding-harness-header"><h3>${escapeHtml(
         harness.name,
-      )}</h3><span class="course-status-badge">${badge}</span></div><p>${body}</p>${command}<div class="library-form-actions">${selectButton}${loginButton}${installDocs}<button class="library-button secondary" type="button">Re-check</button></div><p class="onboarding-card-status"></p></article>`;
+      )}</h3><span class="course-status-badge">${badge}</span></div><p>${body}</p>${command}<div class="library-form-actions">${selectButton}${loginButton}${installDocs}<button class="library-button secondary compact" type="button">Re-check</button></div><p class="onboarding-card-status"></p></article>`;
     })
     .join("");
 
@@ -5489,7 +5494,8 @@ export const renderPage = (
       cursor: not-allowed;
     }
 
-    .back-to-library {
+    .back-to-library,
+    .library-button.compact {
       min-height: 2rem;
       padding: 0 0.6rem;
       font-size: 0.82rem;
@@ -5573,7 +5579,8 @@ export const renderPage = (
       outline-offset: 0;
     }
 
-    .library-form-actions {
+    .library-course-form .library-form-actions,
+    .settings-form .library-form-actions {
       grid-column: 2;
     }
 
@@ -5888,21 +5895,27 @@ export const renderPage = (
       padding: 1rem 0 2rem;
     }
 
+    .onboarding-screen {
+      width: min(100%, 40rem);
+      gap: 1.25rem;
+      padding: 2.5rem 0 3rem;
+    }
+
     .onboarding-panel {
       display: grid;
-      gap: 0.85rem;
+      gap: 0.9rem;
       border: 1px solid var(--border-surface);
       border-radius: 8px;
       background: var(--surface);
-      padding: 1.25rem;
+      padding: 1.5rem;
     }
 
     .onboarding-kicker {
       margin: 0;
       color: var(--accent-soft-text);
-      font-size: 0.78rem;
-      font-weight: 800;
-      letter-spacing: 0;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
     }
 
@@ -5912,6 +5925,7 @@ export const renderPage = (
       color: var(--heading);
       font-size: 1.35rem;
       line-height: 1.2;
+      text-wrap: balance;
     }
 
     .onboarding-copy,
@@ -5927,8 +5941,9 @@ export const renderPage = (
     }
 
     .onboarding-label {
-      display: grid;
-      gap: 0.25rem;
+      display: flex;
+      align-items: baseline;
+      gap: 0.35rem;
       color: var(--secondary);
       font-size: 0.9rem;
       font-weight: 700;
@@ -5952,6 +5967,10 @@ export const renderPage = (
       font: inherit;
     }
 
+    .onboarding-input {
+      max-width: 24rem;
+    }
+
     .onboarding-harness-list {
       display: grid;
       gap: 0.75rem;
@@ -5968,9 +5987,8 @@ export const renderPage = (
 
     .onboarding-harness-header {
       display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 0.75rem;
+      align-items: center;
+      gap: 0.6rem;
     }
 
     .onboarding-harness-header h3 {
@@ -5994,27 +6012,38 @@ export const renderPage = (
     }
 
     .onboarding-command-row code {
-      overflow-x: auto;
       border: 1px solid var(--border);
       border-radius: 8px;
       background: var(--code-bg);
       color: var(--body-text);
       padding: 0.55rem 0.65rem;
       font-size: 0.86rem;
-      white-space: nowrap;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .onboarding-card-status:empty {
+      display: none;
     }
 
     .onboarding-docs-link {
       display: inline-flex;
-      min-height: 2.35rem;
+      min-height: 2rem;
       align-items: center;
       border: 1px solid var(--border-surface);
       border-radius: 8px;
       color: var(--secondary);
-      padding: 0 0.75rem;
-      font-size: 0.9rem;
+      padding: 0 0.6rem;
+      font-size: 0.82rem;
       font-weight: 600;
       text-decoration: none;
+    }
+
+    .onboarding-docs-link:hover {
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+      color: var(--text);
     }
 
     .settings-form {
@@ -7815,7 +7844,8 @@ export const renderPage = (
         line-height: 1.25;
       }
 
-      .library-form-actions {
+      .library-course-form .library-form-actions,
+      .settings-form .library-form-actions {
         grid-column: 1;
       }
 
