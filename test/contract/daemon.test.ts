@@ -33,6 +33,7 @@ type CourseResource = Readonly<{
   id: number;
   title: string;
   status: string;
+  description?: string | null;
   harnessId?: string | null;
 }>;
 
@@ -95,6 +96,24 @@ const createCourse = async (
 
   expect(response.status).toBe(201);
   return (await response.json()) as CourseResource;
+};
+
+const createIdeationCourse = async (
+  daemon: StartedContractDaemon,
+  seed: string,
+): Promise<CourseResource> => {
+  const response = await authFetch(daemon, "/api/courses/ideate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ seed }),
+  });
+
+  expect(response.status).toBe(201);
+  const payload = (await response.json()) as Record<string, unknown>;
+  expect(payload).toMatchObject({ ok: true });
+  expect(payload["course"]).toMatchObject({ status: "draft" });
+
+  return payload["course"] as CourseResource;
 };
 
 const createFakeLoginCommand = async (binDir: string): Promise<string> => {
@@ -456,6 +475,336 @@ describe(`daemon contract (${runtime.name})`, () => {
         expect(firstPrompt).toContain("## Resume context required");
         expect(firstPrompt).toContain("get_course_state");
         expect(firstPrompt).toContain("no sidecar callback commands are available");
+      } finally {
+        sse.close();
+        await rm(fakeHarness.binDir, { force: true, recursive: true });
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
+    "ideates a draft course, accepts an edited plan, and queues the teaching greeting",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const fakeHarness = await withFakeHarnessPath();
+      const planTopics = [
+        {
+          path: "foundations",
+          title: "Foundations",
+          summary: "Core concepts and vocabulary.",
+          children: [
+            {
+              path: "foundations/mental-models",
+              title: "Mental models",
+              summary: "How to reason about the topic.",
+            },
+          ],
+        },
+        {
+          path: "practice",
+          title: "Practice",
+          summary: "Applied exercises.",
+        },
+      ];
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          PATH: fakeHarness.path,
+          ANTHROPIC_API_KEY: "test-anthropic",
+          OPENAI_API_KEY: "test-openai",
+          GEMINI_API_KEY: "test-gemini",
+          FAKE_ACP_MCP_CALL: JSON.stringify({
+            server: "overlearn-teaching",
+            tool: "propose_course_plan",
+            args: {
+              title: "Database Foundations",
+              description: "Learn how databases work from first principles.",
+              topics: planTopics,
+            },
+          }),
+        },
+      });
+      const sse = await createSseClient(daemon.url, daemon.token);
+
+      try {
+        const draft = await createIdeationCourse(
+          daemon,
+          "Teach me databases from first principles.",
+        );
+        expect(draft.status).toBe("draft");
+
+        const activeBefore = (await (
+          await authFetch(daemon, "/api/courses?status=active")
+        ).json()) as readonly CourseResource[];
+        expect(activeBefore.map((course) => course.id)).not.toContain(draft.id);
+
+        await sse.waitFor(
+          "tool-write",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === draft.id &&
+            data["tool"] === "propose_course_plan",
+          "course plan write",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === draft.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "ideation done stream",
+        );
+
+        const draftState = await courseState(daemon, draft.id);
+        expect(draftState["course"]).toMatchObject({
+          title: "Database Foundations",
+          status: "draft",
+        });
+        expect(draftState["topics"]).toContainEqual(
+          expect.objectContaining({
+            path: "foundations",
+            title: "Foundations",
+            body: "Core concepts and vocabulary.",
+          }),
+        );
+
+        const accept = await authFetch(
+          daemon,
+          `/api/courses/${draft.id}/accept-plan`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              title: "Database Systems",
+              description: "Edited plan description.",
+              topics: [
+                {
+                  path: "foundations",
+                  title: "Renamed foundations",
+                  body: "Keep only this edited topic.",
+                },
+              ],
+            }),
+          },
+        );
+        expect(accept.status).toBe(200);
+        expect(await accept.json()).toMatchObject({
+          ok: true,
+          greetingQueued: true,
+          course: {
+            id: draft.id,
+            status: "active",
+            title: "Database Systems",
+          },
+        });
+
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === draft.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "greeting done stream",
+        );
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.filter((entry) => entry["event"] === "session/prompt")
+              .length >= 2,
+          "ideation and greeting prompts",
+        );
+        const prompts = logs.filter((entry) => entry["event"] === "session/prompt");
+        expect(promptText(prompts[0] ?? {})).toContain("## Course ideation turn");
+        expect(promptText(prompts[1] ?? {})).toContain(
+          "The learner accepted the course plan.",
+        );
+
+        const activeState = await courseState(daemon, draft.id);
+        expect(activeState["course"]).toMatchObject({
+          status: "active",
+          title: "Database Systems",
+          description: "Edited plan description.",
+        });
+        expect(activeState["topics"]).toEqual([
+          expect.objectContaining({
+            path: "foundations",
+            title: "Renamed foundations",
+            body: "Keep only this edited topic.",
+          }),
+        ]);
+
+        const draftList = (await (
+          await authFetch(daemon, "/api/courses?status=draft")
+        ).json()) as readonly CourseResource[];
+        const activeList = (await (
+          await authFetch(daemon, "/api/courses?status=active")
+        ).json()) as readonly CourseResource[];
+        expect(draftList.map((course) => course.id)).not.toContain(draft.id);
+        expect(activeList.map((course) => course.id)).toContain(draft.id);
+      } finally {
+        sse.close();
+        await rm(fakeHarness.binDir, { force: true, recursive: true });
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
+    "discards draft ideation courses with hard delete and MCP token revocation",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const fakeHarness = await withFakeHarnessPath();
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          PATH: fakeHarness.path,
+          ANTHROPIC_API_KEY: "test-anthropic",
+          OPENAI_API_KEY: "test-openai",
+          GEMINI_API_KEY: "test-gemini",
+          FAKE_ACP_MCP_CALL: JSON.stringify({
+            server: "overlearn-teaching",
+            tool: "propose_course_plan",
+            args: {
+              title: "Discardable Plan",
+              description: "Temporary draft.",
+              topics: [
+                {
+                  path: "temporary",
+                  title: "Temporary",
+                  summary: "Throwaway topic.",
+                },
+              ],
+            },
+          }),
+        },
+      });
+      const sse = await createSseClient(daemon.url, daemon.token);
+
+      try {
+        const draft = await createIdeationCourse(daemon, "Make a disposable plan.");
+        await sse.waitFor(
+          "tool-write",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === draft.id &&
+            data["tool"] === "propose_course_plan",
+          "discard plan write",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === draft.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "discard ideation done stream",
+        );
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) => entries.some((entry) => entry["event"] === "session/new"),
+          "draft session log",
+        );
+        const mcpUrl = mcpUrlFromLogs(logs);
+
+        const discard = await authFetch(daemon, `/api/courses/${draft.id}`, {
+          method: "DELETE",
+        });
+        expect(discard.status).toBe(200);
+        expect(await discard.json()).toMatchObject({ ok: true, deleted: true });
+
+        const missing = await authFetch(daemon, `/api/courses/${draft.id}`);
+        expect(missing.status).toBe(404);
+        const draftList = (await (
+          await authFetch(daemon, "/api/courses?status=draft")
+        ).json()) as readonly CourseResource[];
+        expect(draftList.map((course) => course.id)).not.toContain(draft.id);
+
+        const revoked = await fetch(mcpUrl);
+        expect(revoked.status).toBe(404);
+      } finally {
+        sse.close();
+        await rm(fakeHarness.binDir, { force: true, recursive: true });
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
+    "lists unfinished draft ideation courses after daemon restart",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const fakeHarness = await withFakeHarnessPath();
+      const first = await start({
+        scenario: "normal",
+        extraEnv: {
+          PATH: fakeHarness.path,
+          ANTHROPIC_API_KEY: "test-anthropic",
+          OPENAI_API_KEY: "test-openai",
+          GEMINI_API_KEY: "test-gemini",
+        },
+      });
+      const sse = await createSseClient(first.url, first.token);
+
+      try {
+        const draft = await createIdeationCourse(
+          first,
+          "Keep this draft across daemon restarts.",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === draft.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "restart ideation done stream",
+        );
+        sse.close();
+        await first.stop();
+
+        const second = await start({
+          scenario: "normal",
+          extraEnv: {
+            PATH: fakeHarness.path,
+            OVERLEARN_DATA_DIR: first.dataDir,
+            ANTHROPIC_API_KEY: "test-anthropic",
+            OPENAI_API_KEY: "test-openai",
+            GEMINI_API_KEY: "test-gemini",
+          },
+        });
+
+        const drafts = (await (
+          await authFetch(second, "/api/courses?status=draft")
+        ).json()) as readonly CourseResource[];
+        const active = (await (
+          await authFetch(second, "/api/courses?status=active")
+        ).json()) as readonly CourseResource[];
+        expect(drafts).toContainEqual(
+          expect.objectContaining({
+            id: draft.id,
+            status: "draft",
+            description: "Keep this draft across daemon restarts.",
+          }),
+        );
+        expect(active.map((course) => course.id)).not.toContain(draft.id);
       } finally {
         sse.close();
         await rm(fakeHarness.binDir, { force: true, recursive: true });

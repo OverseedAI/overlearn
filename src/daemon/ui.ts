@@ -24,6 +24,7 @@ export type MasteryEntry = Readonly<{
 export type TopicNode = Readonly<{
   path: string;
   title: string;
+  body?: string;
   lesson?: string;
   enteredAt?: string;
   current: boolean;
@@ -227,6 +228,7 @@ const libraryClientScript = String.raw`
   const libraryList = document.querySelector("#course-library-list");
   const libraryStatusText = document.querySelector("#library-status");
   const newCourseButton = document.querySelector("#new-course");
+  const brainstormCourseButton = document.querySelector("#brainstorm-course");
   const importCourseButton = document.querySelector("#import-course");
   const importNotice = document.querySelector("#import-notice");
   const formPanel = document.querySelector("#library-form-panel");
@@ -239,6 +241,27 @@ const libraryClientScript = String.raw`
   const saveButton = document.querySelector("#library-save-course");
   const cancelButton = document.querySelector("#library-cancel-course");
   const formStatus = document.querySelector("#library-form-status");
+  const ideationPanel = document.querySelector("#course-ideation-panel");
+  const ideationForm = document.querySelector("#course-ideation-form");
+  const ideationSeedInput = document.querySelector("#course-ideation-seed");
+  const startIdeationButton = document.querySelector("#start-course-ideation");
+  const cancelIdeationButton = document.querySelector("#cancel-course-ideation");
+  const ideationStatus = document.querySelector("#course-ideation-status");
+  const draftsSection = document.querySelector("#drafts-section");
+  const draftList = document.querySelector("#draft-course-list");
+  const draftsStatus = document.querySelector("#drafts-status");
+  const wizardPanel = document.querySelector("#course-wizard-panel");
+  const wizardTitleInput = document.querySelector("#wizard-title-input");
+  const wizardDescriptionInput = document.querySelector("#wizard-description-input");
+  const wizardTopicTree = document.querySelector("#wizard-topic-tree");
+  const wizardTranscript = document.querySelector("#wizard-transcript");
+  const wizardReplyForm = document.querySelector("#wizard-reply-form");
+  const wizardReplyInput = document.querySelector("#wizard-reply-input");
+  const wizardReplyButton = document.querySelector("#wizard-reply-submit");
+  const wizardAcceptButton = document.querySelector("#wizard-accept-plan");
+  const wizardDiscardButton = document.querySelector("#wizard-discard-plan");
+  const wizardCloseButton = document.querySelector("#wizard-close");
+  const wizardStatus = document.querySelector("#wizard-status");
   const backToLibraryButton = document.querySelector("#back-to-library");
   const wordmarks = [...document.querySelectorAll(".wordmark")];
   const statusButtons = [...document.querySelectorAll("[data-library-status]")];
@@ -253,20 +276,47 @@ const libraryClientScript = String.raw`
     harnessSelect === null ||
     attachedDirInput === null ||
     saveButton === null ||
-    formStatus === null
+    formStatus === null ||
+    ideationPanel === null ||
+    ideationForm === null ||
+    ideationSeedInput === null ||
+    startIdeationButton === null ||
+    ideationStatus === null ||
+    draftList === null ||
+    draftsStatus === null ||
+    wizardPanel === null ||
+    wizardTitleInput === null ||
+    wizardDescriptionInput === null ||
+    wizardTopicTree === null ||
+    wizardTranscript === null ||
+    wizardReplyForm === null ||
+    wizardReplyInput === null ||
+    wizardReplyButton === null ||
+    wizardAcceptButton === null ||
+    wizardDiscardButton === null ||
+    wizardStatus === null
   ) {
     return;
   }
 
   let libraryStatus = "active";
   let libraryCourses = [];
+  let draftCourses = [];
   let courseDetails = new Map();
   let harnesses = [];
   let editingCourseId = undefined;
+  let wizardCourseId = undefined;
+  let wizardPlanDirty = false;
+  let wizardRenderedPlanKey = undefined;
   let libraryLoading = false;
+  let draftsLoading = false;
   let libraryError = undefined;
+  let draftsError = undefined;
   let formBusy = false;
+  let ideationBusy = false;
+  let wizardBusy = false;
   let loadedStatuses = new Set();
+  let draftsLoaded = false;
   const refreshTimers = new Map();
 
   const isRecord = (value) =>
@@ -680,8 +730,24 @@ const libraryClientScript = String.raw`
       return;
     }
 
-    const nextStatus = course.status === "archived" ? "archived" : "active";
+    const nextStatus =
+      course.status === "archived"
+        ? "archived"
+        : course.status === "draft"
+          ? "draft"
+          : "active";
     libraryCourses = libraryCourses.filter((item) => item.id !== course.id);
+    draftCourses = draftCourses.filter((item) => item.id !== course.id);
+
+    if (nextStatus === "draft") {
+      draftCourses.push(course);
+      draftCourses.sort((left, right) => {
+        const leftTime = Date.parse(left.updatedAt ?? left.createdAt ?? "");
+        const rightTime = Date.parse(right.updatedAt ?? right.createdAt ?? "");
+        return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime);
+      });
+      return;
+    }
 
     if (nextStatus === libraryStatus) {
       libraryCourses.push(course);
@@ -707,6 +773,9 @@ const libraryClientScript = String.raw`
 
     if (options.render !== false) {
       renderLibrary();
+      if (wizardCourseId === id) {
+        renderWizard();
+      }
     }
   };
 
@@ -782,6 +851,8 @@ const libraryClientScript = String.raw`
   };
 
   const openCourseForm = (mode, course) => {
+    closeIdeationPanel();
+    closeWizard();
     editingCourseId = mode === "edit" ? course?.id : undefined;
     formPanel.hidden = false;
     formTitle.textContent = mode === "edit" ? "Edit course" : "New course";
@@ -889,8 +960,486 @@ const libraryClientScript = String.raw`
     return card;
   };
 
+  const topicChildren = (topic) =>
+    Array.isArray(topic?.children) ? topic.children : [];
+
+  const topicBodyText = (topic) =>
+    typeof topic?.body === "string"
+      ? topic.body
+      : typeof topic?.summary === "string"
+        ? topic.summary
+        : "";
+
+  const planKey = (detail) => {
+    if (!isRecord(detail?.course) || !Array.isArray(detail?.topics)) {
+      return "";
+    }
+
+    return String(detail.course.updatedAt ?? "") + ":" + JSON.stringify(detail.topics);
+  };
+
+  const hasDraftPlan = (detail) =>
+    isRecord(detail) && Array.isArray(detail.topics) && detail.topics.length > 0;
+
+  const createDraftCard = (course) => {
+    const id = courseIdNumber(course?.id);
+    const detail = id === undefined ? undefined : courseDetails.get(String(id));
+    const card = document.createElement("article");
+    card.className = "course-card draft-course-card";
+    if (id !== undefined) {
+      card.dataset.courseId = String(id);
+    }
+
+    const header = document.createElement("div");
+    header.className = "course-card-header";
+
+    const titleGroup = document.createElement("div");
+    titleGroup.className = "course-card-title-group";
+
+    const title = document.createElement("h3");
+    title.textContent = String(course?.title ?? "Draft course");
+
+    const description = document.createElement("p");
+    description.textContent = hasDraftPlan(detail)
+      ? "A proposed plan is ready to review."
+      : courseDescriptionText(course);
+
+    titleGroup.append(title, description);
+
+    const badge = document.createElement("span");
+    badge.className = "course-status-badge";
+    badge.textContent = "draft";
+    header.append(titleGroup, badge);
+
+    const stats = document.createElement("div");
+    stats.className = "course-card-stats";
+    stats.append(
+      createMetaItem("Topics", String(countTopics(detail?.topics))),
+      createMetaItem("Plan", hasDraftPlan(detail) ? "ready" : "in progress"),
+      createMetaItem("Last activity", formatLastActivity(course, detail)),
+    );
+
+    const actions = document.createElement("div");
+    actions.className = "course-card-actions";
+
+    const resumeButton = document.createElement("button");
+    resumeButton.type = "button";
+    resumeButton.className = "library-button primary";
+    resumeButton.textContent = hasDraftPlan(detail) ? "Review" : "Resume";
+    resumeButton.addEventListener("click", () => {
+      void openWizard(id);
+    });
+    actions.append(resumeButton);
+
+    const discardButton = document.createElement("button");
+    discardButton.type = "button";
+    discardButton.className = "library-button danger";
+    discardButton.textContent = "Discard";
+    discardButton.addEventListener("click", () => {
+      void discardDraftCourse(id);
+    });
+    actions.append(discardButton);
+
+    card.append(header, stats, actions);
+    return card;
+  };
+
+  const renderDrafts = () => {
+    draftList.replaceChildren();
+
+    if (draftsSection !== null) {
+      draftsSection.hidden = false;
+    }
+
+    if (draftsError !== undefined) {
+      const error = document.createElement("p");
+      error.className = "library-empty";
+      error.textContent = draftsError;
+      draftList.append(error);
+      draftsStatus.textContent = "Drafts could not load.";
+      return;
+    }
+
+    if (draftsLoading && draftCourses.length === 0) {
+      const loading = document.createElement("p");
+      loading.className = "library-empty";
+      loading.textContent = "Loading drafts...";
+      draftList.append(loading);
+      draftsStatus.textContent = "Loading draft courses.";
+      return;
+    }
+
+    if (draftCourses.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "library-empty";
+      empty.textContent = "No draft course plans.";
+      draftList.append(empty);
+      draftsStatus.textContent = "No drafts.";
+      return;
+    }
+
+    for (const course of draftCourses) {
+      draftList.append(createDraftCard(course));
+    }
+
+    draftsStatus.textContent =
+      String(draftCourses.length) +
+      " draft " +
+      (draftCourses.length === 1 ? "course" : "courses");
+  };
+
+  const createPlanTopicEditor = (topic) => {
+    const wrapper = document.createElement("section");
+    wrapper.className = "plan-topic-editor";
+    wrapper.dataset.planTopic = "true";
+    wrapper.dataset.topicPath = String(topic?.path ?? "");
+
+    const row = document.createElement("div");
+    row.className = "plan-topic-row";
+
+    const label = document.createElement("label");
+    label.textContent = "Topic";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.name = "topicTitle";
+    input.value = String(topic?.title ?? "Untitled topic");
+    input.required = true;
+    input.dataset.topicTitle = "true";
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "library-button danger";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => {
+      wizardPlanDirty = true;
+      wrapper.remove();
+    });
+
+    row.append(label, input, remove);
+
+    const summaryLabel = document.createElement("label");
+    summaryLabel.textContent = "Summary";
+
+    const summary = document.createElement("textarea");
+    summary.name = "topicSummary";
+    summary.rows = 2;
+    summary.value = topicBodyText(topic);
+    summary.dataset.topicSummary = "true";
+
+    const children = document.createElement("div");
+    children.className = "plan-topic-children";
+    for (const child of topicChildren(topic)) {
+      children.append(createPlanTopicEditor(child));
+    }
+
+    wrapper.append(row, summaryLabel, summary, children);
+    return wrapper;
+  };
+
+  const renderPlanEditor = (detail) => {
+    wizardTopicTree.replaceChildren();
+
+    if (!hasDraftPlan(detail)) {
+      const empty = document.createElement("p");
+      empty.className = "library-empty";
+      empty.textContent = "The agent has not proposed a course plan yet.";
+      wizardTopicTree.append(empty);
+      return;
+    }
+
+    for (const topic of detail.topics) {
+      wizardTopicTree.append(createPlanTopicEditor(topic));
+    }
+  };
+
+  const topicInputFromElement = (element) => {
+    const title = element.querySelector("[data-topic-title]");
+    const summary = element.querySelector("[data-topic-summary]");
+    const childContainer = element.querySelector(":scope > .plan-topic-children");
+    const children = [...(childContainer?.children ?? [])]
+      .filter((child) => child.dataset.planTopic === "true")
+      .map(topicInputFromElement);
+
+    return {
+      path: element.dataset.topicPath ?? "",
+      title: title?.value.trim() ?? "",
+      body: summary?.value.trim() ?? "",
+      ...(children.length === 0 ? {} : { children }),
+    };
+  };
+
+  const gatherPlanTopics = () =>
+    [...wizardTopicTree.children]
+      .filter((child) => child.dataset.planTopic === "true")
+      .map(topicInputFromElement)
+      .filter((topic) => topic.title.length > 0 && topic.path.length > 0);
+
+  const renderWizardTranscript = (detail) => {
+    wizardTranscript.replaceChildren();
+    const entries = Array.isArray(detail?.transcript) ? detail.transcript : [];
+
+    if (entries.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "library-empty";
+      empty.textContent = "No ideation messages yet.";
+      wizardTranscript.append(empty);
+      return;
+    }
+
+    for (const entry of entries) {
+      const message = document.createElement("article");
+      message.className = "wizard-message " + String(entry?.role ?? "system");
+      const role = document.createElement("strong");
+      role.textContent =
+        entry?.role === "agent"
+          ? "Agent"
+          : entry?.role === "system"
+            ? "System"
+            : "You";
+      const text = document.createElement("p");
+      text.textContent = String(entry?.text ?? "");
+      message.append(role, text);
+      wizardTranscript.append(message);
+    }
+  };
+
+  const renderWizard = () => {
+    const id = courseIdNumber(wizardCourseId);
+    const detail = id === undefined ? undefined : courseDetails.get(String(id));
+    wizardPanel.hidden = id === undefined;
+    if (id === undefined) {
+      return;
+    }
+
+    renderWizardTranscript(detail);
+    const course = detail?.course;
+    const nextPlanKey = planKey(detail);
+    if (!wizardPlanDirty && nextPlanKey !== wizardRenderedPlanKey) {
+      wizardTitleInput.value = String(course?.title ?? "Draft course");
+      wizardDescriptionInput.value =
+        typeof course?.description === "string" ? course.description : "";
+      renderPlanEditor(detail);
+      wizardRenderedPlanKey = nextPlanKey;
+    }
+
+    const ready = hasDraftPlan(detail);
+    wizardAcceptButton.disabled = wizardBusy || !ready;
+    wizardReplyButton.disabled = wizardBusy;
+    wizardDiscardButton.disabled = wizardBusy;
+    wizardStatus.textContent = ready
+      ? "Review the draft plan, make edits, then accept when it is ready."
+      : "Brainstorm with your agent until it proposes a plan.";
+  };
+
+  const closeIdeationPanel = () => {
+    ideationPanel.hidden = true;
+    ideationStatus.hidden = true;
+    ideationForm.reset();
+  };
+
+  const openIdeationPanel = () => {
+    closeCourseForm();
+    wizardPanel.hidden = true;
+    ideationPanel.hidden = false;
+    ideationStatus.hidden = true;
+    ideationSeedInput.focus();
+  };
+
+  const closeWizard = () => {
+    wizardCourseId = undefined;
+    wizardPlanDirty = false;
+    wizardRenderedPlanKey = undefined;
+    wizardPanel.hidden = true;
+    wizardTranscript.replaceChildren();
+    wizardTopicTree.replaceChildren();
+  };
+
+  const openWizard = async (courseId) => {
+    const id = courseIdNumber(courseId);
+    if (id === undefined) {
+      return;
+    }
+
+    closeCourseForm();
+    closeIdeationPanel();
+    wizardCourseId = id;
+    wizardPlanDirty = false;
+    wizardRenderedPlanKey = undefined;
+    wizardPanel.hidden = false;
+    history.pushState({ screen: "draft", courseId: id }, "", "#draft-" + String(id));
+    renderWizard();
+    await refreshLibraryCourse(id).catch((error) => {
+      wizardStatus.textContent =
+        error instanceof Error ? error.message : "Draft could not load.";
+    });
+    renderWizard();
+  };
+
+  const loadDraftCourses = async () => {
+    draftsLoading = true;
+    draftsError = undefined;
+    renderDrafts();
+
+    try {
+      const payload = await requestJson("/api/courses?status=draft");
+      draftCourses = Array.isArray(payload) ? [...payload] : [];
+      draftsLoaded = true;
+      renderDrafts();
+
+      await Promise.all(
+        draftCourses.map((course) =>
+          refreshLibraryCourse(course.id, { render: false }).catch(() => undefined),
+        ),
+      );
+    } catch (error) {
+      draftsError = error instanceof Error ? error.message : "Drafts failed to load.";
+    } finally {
+      draftsLoading = false;
+      renderDrafts();
+    }
+  };
+
+  const discardDraftCourse = async (courseId) => {
+    const id = courseIdNumber(courseId);
+    if (id === undefined) {
+      return;
+    }
+
+    if (!confirm("Discard this draft course?")) {
+      return;
+    }
+
+    wizardBusy = true;
+    renderWizard();
+    try {
+      await requestJson("/api/courses/" + encodeURIComponent(String(id)), {
+        method: "DELETE",
+      });
+      courseDetails.delete(String(id));
+      draftCourses = draftCourses.filter((course) => course.id !== id);
+      if (wizardCourseId === id) {
+        closeWizard();
+      }
+      renderDrafts();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Discard failed.";
+      if (wizardCourseId === id) {
+        wizardStatus.textContent = message;
+      } else {
+        draftsError = message;
+        renderDrafts();
+      }
+    } finally {
+      wizardBusy = false;
+      renderWizard();
+    }
+  };
+
+  const startIdeation = async () => {
+    const seed = ideationSeedInput.value.trim();
+    if (seed.length === 0 || ideationBusy) {
+      return;
+    }
+
+    ideationBusy = true;
+    startIdeationButton.disabled = true;
+    ideationStatus.hidden = false;
+    ideationStatus.textContent = "Starting brainstorm...";
+
+    try {
+      const payload = await requestJson("/api/courses/ideate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ seed }),
+      });
+      if (isRecord(payload?.course)) {
+        upsertVisibleCourse(payload.course);
+        await openWizard(payload.course.id);
+      }
+      void loadDraftCourses();
+    } catch (error) {
+      ideationStatus.textContent =
+        error instanceof Error ? error.message : "Brainstorm could not start.";
+    } finally {
+      ideationBusy = false;
+      startIdeationButton.disabled = false;
+    }
+  };
+
+  const submitWizardReply = async () => {
+    const id = courseIdNumber(wizardCourseId);
+    const text = wizardReplyInput.value.trim();
+    if (id === undefined || text.length === 0 || wizardBusy) {
+      return;
+    }
+
+    wizardBusy = true;
+    renderWizard();
+    try {
+      await requestJson("/api/courses/" + encodeURIComponent(String(id)) + "/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      wizardReplyInput.value = "";
+      await refreshLibraryCourse(id);
+    } catch (error) {
+      wizardStatus.textContent =
+        error instanceof Error ? error.message : "Reply could not be sent.";
+    } finally {
+      wizardBusy = false;
+      renderWizard();
+    }
+  };
+
+  const acceptWizardPlan = async () => {
+    const id = courseIdNumber(wizardCourseId);
+    if (id === undefined || wizardBusy) {
+      return;
+    }
+
+    const topics = gatherPlanTopics();
+    if (topics.length === 0) {
+      wizardStatus.textContent = "Keep at least one topic in the plan.";
+      return;
+    }
+
+    wizardBusy = true;
+    renderWizard();
+    try {
+      const payload = await requestJson(
+        "/api/courses/" + encodeURIComponent(String(id)) + "/accept-plan",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            title: wizardTitleInput.value.trim(),
+            description:
+              wizardDescriptionInput.value.trim().length === 0
+                ? null
+                : wizardDescriptionInput.value.trim(),
+            topics,
+          }),
+        },
+      );
+      if (isRecord(payload?.course)) {
+        upsertVisibleCourse(payload.course);
+      }
+      draftCourses = draftCourses.filter((course) => course.id !== id);
+      openCourse(id);
+    } catch (error) {
+      wizardStatus.textContent =
+        error instanceof Error ? error.message : "Plan could not be accepted.";
+    } finally {
+      wizardBusy = false;
+      renderWizard();
+    }
+  };
+
   const renderLibrary = () => {
     renderLibraryTabs();
+    renderDrafts();
     libraryList.replaceChildren();
 
     if (libraryError !== undefined) {
@@ -983,11 +1532,18 @@ const libraryClientScript = String.raw`
 
     libraryStatus = status;
     closeCourseForm();
+    closeIdeationPanel();
+    closeWizard();
     void loadLibraryCourses(status);
   };
 
   const ensureLibraryLoaded = () => {
     void refreshLibraryHarnesses();
+    if (!draftsLoaded) {
+      void loadDraftCourses();
+    } else {
+      renderDrafts();
+    }
     if (!loadedStatuses.has(libraryStatus)) {
       void loadLibraryCourses(libraryStatus);
     } else {
@@ -1152,6 +1708,17 @@ const libraryClientScript = String.raw`
       return;
     }
 
+    if (location.hash.startsWith("#draft-")) {
+      const id = courseIdNumber(location.hash.slice("#draft-".length));
+      if (id !== undefined) {
+        setLibraryVisible(true);
+        wizardCourseId = id;
+        renderWizard();
+        void refreshLibraryCourse(id).then(renderWizard).catch(() => undefined);
+        return;
+      }
+    }
+
     if (location.hash === "#library" || currentCourseId === null) {
       setLibraryVisible(true);
       return;
@@ -1260,12 +1827,17 @@ const libraryClientScript = String.raw`
     libraryCourses = payload.courses.filter((course) =>
       libraryStatus === "archived"
         ? course.status === "archived"
-        : course.status !== "archived",
+        : course.status === "active",
     );
+    draftCourses = payload.courses.filter((course) => course.status === "draft");
     loadedStatuses.add(libraryStatus);
+    draftsLoaded = true;
     renderLibrary();
 
     for (const course of libraryCourses) {
+      queueLibraryCourseRefresh(course.id);
+    }
+    for (const course of draftCourses) {
       queueLibraryCourseRefresh(course.id);
     }
   };
@@ -1273,6 +1845,8 @@ const libraryClientScript = String.raw`
   newCourseButton?.addEventListener("click", () => {
     openCourseForm("create");
   });
+
+  brainstormCourseButton?.addEventListener("click", openIdeationPanel);
 
   importCourseButton?.addEventListener("click", () => {
     importNotice.hidden = false;
@@ -1401,10 +1975,45 @@ const libraryClientScript = String.raw`
   });
 
   cancelButton?.addEventListener("click", closeCourseForm);
+  cancelIdeationButton?.addEventListener("click", closeIdeationPanel);
+  wizardCloseButton?.addEventListener("click", () => {
+    closeWizard();
+    history.pushState({ screen: "library" }, "", "#library");
+  });
 
   courseForm.addEventListener("submit", (event) => {
     event.preventDefault();
     void submitCourseForm();
+  });
+
+  ideationForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void startIdeation();
+  });
+
+  wizardReplyForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitWizardReply();
+  });
+
+  wizardAcceptButton.addEventListener("click", () => {
+    void acceptWizardPlan();
+  });
+
+  wizardDiscardButton.addEventListener("click", () => {
+    void discardDraftCourse(wizardCourseId);
+  });
+
+  wizardPanel.addEventListener("input", (event) => {
+    const target = event.target;
+    if (
+      target === wizardTitleInput ||
+      target === wizardDescriptionInput ||
+      target?.dataset?.topicTitle === "true" ||
+      target?.dataset?.topicSummary === "true"
+    ) {
+      wizardPlanDirty = true;
+    }
   });
 
   backToLibraryButton?.addEventListener("click", showLibrary);
@@ -4710,6 +5319,160 @@ export const renderPage = (
       grid-column: 2;
     }
 
+    .library-section-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 0.65rem;
+    }
+
+    .library-section-heading h2,
+    .course-wizard-panel h2,
+    .plan-review-heading h3 {
+      margin: 0;
+      color: var(--heading);
+      font-size: 1.05rem;
+      font-weight: 600;
+    }
+
+    .drafts-section {
+      display: grid;
+      gap: 0.65rem;
+    }
+
+    .course-wizard-panel {
+      display: grid;
+      gap: 0.85rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 1rem;
+    }
+
+    .course-wizard-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 18rem) minmax(0, 1fr);
+      gap: 1rem;
+      align-items: start;
+    }
+
+    .wizard-conversation,
+    .plan-review-screen {
+      display: grid;
+      gap: 0.75rem;
+      min-width: 0;
+    }
+
+    .wizard-transcript {
+      display: grid;
+      gap: 0.55rem;
+      max-height: 24rem;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--card);
+      padding: 0.75rem;
+    }
+
+    .wizard-message {
+      display: grid;
+      gap: 0.2rem;
+      border-left: 3px solid var(--border-strong);
+      padding-left: 0.65rem;
+    }
+
+    .wizard-message.agent {
+      border-left-color: var(--accent-strong);
+    }
+
+    .wizard-message strong {
+      color: var(--heading);
+      font-size: 0.82rem;
+      font-weight: 700;
+    }
+
+    .wizard-message p {
+      margin: 0;
+      color: var(--secondary);
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .wizard-reply-form {
+      display: grid;
+      gap: 0.5rem;
+    }
+
+    .wizard-reply-form label,
+    .plan-review-screen label,
+    .plan-topic-editor label {
+      color: var(--secondary);
+      font-size: 0.9rem;
+      font-weight: 700;
+    }
+
+    .wizard-reply-form textarea,
+    .plan-review-screen input,
+    .plan-review-screen textarea,
+    .plan-topic-editor input,
+    .plan-topic-editor textarea {
+      width: 100%;
+      min-height: 2.35rem;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: var(--card);
+      color: var(--text);
+      padding: 0.55rem 0.65rem;
+      font: inherit;
+      line-height: 1.45;
+    }
+
+    .wizard-reply-form textarea,
+    .plan-review-screen textarea,
+    .plan-topic-editor textarea {
+      resize: vertical;
+    }
+
+    .plan-review-heading {
+      display: grid;
+      gap: 0.2rem;
+      margin-top: 0.25rem;
+    }
+
+    .plan-review-heading p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .wizard-topic-tree,
+    .plan-topic-children {
+      display: grid;
+      gap: 0.65rem;
+    }
+
+    .plan-topic-editor {
+      display: grid;
+      gap: 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--card);
+      padding: 0.75rem;
+    }
+
+    .plan-topic-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .plan-topic-children {
+      padding-left: 0.8rem;
+      border-left: 1px solid var(--border);
+    }
+
     .library-tabs {
       display: flex;
       gap: 0.45rem;
@@ -6748,6 +7511,11 @@ export const renderPage = (
         grid-template-columns: 1fr;
       }
 
+      .course-wizard-layout,
+      .plan-topic-row {
+        grid-template-columns: 1fr;
+      }
+
       .library-course-form label,
       .settings-form label {
         line-height: 1.25;
@@ -6773,6 +7541,10 @@ export const renderPage = (
 
       .course-card-stat-value {
         white-space: normal;
+      }
+
+      .plan-topic-children {
+        padding-left: 0.5rem;
       }
 
       h1 {
@@ -6970,6 +7742,7 @@ export const renderPage = (
         <div class="library-actions">
           <button id="library-settings" class="library-button secondary" type="button" aria-label="Settings" title="Settings">&#9881;</button>
           <button id="new-course" class="library-button primary" type="button">New course</button>
+          <button id="brainstorm-course" class="library-button secondary" type="button">Brainstorm with your agent</button>
           <button id="import-course" class="library-button secondary" type="button">Import</button>
         </div>
       </header>
@@ -6999,6 +7772,72 @@ export const renderPage = (
             <p id="library-form-status" class="library-form-status" aria-live="polite" hidden></p>
           </div>
         </form>
+      </section>
+
+      <section id="course-ideation-panel" class="library-form-panel course-ideation-panel" aria-labelledby="course-ideation-title" hidden>
+        <div class="library-form-heading">
+          <h2 id="course-ideation-title">Brainstorm with your agent</h2>
+          <button id="cancel-course-ideation" class="library-button ghost" type="button">Cancel</button>
+        </div>
+        <form id="course-ideation-form" class="library-course-form">
+          <label for="course-ideation-seed">Interest or goal</label>
+          <textarea id="course-ideation-seed" name="seed" rows="4" required placeholder="I want to understand how databases work well enough to design one for my app."></textarea>
+
+          <div class="library-form-actions">
+            <button id="start-course-ideation" class="library-button primary" type="submit">Start brainstorm</button>
+            <p id="course-ideation-status" class="library-form-status" aria-live="polite" hidden></p>
+          </div>
+        </form>
+      </section>
+
+      <section id="course-wizard-panel" class="course-wizard-panel" aria-labelledby="course-wizard-title" hidden data-wizard-review>
+        <div class="library-form-heading">
+          <div>
+            <h2 id="course-wizard-title">Course plan review</h2>
+            <p id="wizard-status" class="library-form-status" aria-live="polite">Brainstorm with your agent until it proposes a plan.</p>
+          </div>
+          <button id="wizard-close" class="library-button ghost" type="button">Close</button>
+        </div>
+
+        <div class="course-wizard-layout">
+          <section class="wizard-conversation" aria-label="Ideation conversation">
+            <div id="wizard-transcript" class="wizard-transcript"></div>
+            <form id="wizard-reply-form" class="wizard-reply-form">
+              <label for="wizard-reply-input">Reply to agent</label>
+              <textarea id="wizard-reply-input" name="reply" rows="3" placeholder="Refine the goal, constraints, or pacing."></textarea>
+              <button id="wizard-reply-submit" class="library-button secondary" type="submit">Send reply</button>
+            </form>
+          </section>
+
+          <section id="plan-review-screen" class="plan-review-screen" aria-label="Draft course plan" data-plan-review>
+            <label for="wizard-title-input">Title</label>
+            <input id="wizard-title-input" name="title" type="text" autocomplete="off">
+
+            <label for="wizard-description-input">Description</label>
+            <textarea id="wizard-description-input" name="description" rows="3"></textarea>
+
+            <div class="plan-review-heading">
+              <h3>Topics</h3>
+              <p>Rename or remove topics before accepting.</p>
+            </div>
+            <div id="wizard-topic-tree" class="wizard-topic-tree"></div>
+
+            <div class="library-form-actions">
+              <button id="wizard-accept-plan" class="library-button primary" type="button">Accept</button>
+              <button id="wizard-discard-plan" class="library-button danger" type="button">Discard</button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="drafts-section" class="drafts-section" aria-labelledby="drafts-title">
+        <div class="library-section-heading">
+          <h2 id="drafts-title">Drafts</h2>
+          <p id="drafts-status" class="library-status" aria-live="polite">Loading drafts...</p>
+        </div>
+        <div id="draft-course-list" class="course-card-grid" aria-label="Draft courses" aria-live="polite">
+          <p class="library-empty">Loading drafts...</p>
+        </div>
       </section>
 
       <nav class="library-tabs" aria-label="Course status" role="tablist">
