@@ -72,7 +72,6 @@ jobs:
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/appimage/*.AppImage
 
       - name: Upload macOS artifacts
         if: ${{ matrix.platform == 'macos' }}

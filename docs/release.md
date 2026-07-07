@@ -20,7 +20,9 @@ Tauri config must keep the same version.
 
 Desktop artifacts are attached to the `Release Artifacts` workflow run:
 
-- Linux: `.deb` and `.AppImage`
+- Linux: `.deb` (AppImage is disabled for now: linuxdeploy's patchelf pass corrupts
+  the Bun sidecar ELF, which crashes the gtk plugin's `ldd` scan — see the
+  eng-board ticket before re-enabling)
 - macOS: `.dmg` and `.app`
 
 Signing, notarization, and auto-update metadata are not part of this release
