@@ -171,6 +171,761 @@ const escapeScriptJson = (value: unknown): string => {
   );
 };
 
+const libraryClientScript = String.raw`
+(() => {
+  const currentCourseId = __LIBRARY_COURSE_ID__;
+  const appShell = document.querySelector(".shell");
+  const libraryScreen = document.querySelector("#library-screen");
+  const courseViewElements = [...document.querySelectorAll("[data-course-view]")];
+  const libraryList = document.querySelector("#course-library-list");
+  const libraryStatusText = document.querySelector("#library-status");
+  const newCourseButton = document.querySelector("#new-course");
+  const importCourseButton = document.querySelector("#import-course");
+  const importNotice = document.querySelector("#import-notice");
+  const formPanel = document.querySelector("#library-form-panel");
+  const formTitle = document.querySelector("#library-form-title");
+  const courseForm = document.querySelector("#library-course-form");
+  const titleInput = document.querySelector("#library-title-input");
+  const descriptionInput = document.querySelector("#library-description-input");
+  const harnessSelect = document.querySelector("#library-harness-select");
+  const attachedDirInput = document.querySelector("#library-attached-dir-input");
+  const saveButton = document.querySelector("#library-save-course");
+  const cancelButton = document.querySelector("#library-cancel-course");
+  const formStatus = document.querySelector("#library-form-status");
+  const backToLibraryButton = document.querySelector("#back-to-library");
+  const wordmarks = [...document.querySelectorAll(".wordmark")];
+  const statusButtons = [...document.querySelectorAll("[data-library-status]")];
+
+  if (
+    libraryScreen === null ||
+    libraryList === null ||
+    libraryStatusText === null ||
+    courseForm === null ||
+    titleInput === null ||
+    descriptionInput === null ||
+    harnessSelect === null ||
+    attachedDirInput === null ||
+    saveButton === null ||
+    formStatus === null
+  ) {
+    return;
+  }
+
+  let libraryStatus = "active";
+  let libraryCourses = [];
+  let courseDetails = new Map();
+  let harnesses = [];
+  let editingCourseId = undefined;
+  let libraryLoading = false;
+  let libraryError = undefined;
+  let formBusy = false;
+  let loadedStatuses = new Set();
+  const refreshTimers = new Map();
+
+  const isRecord = (value) =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+
+  const courseIdNumber = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : undefined;
+  };
+
+  const requestJson = async (url, options = {}) => {
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message.length === 0 ? "Request failed." : message);
+    }
+
+    return response.json();
+  };
+
+  const harnessReady = (harness) =>
+    harness.installed === true && harness.authenticated === true;
+
+  const harnessStateText = (harness) => {
+    if (!isRecord(harness)) {
+      return "ready";
+    }
+
+    if (harness.installed !== true) {
+      return "not installed";
+    }
+
+    if (harness.authenticated !== true) {
+      return "not logged in";
+    }
+
+    return typeof harness.version === "string" ? harness.version : "ready";
+  };
+
+  const renderLibraryHarnessPicker = (selectedId) => {
+    harnessSelect.replaceChildren();
+
+    const defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = "Default harness";
+    harnessSelect.append(defaultOption);
+
+    for (const harness of harnesses) {
+      if (!isRecord(harness) || typeof harness.id !== "string") {
+        continue;
+      }
+
+      const option = document.createElement("option");
+      option.value = harness.id;
+      option.textContent =
+        String(harness.name ?? harness.id) + " - " + harnessStateText(harness);
+      option.disabled = !harnessReady(harness);
+      harnessSelect.append(option);
+    }
+
+    harnessSelect.value =
+      typeof selectedId === "string" && selectedId.length > 0 ? selectedId : "";
+  };
+
+  const refreshLibraryHarnesses = async () => {
+    try {
+      const payload = await requestJson("/api/harnesses");
+      harnesses = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.harnesses)
+          ? payload.harnesses
+          : [];
+      renderLibraryHarnessPicker(harnessSelect.value);
+    } catch {
+      harnesses = [];
+      renderLibraryHarnessPicker();
+    }
+  };
+
+  const countTopics = (topics) =>
+    Array.isArray(topics)
+      ? topics.reduce(
+          (count, topic) => count + 1 + countTopics(topic?.children),
+          0,
+        )
+      : 0;
+
+  const latestTimestamp = (course, detail) => {
+    const times = [];
+    const add = (value) => {
+      if (typeof value !== "string" || value.length === 0) {
+        return;
+      }
+
+      const parsed = Date.parse(value);
+      if (!Number.isNaN(parsed)) {
+        times.push(parsed);
+      }
+    };
+
+    add(course?.updatedAt);
+    add(course?.createdAt);
+    add(detail?.course?.updatedAt);
+    add(detail?.course?.createdAt);
+
+    if (Array.isArray(detail?.transcript)) {
+      for (const entry of detail.transcript) {
+        add(entry?.at);
+      }
+    }
+
+    if (Array.isArray(detail?.mastery)) {
+      for (const entry of detail.mastery) {
+        add(entry?.at);
+      }
+    }
+
+    return times.length === 0 ? undefined : Math.max(...times);
+  };
+
+  const formatLastActivity = (course, detail) => {
+    const timestamp = latestTimestamp(course, detail);
+    if (timestamp === undefined) {
+      return "No activity yet";
+    }
+
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(timestamp));
+  };
+
+  const masterySummaryText = (detail) => {
+    const mastery = Array.isArray(detail?.mastery) ? detail.mastery : [];
+    if (mastery.length === 0) {
+      return "No mastery yet";
+    }
+
+    const scores = mastery
+      .map((entry) => Number(entry?.score))
+      .filter((score) => Number.isFinite(score));
+    if (scores.length === 0) {
+      return String(mastery.length) + " recorded";
+    }
+
+    const average = Math.round(
+      scores.reduce((total, score) => total + score, 0) / scores.length,
+    );
+    const weakest = mastery.reduce((match, entry) => {
+      const score = Number(entry?.score);
+      if (!Number.isFinite(score)) {
+        return match;
+      }
+
+      return match === undefined || score < Number(match.score) ? entry : match;
+    }, undefined);
+
+    return (
+      String(scores.length) +
+      " graded · avg " +
+      String(average) +
+      (weakest === undefined
+        ? ""
+        : " · weakest " + String(weakest.concept) + " " + String(weakest.score))
+    );
+  };
+
+  const upsertVisibleCourse = (course) => {
+    if (!isRecord(course) || typeof course.id !== "number") {
+      return;
+    }
+
+    const nextStatus = course.status === "archived" ? "archived" : "active";
+    libraryCourses = libraryCourses.filter((item) => item.id !== course.id);
+
+    if (nextStatus === libraryStatus) {
+      libraryCourses.push(course);
+      libraryCourses.sort((left, right) => {
+        const leftTime = Date.parse(left.updatedAt ?? left.createdAt ?? "");
+        const rightTime = Date.parse(right.updatedAt ?? right.createdAt ?? "");
+        return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime);
+      });
+    }
+  };
+
+  const refreshLibraryCourse = async (courseId, options = {}) => {
+    const id = courseIdNumber(courseId);
+    if (id === undefined) {
+      return;
+    }
+
+    const detail = await requestJson("/api/courses/" + encodeURIComponent(String(id)));
+    courseDetails.set(String(id), detail);
+    if (isRecord(detail?.course)) {
+      upsertVisibleCourse(detail.course);
+    }
+
+    if (options.render !== false) {
+      renderLibrary();
+    }
+  };
+
+  const queueLibraryCourseRefresh = (courseId) => {
+    const id = courseIdNumber(courseId);
+    if (id === undefined) {
+      return;
+    }
+
+    const key = String(id);
+    const existing = refreshTimers.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+
+    refreshTimers.set(
+      key,
+      setTimeout(() => {
+        refreshTimers.delete(key);
+        void refreshLibraryCourse(id).catch(() => undefined);
+      }, 160),
+    );
+  };
+
+  const setLibraryMessage = (message) => {
+    libraryStatusText.textContent = message;
+  };
+
+  const renderLibraryTabs = () => {
+    for (const button of statusButtons) {
+      const selected = button.dataset.libraryStatus === libraryStatus;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-selected", selected ? "true" : "false");
+    }
+  };
+
+  const createMetaItem = (label, value) => {
+    const item = document.createElement("div");
+    item.className = "course-card-stat";
+
+    const labelElement = document.createElement("span");
+    labelElement.className = "course-card-stat-label";
+    labelElement.textContent = label;
+
+    const valueElement = document.createElement("span");
+    valueElement.className = "course-card-stat-value";
+    valueElement.textContent = value;
+
+    item.append(labelElement, valueElement);
+    return item;
+  };
+
+  const courseDescriptionText = (course) => {
+    const description = course?.description;
+    return typeof description === "string" && description.trim().length > 0
+      ? description.trim()
+      : "No description yet.";
+  };
+
+  const openCourse = (courseId) => {
+    const id = courseIdNumber(courseId);
+    if (id === undefined) {
+      return;
+    }
+
+    if (currentCourseId === id) {
+      history.pushState({ screen: "course", courseId: id }, "", "#course");
+      setLibraryVisible(false);
+      return;
+    }
+
+    location.href = "/?course=" + encodeURIComponent(String(id)) + "#course";
+  };
+
+  const openCourseForm = (mode, course) => {
+    editingCourseId = mode === "edit" ? course?.id : undefined;
+    formPanel.hidden = false;
+    formTitle.textContent = mode === "edit" ? "Edit course" : "New course";
+    saveButton.textContent = mode === "edit" ? "Save changes" : "Create course";
+    titleInput.value = mode === "edit" ? String(course?.title ?? "") : "";
+    descriptionInput.value =
+      mode === "edit" && typeof course?.description === "string"
+        ? course.description
+        : "";
+    attachedDirInput.value =
+      mode === "edit" && typeof course?.attachedDir === "string"
+        ? course.attachedDir
+        : "";
+    renderLibraryHarnessPicker(
+      mode === "edit" && typeof course?.harnessId === "string"
+        ? course.harnessId
+        : "",
+    );
+    formStatus.hidden = true;
+    titleInput.focus();
+  };
+
+  const closeCourseForm = () => {
+    editingCourseId = undefined;
+    formPanel.hidden = true;
+    formStatus.hidden = true;
+    courseForm.reset();
+  };
+
+  const createCourseCard = (course) => {
+    const id = courseIdNumber(course?.id);
+    const detail = id === undefined ? undefined : courseDetails.get(String(id));
+    const card = document.createElement("article");
+    card.className = "course-card";
+    if (id !== undefined) {
+      card.dataset.courseId = String(id);
+    }
+
+    const header = document.createElement("div");
+    header.className = "course-card-header";
+
+    const titleGroup = document.createElement("div");
+    titleGroup.className = "course-card-title-group";
+
+    const title = document.createElement("h3");
+    title.textContent = String(course?.title ?? "Untitled course");
+
+    const description = document.createElement("p");
+    description.textContent = courseDescriptionText(course);
+
+    titleGroup.append(title, description);
+
+    const badge = document.createElement("span");
+    badge.className = "course-status-badge";
+    badge.textContent = String(course?.status ?? libraryStatus);
+
+    header.append(titleGroup, badge);
+
+    const stats = document.createElement("div");
+    stats.className = "course-card-stats";
+    stats.append(
+      createMetaItem("Topics", String(countTopics(detail?.topics))),
+      createMetaItem("Mastery", masterySummaryText(detail)),
+      createMetaItem("Last activity", formatLastActivity(course, detail)),
+    );
+
+    const actions = document.createElement("div");
+    actions.className = "course-card-actions";
+
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "library-button primary";
+    openButton.textContent = "Open";
+    openButton.addEventListener("click", () => openCourse(id));
+    actions.append(openButton);
+
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.className = "library-button secondary";
+    editButton.textContent = "Edit";
+    editButton.addEventListener("click", () => openCourseForm("edit", course));
+    actions.append(editButton);
+
+    if (libraryStatus === "archived") {
+      const unarchiveButton = document.createElement("button");
+      unarchiveButton.type = "button";
+      unarchiveButton.className = "library-button secondary";
+      unarchiveButton.textContent = "Unarchive";
+      unarchiveButton.addEventListener("click", () => {
+        void unarchiveCourse(id);
+      });
+      actions.append(unarchiveButton);
+    } else {
+      const archiveButton = document.createElement("button");
+      archiveButton.type = "button";
+      archiveButton.className = "library-button danger";
+      archiveButton.textContent = "Archive";
+      archiveButton.addEventListener("click", () => {
+        void archiveCourse(course);
+      });
+      actions.append(archiveButton);
+    }
+
+    card.append(header, stats, actions);
+    return card;
+  };
+
+  const renderLibrary = () => {
+    renderLibraryTabs();
+    libraryList.replaceChildren();
+
+    if (libraryError !== undefined) {
+      const error = document.createElement("p");
+      error.className = "library-empty";
+      error.textContent = libraryError;
+      libraryList.append(error);
+      setLibraryMessage("Library could not load.");
+      return;
+    }
+
+    if (libraryLoading && libraryCourses.length === 0) {
+      const loading = document.createElement("p");
+      loading.className = "library-empty";
+      loading.textContent = "Loading courses...";
+      libraryList.append(loading);
+      setLibraryMessage("Loading " + libraryStatus + " courses.");
+      return;
+    }
+
+    if (libraryCourses.length === 0) {
+      const empty = document.createElement("section");
+      empty.className = "library-empty";
+      const heading = document.createElement("h3");
+      heading.textContent =
+        libraryStatus === "archived" ? "No archived courses" : "No courses yet";
+      const body = document.createElement("p");
+      body.textContent =
+        libraryStatus === "archived"
+          ? "Archived courses will appear here."
+          : "Create a course to start learning with a course-scoped agent.";
+      empty.append(heading, body);
+      libraryList.append(empty);
+      setLibraryMessage(
+        libraryStatus === "archived"
+          ? "No archived courses."
+          : "No active courses yet.",
+      );
+      return;
+    }
+
+    for (const course of libraryCourses) {
+      libraryList.append(createCourseCard(course));
+    }
+
+    setLibraryMessage(
+      String(libraryCourses.length) +
+        " " +
+        (libraryStatus === "archived" ? "archived" : "active") +
+        (libraryCourses.length === 1 ? " course" : " courses"),
+    );
+  };
+
+  const loadLibraryCourses = async (status = libraryStatus) => {
+    libraryLoading = true;
+    libraryError = undefined;
+    renderLibrary();
+
+    try {
+      const payload = await requestJson(
+        "/api/courses?status=" + encodeURIComponent(status),
+      );
+      if (status !== libraryStatus) {
+        return;
+      }
+
+      libraryCourses = Array.isArray(payload) ? [...payload] : [];
+      loadedStatuses.add(status);
+      renderLibrary();
+
+      await Promise.all(
+        libraryCourses.map((course) =>
+          refreshLibraryCourse(course.id, { render: false }).catch(() => undefined),
+        ),
+      );
+    } catch (error) {
+      libraryError = error instanceof Error ? error.message : "Library failed to load.";
+    } finally {
+      if (status === libraryStatus) {
+        libraryLoading = false;
+        renderLibrary();
+      }
+    }
+  };
+
+  const setLibraryStatus = (status) => {
+    if (status !== "active" && status !== "archived") {
+      return;
+    }
+
+    libraryStatus = status;
+    closeCourseForm();
+    void loadLibraryCourses(status);
+  };
+
+  const ensureLibraryLoaded = () => {
+    void refreshLibraryHarnesses();
+    if (!loadedStatuses.has(libraryStatus)) {
+      void loadLibraryCourses(libraryStatus);
+    } else {
+      renderLibrary();
+    }
+  };
+
+  const setLibraryVisible = (visible) => {
+    libraryScreen.hidden = !visible;
+    for (const element of courseViewElements) {
+      element.hidden = visible;
+    }
+
+    appShell?.classList.toggle("library-mode", visible);
+    document.body.classList.toggle("library-open", visible);
+
+    if (visible) {
+      ensureLibraryLoaded();
+    }
+  };
+
+  const showLibrary = () => {
+    history.pushState({ screen: "library" }, "", "#library");
+    setLibraryVisible(true);
+  };
+
+  const applyRoute = () => {
+    if (location.hash === "#library" || currentCourseId === null) {
+      setLibraryVisible(true);
+      return;
+    }
+
+    setLibraryVisible(false);
+  };
+
+  const submitCourseForm = async () => {
+    const title = titleInput.value.trim();
+    if (title.length === 0 || formBusy) {
+      return;
+    }
+
+    formBusy = true;
+    saveButton.disabled = true;
+    formStatus.hidden = false;
+    formStatus.textContent =
+      editingCourseId === undefined ? "Creating course..." : "Saving course...";
+
+    const body = {
+      title,
+      description:
+        descriptionInput.value.trim().length === 0
+          ? null
+          : descriptionInput.value.trim(),
+      harnessId: harnessSelect.value.length === 0 ? null : harnessSelect.value,
+      attachedDir:
+        attachedDirInput.value.trim().length === 0
+          ? null
+          : attachedDirInput.value.trim(),
+    };
+
+    try {
+      if (editingCourseId === undefined) {
+        const created = await requestJson("/api/courses", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        openCourse(created.id);
+        return;
+      }
+
+      const patched = await requestJson(
+        "/api/courses/" + encodeURIComponent(String(editingCourseId)),
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      upsertVisibleCourse(patched);
+      closeCourseForm();
+      await refreshLibraryCourse(patched.id).catch(() => undefined);
+      void loadLibraryCourses(libraryStatus);
+    } catch (error) {
+      formStatus.textContent =
+        error instanceof Error ? error.message : "Course could not be saved.";
+    } finally {
+      formBusy = false;
+      saveButton.disabled = false;
+    }
+  };
+
+  const archiveCourse = async (course) => {
+    const id = courseIdNumber(course?.id);
+    if (id === undefined) {
+      return;
+    }
+
+    const title = String(course?.title ?? "this course");
+    if (!confirm("Archive " + title + "?")) {
+      return;
+    }
+
+    await requestJson("/api/courses/" + encodeURIComponent(String(id)), {
+      method: "DELETE",
+    }).catch((error) => {
+      libraryError = error instanceof Error ? error.message : "Archive failed.";
+    });
+    void loadLibraryCourses(libraryStatus);
+  };
+
+  const unarchiveCourse = async (courseId) => {
+    const id = courseIdNumber(courseId);
+    if (id === undefined) {
+      return;
+    }
+
+    await requestJson("/api/courses/" + encodeURIComponent(String(id)), {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "active" }),
+    }).catch((error) => {
+      libraryError = error instanceof Error ? error.message : "Unarchive failed.";
+    });
+    void loadLibraryCourses(libraryStatus);
+  };
+
+  const applyCoursesPayload = (payload) => {
+    if (!isRecord(payload) || !Array.isArray(payload.courses)) {
+      return;
+    }
+
+    libraryCourses = payload.courses.filter((course) =>
+      libraryStatus === "archived"
+        ? course.status === "archived"
+        : course.status !== "archived",
+    );
+    loadedStatuses.add(libraryStatus);
+    renderLibrary();
+
+    for (const course of libraryCourses) {
+      queueLibraryCourseRefresh(course.id);
+    }
+  };
+
+  newCourseButton?.addEventListener("click", () => {
+    openCourseForm("create");
+  });
+
+  importCourseButton?.addEventListener("click", () => {
+    importNotice.hidden = false;
+    importNotice.textContent = "Import is coming soon.";
+  });
+
+  cancelButton?.addEventListener("click", closeCourseForm);
+
+  courseForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitCourseForm();
+  });
+
+  backToLibraryButton?.addEventListener("click", showLibrary);
+  for (const wordmark of wordmarks) {
+    wordmark.addEventListener("click", (event) => {
+      event.preventDefault();
+      showLibrary();
+    });
+  }
+
+  for (const button of statusButtons) {
+    button.addEventListener("click", () => {
+      setLibraryStatus(button.dataset.libraryStatus);
+    });
+  }
+
+  window.addEventListener("popstate", applyRoute);
+  window.addEventListener("hashchange", applyRoute);
+
+  try {
+    const libraryEvents = new EventSource("/api/events");
+    const parsePayload = (event) => {
+      try {
+        return JSON.parse(event.data);
+      } catch {
+        return undefined;
+      }
+    };
+
+    libraryEvents.addEventListener("courses", (event) => {
+      applyCoursesPayload(parsePayload(event));
+    });
+
+    libraryEvents.addEventListener("harnesses", (event) => {
+      const payload = parsePayload(event);
+      harnesses = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.harnesses)
+          ? payload.harnesses
+          : harnesses;
+      renderLibraryHarnessPicker(harnessSelect.value);
+    });
+
+    const refreshFromCoursePayload = (event) => {
+      const payload = parsePayload(event);
+      if (payload?.courseId !== undefined) {
+        queueLibraryCourseRefresh(payload.courseId);
+      }
+    };
+
+    libraryEvents.addEventListener("tool-write", refreshFromCoursePayload);
+    libraryEvents.addEventListener("message", refreshFromCoursePayload);
+    libraryEvents.addEventListener("lesson", refreshFromCoursePayload);
+    libraryEvents.addEventListener("topics", refreshFromCoursePayload);
+    libraryEvents.addEventListener("mastery", refreshFromCoursePayload);
+    libraryEvents.addEventListener("transcript", refreshFromCoursePayload);
+  } catch {
+    // Library stays usable through direct fetches if EventSource is unavailable.
+  }
+
+  renderLibraryHarnessPicker();
+  applyRoute();
+})();
+`;
+
 const clientScript = String.raw`
 const initialTranscript = __TRANSCRIPT__;
 const initialLessons = __LESSONS__;
@@ -2867,6 +3622,10 @@ export const renderPage = (
     lessons,
     options.courseId,
   );
+  const libraryScript = libraryClientScript.replace(
+    "__LIBRARY_COURSE_ID__",
+    escapeScriptJson(options.courseId ?? null),
+  );
   const script = clientScript
     .replace(
       "__TRANSCRIPT__",
@@ -3099,10 +3858,17 @@ export const renderPage = (
       background: var(--bg);
     }
 
+    body.library-open {
+      height: auto;
+      min-height: 100dvh;
+      overflow: auto;
+    }
+
     .topic-menu,
     .lesson-content,
     .rail-panel,
     .rail-body,
+    .library-course-form textarea,
     #transcript,
     textarea,
     .prose pre,
@@ -3121,6 +3887,309 @@ export const renderPage = (
       padding: 1rem;
     }
 
+    .shell.library-mode {
+      display: block;
+      min-height: 100dvh;
+      height: auto;
+      width: min(100%, 76rem);
+    }
+
+    .library-screen {
+      display: grid;
+      gap: 1rem;
+      padding-bottom: 2rem;
+    }
+
+    .library-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1rem;
+    }
+
+    .library-heading {
+      display: flex;
+      align-items: flex-start;
+      gap: 1rem;
+      min-width: 0;
+    }
+
+    .library-heading .wordmark {
+      flex: 0 0 auto;
+      margin-top: 0.35rem;
+    }
+
+    .library-heading h1 {
+      margin: 0;
+      font-size: 1.55rem;
+      line-height: 1.2;
+    }
+
+    .library-status,
+    .library-form-status,
+    .library-notice {
+      margin: 0.35rem 0 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .library-actions,
+    .library-form-actions,
+    .course-card-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .library-button,
+    .back-to-library,
+    .library-tab {
+      min-height: 2.35rem;
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--secondary);
+      padding: 0 0.75rem;
+      font: inherit;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .library-button:hover,
+    .back-to-library:hover,
+    .library-tab:hover,
+    .library-tab.active {
+      border-color: var(--accent-border);
+      background: var(--accent-hover-bg);
+      color: var(--text);
+    }
+
+    .library-button.primary {
+      border-color: var(--accent-strong);
+      background: var(--accent-strong);
+      color: var(--on-accent);
+    }
+
+    .library-button.secondary,
+    .library-button.ghost {
+      background: var(--surface);
+    }
+
+    .library-button.danger {
+      border-color: var(--border-surface);
+      background: var(--surface);
+      color: var(--bad-text);
+    }
+
+    .library-button:disabled {
+      border-color: var(--border-surface);
+      background: var(--surface);
+      color: var(--disabled);
+      cursor: not-allowed;
+    }
+
+    .back-to-library {
+      min-height: 2rem;
+      padding: 0 0.6rem;
+      font-size: 0.82rem;
+    }
+
+    .library-notice,
+    .library-form-panel,
+    .library-empty,
+    .course-card {
+      border: 1px solid var(--border-surface);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .library-notice {
+      padding: 0.75rem 0.85rem;
+    }
+
+    .library-form-panel {
+      display: grid;
+      gap: 0.85rem;
+      padding: 1rem;
+    }
+
+    .library-form-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .library-form-heading h2 {
+      font-size: 1.05rem;
+    }
+
+    .library-course-form {
+      display: grid;
+      grid-template-columns: minmax(8rem, 11rem) minmax(0, 1fr);
+      align-items: start;
+      gap: 0.65rem 0.85rem;
+    }
+
+    .library-course-form label {
+      color: var(--secondary);
+      font-size: 0.9rem;
+      font-weight: 600;
+      line-height: 2.35rem;
+    }
+
+    .library-course-form input,
+    .library-course-form select,
+    .library-course-form textarea {
+      width: 100%;
+      min-height: 2.35rem;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: var(--card);
+      color: var(--text);
+      padding: 0.55rem 0.65rem;
+      font: inherit;
+      line-height: 1.45;
+    }
+
+    .library-course-form textarea {
+      resize: vertical;
+    }
+
+    .library-course-form input:focus-visible,
+    .library-course-form select:focus-visible,
+    .library-course-form textarea:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 0;
+    }
+
+    .library-form-actions {
+      grid-column: 2;
+    }
+
+    .library-tabs {
+      display: flex;
+      gap: 0.45rem;
+      overflow-x: auto;
+      padding-bottom: 0.1rem;
+    }
+
+    .course-card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+      gap: 0.85rem;
+    }
+
+    .course-card {
+      display: grid;
+      gap: 0.9rem;
+      padding: 1rem;
+    }
+
+    .course-card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.85rem;
+      min-width: 0;
+    }
+
+    .course-card-title-group {
+      display: grid;
+      gap: 0.35rem;
+      min-width: 0;
+    }
+
+    .course-card h3 {
+      margin: 0;
+      color: var(--heading);
+      font-size: 1.05rem;
+      font-weight: 600;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
+    }
+
+    .course-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .course-status-badge {
+      flex: 0 0 auto;
+      border: 1px solid var(--accent-border);
+      border-radius: 999px;
+      color: var(--accent-soft-text);
+      padding: 0.14rem 0.45rem;
+      font-size: 0.78rem;
+      font-weight: 700;
+      line-height: 1.35;
+    }
+
+    .course-card-stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .course-card-stat {
+      display: grid;
+      gap: 0.2rem;
+      min-width: 0;
+      padding: 0.7rem 0.65rem;
+    }
+
+    .course-card-stat:first-child {
+      padding-left: 0;
+    }
+
+    .course-card-stat + .course-card-stat {
+      border-left: 1px solid var(--border);
+    }
+
+    .course-card-stat-label {
+      color: var(--faint);
+      font-size: 0.76rem;
+      font-weight: 700;
+    }
+
+    .course-card-stat-value {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--secondary);
+      font-size: 0.88rem;
+      font-weight: 600;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .library-empty {
+      display: grid;
+      gap: 0.4rem;
+      padding: 1rem;
+      color: var(--muted);
+    }
+
+    .library-empty h3,
+    .library-empty p {
+      margin: 0;
+    }
+
+    .library-empty h3 {
+      color: var(--heading);
+      font-size: 1.05rem;
+      font-weight: 600;
+    }
+
     .app-header {
       position: relative;
       display: grid;
@@ -3135,6 +4204,7 @@ export const renderPage = (
       display: flex;
       align-items: center;
       justify-self: start;
+      gap: 0.75rem;
       min-width: 0;
     }
 
@@ -4869,6 +5939,54 @@ export const renderPage = (
         padding: 0.75rem;
       }
 
+      .library-header,
+      .library-heading,
+      .library-form-heading,
+      .course-card-header {
+        display: grid;
+      }
+
+      .library-actions,
+      .library-form-actions,
+      .course-card-actions {
+        width: 100%;
+      }
+
+      .library-button,
+      .course-card-actions .library-button {
+        flex: 1 1 auto;
+      }
+
+      .library-course-form {
+        grid-template-columns: 1fr;
+      }
+
+      .library-course-form label {
+        line-height: 1.25;
+      }
+
+      .library-form-actions {
+        grid-column: 1;
+      }
+
+      .course-card-stats {
+        grid-template-columns: 1fr;
+      }
+
+      .course-card-stat,
+      .course-card-stat:first-child {
+        padding: 0.65rem 0;
+      }
+
+      .course-card-stat + .course-card-stat {
+        border-top: 1px solid var(--border);
+        border-left: 0;
+      }
+
+      .course-card-stat-value {
+        white-space: normal;
+      }
+
       h1 {
         font-size: 1.25rem;
       }
@@ -4975,9 +6093,62 @@ export const renderPage = (
 </head>
 <body>
   <main class="shell">
-    <header class="app-header">
+    <section id="library-screen" class="library-screen" aria-labelledby="library-title" hidden>
+      <header class="library-header">
+        <div class="library-heading">
+          <a class="wordmark" href="/" aria-label="Homepage"><strong>overlearn</strong></a>
+          <div>
+            <h1 id="library-title">Course library</h1>
+            <p id="library-status" class="library-status" aria-live="polite">Loading courses...</p>
+          </div>
+        </div>
+        <div class="library-actions">
+          <button id="new-course" class="library-button primary" type="button">New course</button>
+          <button id="import-course" class="library-button secondary" type="button">Import</button>
+        </div>
+      </header>
+
+      <p id="import-notice" class="library-notice" hidden></p>
+
+      <section id="library-form-panel" class="library-form-panel" aria-labelledby="library-form-title" hidden>
+        <div class="library-form-heading">
+          <h2 id="library-form-title">New course</h2>
+          <button id="library-cancel-course" class="library-button ghost" type="button">Cancel</button>
+        </div>
+        <form id="library-course-form" class="library-course-form">
+          <label for="library-title-input">Title</label>
+          <input id="library-title-input" name="title" type="text" autocomplete="off" required>
+
+          <label for="library-description-input">Description</label>
+          <textarea id="library-description-input" name="description" rows="3"></textarea>
+
+          <label for="library-harness-select">Harness</label>
+          <select id="library-harness-select" name="harnessId"></select>
+
+          <label for="library-attached-dir-input">Attached folder</label>
+          <input id="library-attached-dir-input" name="attachedDir" type="text" placeholder="/path/to/project">
+
+          <div class="library-form-actions">
+            <button id="library-save-course" class="library-button primary" type="submit">Create course</button>
+            <p id="library-form-status" class="library-form-status" aria-live="polite" hidden></p>
+          </div>
+        </form>
+      </section>
+
+      <nav class="library-tabs" aria-label="Course status" role="tablist">
+        <button class="library-tab active" type="button" role="tab" aria-selected="true" data-library-status="active">Active</button>
+        <button class="library-tab" type="button" role="tab" aria-selected="false" data-library-status="archived">Archived</button>
+      </nav>
+
+      <section id="course-library-list" class="course-card-grid" aria-label="Courses" aria-live="polite">
+        <p class="library-empty">Loading courses...</p>
+      </section>
+    </section>
+
+    <header class="app-header" data-course-view>
       <div class="header-brand">
         <a class="wordmark" href="/" aria-label="Homepage"><strong>overlearn</strong></a>
+        <button id="back-to-library" class="back-to-library" type="button">Library</button>
       </div>
       <div id="topic-switcher" class="topic-switcher">
         <h1 class="course-title">${escapeHtml(courseTitle)}</h1>
@@ -5039,7 +6210,7 @@ export const renderPage = (
       </div>
     </header>
 
-    <div class="workspace">
+    <div class="workspace" data-course-view>
       <section class="stream-pane" aria-label="Teaching stream">
         <div class="stream-header">
           <h2>Teaching stream</h2>
@@ -5107,6 +6278,7 @@ export const renderPage = (
     <div id="term-card" class="term-card" role="tooltip" hidden></div>
   </main>
 
+  <script>${libraryScript}</script>
   <script>${script}</script>
 </body>
 </html>`;
