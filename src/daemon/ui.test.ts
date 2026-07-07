@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import type { TopicNode } from "../course";
 import type { LessonSnapshot } from "./lessons";
-import { renderPage } from "./ui";
+import { renderPage, type TopicNode } from "./ui";
 
 const emptyLessons: LessonSnapshot = {
   lessons: [],

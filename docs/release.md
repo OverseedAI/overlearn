@@ -12,11 +12,11 @@ Tauri config must keep the same version.
    git push origin v<version>
    ```
 
-4. The existing `Release` workflow publishes CLI binaries to the GitHub
-   Release for the tag.
+4. The `Release` workflow creates the GitHub Release notes for the tag.
 5. The `Release Artifacts` workflow runs on `v*` tags and can also be started
    manually with `workflow_dispatch`. It builds unsigned desktop artifacts on
-   Linux and macOS.
+   Linux and macOS. The internal sidecar is built as part of the desktop
+   artifact job.
 
 Desktop artifacts are attached to the `Release Artifacts` workflow run:
 

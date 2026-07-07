@@ -39,24 +39,51 @@ jobs:
       - name: Test
         run: CI=true bun run test
 
+      - name: Contract source
+        run: CI=true bun run test:contract
+
       - name: Check version sync
         run: bun run check:version
 
       - name: Build
         run: bun run build
 
-      - name: Smoke test binary
+      - name: Smoke test sidecar daemon
         run: |
+          set -euo pipefail
+
           ./dist/learn --version
-          ./dist/learn instructions | head -30
-          courses_dir="$(mktemp -d)"
-          set +e
-          OVERLEARN_COURSES_DIR="${courses_dir}" OVERLEARN_NO_BROWSER=1 ./dist/learn resume does-not-exist >"${courses_dir}/resume.out" 2>"${courses_dir}/resume.err"
-          resume_exit="$?"
-          set -e
-          test "${resume_exit}" -eq 1
-          grep -q 'Cannot resume course "does-not-exist"' "${courses_dir}/resume.err"
-          grep -q "No available courses in ${courses_dir}" "${courses_dir}/resume.err"
+
+          data_dir="$(mktemp -d)"
+          port_file="${data_dir}/port"
+          ./dist/learn daemon --data-dir "${data_dir}" --port-file "${port_file}" >"${data_dir}/daemon.out" 2>"${data_dir}/daemon.err" &
+          daemon_pid="$!"
+
+          cleanup() {
+            if kill -0 "${daemon_pid}" 2>/dev/null; then
+              kill "${daemon_pid}" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          for _attempt in {1..100}; do
+            if [ -s "${port_file}" ] && [ -s "${data_dir}/daemon.json" ]; then
+              break
+            fi
+            sleep 0.05
+          done
+
+          if [ ! -s "${port_file}" ] || [ ! -s "${data_dir}/daemon.json" ]; then
+            cat "${data_dir}/daemon.err"
+            cat "${data_dir}/daemon.out"
+            exit 1
+          fi
+
+          port="$(cat "${port_file}")"
+          token="$(bun -e 'const data = JSON.parse(await Bun.file(process.argv[1]).text()); console.log(data.token)' "${data_dir}/daemon.json")"
+          curl -fsS -H "Authorization: Bearer ${token}" "http://127.0.0.1:${port}/api/health" >/dev/null
+          curl -fsS -X POST -H "Authorization: Bearer ${token}" "http://127.0.0.1:${port}/api/shutdown" >/dev/null
+          wait "${daemon_pid}"
 
   contract:
     needs: checks
@@ -64,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runtime: [binary, sidecar]
+        runtime: [sidecar]
 
     steps:
       - name: Checkout
@@ -117,7 +144,7 @@ jobs:
         run: bun run build
 
       - name: Copy sidecar
-        if: ${{ steps.changes.outputs.run == 'true' && matrix.runtime == 'sidecar' }}
+        if: ${{ steps.changes.outputs.run == 'true' }}
         env:
           TAURI_TARGET_TRIPLE: x86_64-unknown-linux-gnu
         run: bun run app:copy-sidecar
@@ -189,60 +216,3 @@ jobs:
           cargo fmt --check
           cargo clippy -- -D warnings
           cargo check
-
-  registry-it:
-    needs: checks
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4.2.2
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2.2.0
-        with:
-          bun-version: "1.3.14"
-
-      - name: Install root dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Install registry dependencies
-        working-directory: registry
-        run: bun install
-
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-
-      - name: Run registry integration
-        working-directory: registry
-        run: bun run test
-
-  registry-deploy:
-    needs: registry-it
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4.2.2
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2.2.0
-        with:
-          bun-version: "1.3.14"
-
-      - name: Install registry dependencies
-        working-directory: registry
-        run: bun install
-
-      - name: Skip without Cloudflare secrets
-        if: ${{ env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == '' }}
-        run: 'echo "Skipping registry deploy: Cloudflare secrets are not set."'
-
-      - name: Deploy registry Worker
-        if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
-        working-directory: registry
-        run: bun run deploy

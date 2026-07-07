@@ -1,12 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import type { GlossaryEntry } from "../course";
-import { parseDemoDirective, renderMarkdown } from "./markdown";
+import { parseDemoDirective, renderMarkdown, type GlossaryEntry } from "./markdown";
 
 const glossaryEntry = (term: string): GlossaryEntry => ({
   term,
-  def: `${term} definition.`,
-  addedAt: "2026-01-01T00:00:00.000Z",
 });
 
 describe("renderMarkdown glossary linking", () => {

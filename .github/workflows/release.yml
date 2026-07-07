@@ -43,23 +43,7 @@ jobs:
             await Bun.write(path, `${JSON.stringify(pkg, null, 2)}\n`);
           '
 
-      - name: Build release binaries
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-
-          bun build --compile --target=bun-linux-x64 ./src/cli/index.ts --outfile dist/learn-linux-x64
-          bun build --compile --target=bun-linux-arm64 ./src/cli/index.ts --outfile dist/learn-linux-arm64
-          bun build --compile --target=bun-darwin-x64 ./src/cli/index.ts --outfile dist/learn-darwin-x64
-          bun build --compile --target=bun-darwin-arm64 ./src/cli/index.ts --outfile dist/learn-darwin-arm64
-
-      - name: Smoke test release binary
-        run: ./dist/learn-linux-x64 --version
-
-      - name: Generate checksums
-        run: sha256sum dist/learn-* > SHA256SUMS
-
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/learn-* SHA256SUMS --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes

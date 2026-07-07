@@ -1,12 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   assembleInstructionModules,
-  ejectInstructionModules,
-  formatEjectInstructionModules,
   formatInstructions,
   formatInstructionsJson,
   getUserInstructionDir,
@@ -294,61 +292,6 @@ describe("instructions", () => {
       );
     } finally {
       await rm(home, { force: true, recursive: true });
-    }
-  });
-
-  test("ejects builtin modules into a fresh override directory", async () => {
-    const target = await mkdtemp(join(tmpdir(), "overlearn-eject-"));
-
-    try {
-      const result = await ejectInstructionModules({ toDir: target });
-
-      expect(result.map((module) => module.status)).toEqual([
-        "written",
-        "written",
-        "written",
-        "written",
-      ]);
-      expect(await readFile(join(target, "pedagogy.md"), "utf8")).toContain(
-        "Ask ONE question at a time.",
-      );
-
-      const output = formatEjectInstructionModules(result);
-      expect(output).toContain(`wrote pedagogy: ${join(target, "pedagogy.md")}`);
-      expect(output).toContain(
-        "edit these to customize; delete to revert to builtin",
-      );
-    } finally {
-      await rm(target, { force: true, recursive: true });
-    }
-  });
-
-  test("eject skips existing files unless forced", async () => {
-    const target = await mkdtemp(join(tmpdir(), "overlearn-eject-"));
-    const demosPath = join(target, "demos.md");
-
-    try {
-      await writeFile(demosPath, "# Custom Demos\n", "utf8");
-
-      const skipped = await ejectInstructionModules({ toDir: target });
-      expect(moduleByName(skipped, "demos")).toEqual({
-        name: "demos",
-        path: demosPath,
-        status: "skipped",
-      });
-      expect(await readFile(demosPath, "utf8")).toBe("# Custom Demos\n");
-
-      const forced = await ejectInstructionModules({ toDir: target, force: true });
-      expect(moduleByName(forced, "demos")).toEqual({
-        name: "demos",
-        path: demosPath,
-        status: "overwritten",
-      });
-      expect(await readFile(demosPath, "utf8")).toContain(
-        "Demo design guidelines land in DEV-522.",
-      );
-    } finally {
-      await rm(target, { force: true, recursive: true });
     }
   });
 });

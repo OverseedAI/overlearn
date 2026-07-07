@@ -1,5 +1,4 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Deserialize;
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
@@ -10,71 +9,41 @@ use std::{
         Mutex,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Manager, RunEvent, State, WebviewWindow, WindowEvent,
+    AppHandle, Manager, RunEvent, WindowEvent,
 };
-use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_notification::NotificationExt;
-use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HTTP_TIMEOUT: Duration = Duration::from_millis(800);
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct AppConfig {
-    courses: Vec<CourseEntry>,
-    last_course_dir: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CourseEntry {
-    course_dir: String,
-    title: String,
-    working_dir: Option<String>,
-    last_opened_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LauncherState {
-    config: AppConfig,
-    config_path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenCourseResult {
-    url: String,
-    port: u16,
-    started_by_app: bool,
-}
-
 #[derive(Debug, Clone)]
 struct RunningDaemon {
-    course_dir: String,
+    pid: u32,
     port: u16,
+    token: String,
+    data_dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
 struct DaemonMetadata {
     pid: u32,
     port: u16,
+    token: String,
     #[serde(rename = "startedAt")]
     _started_at: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct HealthPayload {
-    course_path: String,
+    ok: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,11 +55,10 @@ struct StatusPayload {
 
 #[derive(Default)]
 struct DesktopState {
-    config: Mutex<AppConfig>,
     window_focused: AtomicBool,
     sse_generation: AtomicU64,
     current_status: Mutex<Option<String>>,
-    owned_daemon: Mutex<Option<RunningDaemon>>,
+    daemon: Mutex<Option<RunningDaemon>>,
     quitting: AtomicBool,
 }
 
@@ -115,13 +83,13 @@ impl DesktopState {
         self.sse_generation.load(Ordering::SeqCst)
     }
 
-    fn take_owned_daemon(&self) -> Result<Option<RunningDaemon>, String> {
-        Ok(lock_mutex(&self.owned_daemon)?.take())
+    fn set_daemon(&self, daemon: Option<RunningDaemon>) -> Result<(), String> {
+        *lock_mutex(&self.daemon)? = daemon;
+        Ok(())
     }
 
-    fn set_owned_daemon(&self, daemon: Option<RunningDaemon>) -> Result<(), String> {
-        *lock_mutex(&self.owned_daemon)? = daemon;
-        Ok(())
+    fn take_daemon(&self) -> Result<Option<RunningDaemon>, String> {
+        Ok(lock_mutex(&self.daemon)?.take())
     }
 }
 
@@ -131,330 +99,16 @@ fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, Strin
         .map_err(|_| "Desktop state lock was poisoned.".to_string())
 }
 
-fn app_config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let config_dir = app.path().app_config_dir().map_err(stringify_error)?;
-    Ok(config_dir.join("app.json"))
+fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path().app_data_dir().map_err(stringify_error)
 }
 
-fn read_config_file(path: &Path) -> Result<AppConfig, String> {
-    if !path.exists() {
-        return Ok(AppConfig::default());
-    }
-
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
-    serde_json::from_str(&contents)
-        .map_err(|error| format!("Invalid desktop config in {}: {error}", path.display()))
+fn daemon_metadata_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("daemon.json")
 }
 
-fn save_config_file(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
-    let path = app_config_path(app)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
-    }
-
-    let contents = serde_json::to_string_pretty(config).map_err(stringify_error)?;
-    fs::write(&path, format!("{contents}\n"))
-        .map_err(|error| format!("Failed to write {}: {error}", path.display()))
-}
-
-fn load_config_into_state(app: &AppHandle) -> Result<(), String> {
-    let config = read_config_file(&app_config_path(app)?)?;
-    let state = app.state::<DesktopState>();
-    *lock_mutex(&state.config)? = config;
-    Ok(())
-}
-
-fn launcher_state(app: &AppHandle, state: &DesktopState) -> Result<LauncherState, String> {
-    Ok(LauncherState {
-        config: lock_mutex(&state.config)?.clone(),
-        config_path: app_config_path(app)?.display().to_string(),
-    })
-}
-
-fn now_timestamp() -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    seconds.to_string()
-}
-
-fn canonical_dir(path: &Path) -> Result<PathBuf, String> {
-    let canonical = fs::canonicalize(path)
-        .map_err(|error| format!("Failed to resolve {}: {error}", path.display()))?;
-    if !canonical.is_dir() {
-        return Err(format!("{} is not a directory.", canonical.display()));
-    }
-
-    Ok(canonical)
-}
-
-fn read_course_title(course_dir: &Path) -> Result<String, String> {
-    let manifest_path = course_dir.join("course.json");
-    let contents = fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("Failed to read {}: {error}", manifest_path.display()))?;
-    let manifest: Value = serde_json::from_str(&contents).map_err(|error| {
-        format!(
-            "Invalid course manifest {}: {error}",
-            manifest_path.display()
-        )
-    })?;
-
-    for key in ["title", "name"] {
-        if let Some(title) = manifest.get(key).and_then(Value::as_str) {
-            let trimmed = title.trim();
-            if !trimmed.is_empty() {
-                return Ok(trimmed.to_string());
-            }
-        }
-    }
-
-    Ok(course_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("Untitled course")
-        .to_string())
-}
-
-fn validate_course_dir(path: &Path) -> Result<CourseEntry, String> {
-    let course_dir = canonical_dir(path)?;
-    let manifest_path = course_dir.join("course.json");
-    if !manifest_path.is_file() {
-        return Err(format!(
-            "{} is not an Overlearn course directory.",
-            course_dir.display()
-        ));
-    }
-
-    Ok(CourseEntry {
-        course_dir: course_dir.display().to_string(),
-        title: read_course_title(&course_dir)?,
-        working_dir: None,
-        last_opened_at: None,
-    })
-}
-
-fn upsert_course(config: &mut AppConfig, mut next: CourseEntry) {
-    if let Some(existing) = config
-        .courses
-        .iter()
-        .find(|course| course.course_dir == next.course_dir)
-    {
-        next.working_dir = existing.working_dir.clone();
-        next.last_opened_at = existing.last_opened_at.clone();
-    }
-
-    config
-        .courses
-        .retain(|course| course.course_dir != next.course_dir);
-    config.courses.insert(0, next);
-}
-
-fn update_course(
-    app: &AppHandle,
-    state: &DesktopState,
-    update: impl FnOnce(&mut AppConfig) -> Result<(), String>,
-) -> Result<LauncherState, String> {
-    let config = {
-        let mut config = lock_mutex(&state.config)?;
-        update(&mut config)?;
-        config.clone()
-    };
-
-    save_config_file(app, &config)?;
-    launcher_state(app, state)
-}
-
-fn file_path_to_path_buf(path: FilePath) -> Result<PathBuf, String> {
-    path.into_path()
-        .map_err(|_| "Only local directories are supported.".to_string())
-}
-
-#[tauri::command]
-fn get_launcher_state(
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> Result<LauncherState, String> {
-    launcher_state(&app, state.inner())
-}
-
-#[tauri::command]
-fn pick_course_dir(
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> Result<Option<LauncherState>, String> {
-    let Some(path) = app.dialog().file().blocking_pick_folder() else {
-        return Ok(None);
-    };
-    let entry = validate_course_dir(&file_path_to_path_buf(path)?)?;
-
-    update_course(&app, state.inner(), |config| {
-        upsert_course(config, entry);
-        Ok(())
-    })
-    .map(Some)
-}
-
-#[tauri::command]
-fn pick_working_dir(
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    course_dir: String,
-) -> Result<Option<LauncherState>, String> {
-    let Some(path) = app.dialog().file().blocking_pick_folder() else {
-        return Ok(None);
-    };
-    let working_dir = canonical_dir(&file_path_to_path_buf(path)?)?
-        .display()
-        .to_string();
-
-    update_course(&app, state.inner(), |config| {
-        let course = config
-            .courses
-            .iter_mut()
-            .find(|course| course.course_dir == course_dir)
-            .ok_or_else(|| "Course is not in the launcher list.".to_string())?;
-        course.working_dir = Some(working_dir);
-        Ok(())
-    })
-    .map(Some)
-}
-
-#[tauri::command]
-fn clear_working_dir(
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    course_dir: String,
-) -> Result<LauncherState, String> {
-    update_course(&app, state.inner(), |config| {
-        let course = config
-            .courses
-            .iter_mut()
-            .find(|course| course.course_dir == course_dir)
-            .ok_or_else(|| "Course is not in the launcher list.".to_string())?;
-        course.working_dir = None;
-        Ok(())
-    })
-}
-
-#[tauri::command]
-fn remove_course(
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    course_dir: String,
-) -> Result<LauncherState, String> {
-    update_course(&app, state.inner(), |config| {
-        config
-            .courses
-            .retain(|course| course.course_dir != course_dir);
-        if config.last_course_dir.as_deref() == Some(course_dir.as_str()) {
-            config.last_course_dir = None;
-        }
-        Ok(())
-    })
-}
-
-#[tauri::command]
-async fn open_course(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, DesktopState>,
-    course_dir: String,
-) -> Result<OpenCourseResult, String> {
-    let course_dir = canonical_dir(Path::new(&course_dir))?;
-    validate_course_dir(&course_dir)?;
-    let course_dir_string = course_dir.display().to_string();
-
-    state.inner().cancel_sse();
-    stop_owned_daemon(&app, state.inner())?;
-
-    let was_running = read_live_daemon(&course_dir)?.is_some();
-    let (course_name, courses_dir) = course_cli_parts(&course_dir)?;
-    let output = app
-        .shell()
-        .sidecar("learn")
-        .map_err(stringify_error)?
-        .args(["resume", course_name.as_str()])
-        .env("OVERLEARN_COURSES_DIR", courses_dir.display().to_string())
-        .env("OVERLEARN_NO_BROWSER", "1")
-        .output()
-        .await
-        .map_err(stringify_error)?;
-
-    if !output.status.success() {
-        return Err(format_command_failure(output.stdout, output.stderr));
-    }
-
-    let daemon = wait_for_live_daemon(&course_dir)?;
-    let started_by_app = !was_running;
-    if started_by_app {
-        state.inner().set_owned_daemon(Some(daemon.clone()))?;
-    } else {
-        state.inner().set_owned_daemon(None)?;
-    }
-
-    update_course(&app, state.inner(), |config| {
-        let entry = validate_course_dir(&course_dir)?;
-        upsert_course(config, entry);
-        if let Some(course) = config
-            .courses
-            .iter_mut()
-            .find(|course| course.course_dir == course_dir_string)
-        {
-            course.last_opened_at = Some(now_timestamp());
-        }
-        config.last_course_dir = Some(course_dir_string.clone());
-        Ok(())
-    })?;
-
-    start_sse_subscription(app.clone(), state.inner(), daemon.clone());
-    let url = format!("http://127.0.0.1:{}/", daemon.port);
-    window.set_focus().ok();
-
-    Ok(OpenCourseResult {
-        url,
-        port: daemon.port,
-        started_by_app,
-    })
-}
-
-fn course_cli_parts(course_dir: &Path) -> Result<(String, PathBuf), String> {
-    let name = course_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "Course directory must have a valid UTF-8 name.".to_string())?;
-    if name.is_empty() || name == "." || name == ".." {
-        return Err("Course directory must have a plain directory name.".to_string());
-    }
-
-    let parent = course_dir
-        .parent()
-        .ok_or_else(|| "Course directory must have a parent directory.".to_string())?;
-
-    Ok((name.to_string(), parent.to_path_buf()))
-}
-
-fn format_command_failure(stdout: Vec<u8>, stderr: Vec<u8>) -> String {
-    let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-    if !stdout.is_empty() {
-        return stdout;
-    }
-
-    "learn sidecar command failed.".to_string()
-}
-
-fn daemon_metadata_path(course_dir: &Path) -> PathBuf {
-    course_dir.join(".overlearn").join("daemon.json")
-}
-
-fn read_daemon_metadata(course_dir: &Path) -> Result<Option<DaemonMetadata>, String> {
-    let path = daemon_metadata_path(course_dir);
+fn read_daemon_metadata(data_dir: &Path) -> Result<Option<DaemonMetadata>, String> {
+    let path = daemon_metadata_path(data_dir);
     if !path.exists() {
         return Ok(None);
     }
@@ -466,8 +120,8 @@ fn read_daemon_metadata(course_dir: &Path) -> Result<Option<DaemonMetadata>, Str
         .map_err(|error| format!("Invalid daemon metadata in {}: {error}", path.display()))
 }
 
-fn read_live_daemon(course_dir: &Path) -> Result<Option<RunningDaemon>, String> {
-    let Some(metadata) = read_daemon_metadata(course_dir)? else {
+fn read_live_daemon(data_dir: &Path) -> Result<Option<RunningDaemon>, String> {
+    let Some(metadata) = read_daemon_metadata(data_dir)? else {
         return Ok(None);
     };
 
@@ -475,25 +129,27 @@ fn read_live_daemon(course_dir: &Path) -> Result<Option<RunningDaemon>, String> 
         return Ok(None);
     }
 
-    let Some(health) = get_daemon_health(metadata.port)? else {
+    let Some(health) = get_daemon_health(metadata.port, &metadata.token)? else {
         return Ok(None);
     };
 
-    if Path::new(&health.course_path) != course_dir {
+    if !health.ok {
         return Ok(None);
     }
 
     Ok(Some(RunningDaemon {
-        course_dir: course_dir.display().to_string(),
+        pid: metadata.pid,
         port: metadata.port,
+        token: metadata.token,
+        data_dir: data_dir.to_path_buf(),
     }))
 }
 
-fn wait_for_live_daemon(course_dir: &Path) -> Result<RunningDaemon, String> {
+fn wait_for_live_daemon(data_dir: &Path) -> Result<RunningDaemon, String> {
     let started_at = SystemTime::now();
 
     while started_at.elapsed().unwrap_or_default() < DAEMON_START_TIMEOUT {
-        if let Some(daemon) = read_live_daemon(course_dir)? {
+        if let Some(daemon) = read_live_daemon(data_dir)? {
             return Ok(daemon);
         }
 
@@ -501,6 +157,51 @@ fn wait_for_live_daemon(course_dir: &Path) -> Result<RunningDaemon, String> {
     }
 
     Err("Daemon did not become healthy within 5 seconds.".to_string())
+}
+
+fn start_app_daemon(app: &AppHandle) -> Result<RunningDaemon, String> {
+    let data_dir = app_data_dir(app)?;
+    fs::create_dir_all(&data_dir)
+        .map_err(|error| format!("Failed to create {}: {error}", data_dir.display()))?;
+
+    if let Some(daemon) = read_live_daemon(&data_dir)? {
+        return Ok(daemon);
+    }
+
+    let (mut rx, child) = app
+        .shell()
+        .sidecar("learn")
+        .map_err(stringify_error)?
+        .arg("daemon")
+        .env("OVERLEARN_DATA_DIR", data_dir.display().to_string())
+        .spawn()
+        .map_err(stringify_error)?;
+    let child_pid = child.pid();
+
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stderr(line) => {
+                    eprintln!("{}", String::from_utf8_lossy(&line).trim_end());
+                }
+                CommandEvent::Stdout(line) => {
+                    eprintln!("{}", String::from_utf8_lossy(&line).trim_end());
+                }
+                CommandEvent::Error(error) => {
+                    eprintln!("Overlearn sidecar error: {error}");
+                }
+                CommandEvent::Terminated(payload) => {
+                    eprintln!(
+                        "Overlearn sidecar {child_pid} exited with code {:?}.",
+                        payload.code
+                    );
+                }
+                _ => {}
+            }
+        }
+    });
+
+    wait_for_live_daemon(&data_dir)
 }
 
 fn pid_is_alive(pid: u32) -> bool {
@@ -516,8 +217,11 @@ fn pid_is_alive(pid: u32) -> bool {
     }
 }
 
-fn get_daemon_health(port: u16) -> Result<Option<HealthPayload>, String> {
-    let (status, body) = http_request(port, "GET", "/api/health")?;
+fn get_daemon_health(port: u16, token: &str) -> Result<Option<HealthPayload>, String> {
+    let Ok((status, body)) = http_request(port, "GET", "/api/health", Some(token)) else {
+        return Ok(None);
+    };
+
     if status != 200 {
         return Ok(None);
     }
@@ -527,8 +231,8 @@ fn get_daemon_health(port: u16) -> Result<Option<HealthPayload>, String> {
         .map_err(|error| format!("Invalid daemon health response: {error}"))
 }
 
-fn post_shutdown(port: u16) -> Result<(), String> {
-    let (status, body) = http_request(port, "POST", "/api/shutdown")?;
+fn post_shutdown(daemon: &RunningDaemon) -> Result<(), String> {
+    let (status, body) = http_request(daemon.port, "POST", "/api/shutdown", Some(&daemon.token))?;
     if (200..300).contains(&status) {
         return Ok(());
     }
@@ -543,7 +247,12 @@ fn post_shutdown(port: u16) -> Result<(), String> {
     }
 }
 
-fn http_request(port: u16, method: &str, path: &str) -> Result<(u16, String), String> {
+fn http_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<(u16, String), String> {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&address, HTTP_TIMEOUT).map_err(stringify_error)?;
     stream
@@ -553,8 +262,11 @@ fn http_request(port: u16, method: &str, path: &str) -> Result<(u16, String), St
         .set_write_timeout(Some(HTTP_TIMEOUT))
         .map_err(stringify_error)?;
 
+    let auth = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{auth}Connection: close\r\nContent-Length: 0\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())
@@ -582,20 +294,19 @@ fn parse_http_response(response: &str) -> Result<(u16, String), String> {
     Ok((status, body.to_string()))
 }
 
-fn stop_owned_daemon(app: &AppHandle, state: &DesktopState) -> Result<(), String> {
-    let Some(daemon) = state.take_owned_daemon()? else {
+fn stop_daemon(state: &DesktopState) -> Result<(), String> {
+    let Some(daemon) = state.take_daemon()? else {
         return Ok(());
     };
 
     state.cancel_sse();
-    if let Err(error) = post_shutdown(daemon.port) {
+    if let Err(error) = post_shutdown(&daemon) {
         eprintln!(
-            "Failed to stop Overlearn daemon for {}: {error}",
-            daemon.course_dir
+            "Failed to stop Overlearn daemon {} for {}: {error}",
+            daemon.pid,
+            daemon.data_dir.display()
         );
     }
-
-    let _ = app;
     Ok(())
 }
 
@@ -603,7 +314,7 @@ fn start_sse_subscription(app: AppHandle, state: &DesktopState, daemon: RunningD
     let generation = state.next_sse_generation();
 
     thread::spawn(move || {
-        let result = read_sse_stream(&app, generation, daemon.port);
+        let result = read_sse_stream(&app, generation, &daemon);
         let state = app.state::<DesktopState>();
 
         if state.sse_generation() != generation || state.quitting.load(Ordering::SeqCst) {
@@ -615,17 +326,18 @@ fn start_sse_subscription(app: AppHandle, state: &DesktopState, daemon: RunningD
             notify_if_unfocused(
                 &app,
                 "Overlearn needs attention",
-                "The course daemon stopped responding.",
+                "The daemon stopped responding.",
             );
         }
     });
 }
 
-fn read_sse_stream(app: &AppHandle, generation: u64, port: u16) -> Result<(), String> {
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
+fn read_sse_stream(app: &AppHandle, generation: u64, daemon: &RunningDaemon) -> Result<(), String> {
+    let address = SocketAddr::from(([127, 0, 0, 1], daemon.port));
     let mut stream = TcpStream::connect_timeout(&address, HTTP_TIMEOUT).map_err(stringify_error)?;
     let request = format!(
-        "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
+        "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+        daemon.port, daemon.token
     );
     stream
         .write_all(request.as_bytes())
@@ -734,6 +446,21 @@ fn setup_window_focus(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn navigate_to_daemon(app: &AppHandle, daemon: &RunningDaemon) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("Main window was not created.".to_string());
+    };
+    let url = tauri::Url::parse(&format!(
+        "http://127.0.0.1:{}/?token={}",
+        daemon.port, daemon.token
+    ))
+    .map_err(stringify_error)?;
+
+    window.navigate(url).map_err(stringify_error)?;
+    window.set_focus().ok();
+    Ok(())
+}
+
 fn build_tray(app: &AppHandle) -> Result<(), String> {
     let show =
         MenuItem::with_id(app, "show", "Show", true, None::<&str>).map_err(stringify_error)?;
@@ -792,9 +519,17 @@ fn make_tray_icon() -> Image<'static> {
 }
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    load_config_into_state(app.handle()).map_err(to_boxed_error)?;
     setup_window_focus(app.handle()).map_err(to_boxed_error)?;
     build_tray(app.handle()).map_err(to_boxed_error)?;
+
+    let state = app.state::<DesktopState>();
+    let daemon = start_app_daemon(app.handle()).map_err(to_boxed_error)?;
+    state
+        .set_daemon(Some(daemon.clone()))
+        .map_err(to_boxed_error)?;
+    navigate_to_daemon(app.handle(), &daemon).map_err(to_boxed_error)?;
+    start_sse_subscription(app.handle().clone(), state.inner(), daemon);
+
     Ok(())
 }
 
@@ -802,7 +537,7 @@ fn handle_run_event(app: &AppHandle, event: RunEvent) {
     if let RunEvent::ExitRequested { .. } = event {
         let state = app.state::<DesktopState>();
         state.quitting.store(true, Ordering::SeqCst);
-        if let Err(error) = stop_owned_daemon(app, state.inner()) {
+        if let Err(error) = stop_daemon(state.inner()) {
             eprintln!("Failed to stop Overlearn daemon: {error}");
         }
     }
@@ -824,18 +559,9 @@ fn main() {
                 window.set_focus().ok();
             }
         }))
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .manage(DesktopState::default())
-        .invoke_handler(tauri::generate_handler![
-            get_launcher_state,
-            pick_course_dir,
-            pick_working_dir,
-            clear_working_dir,
-            remove_course,
-            open_course
-        ])
         .setup(setup_app)
         .build(tauri::generate_context!())
         .expect("error while building Tauri application");

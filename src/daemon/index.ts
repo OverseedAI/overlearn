@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import {
@@ -6,7 +5,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 import packageJson from "../../package.json";
 import { listHarnessAdapters } from "../adapter/registry";
@@ -79,33 +78,19 @@ export type CourseStatus = Readonly<{
   activeCourseId: number | null;
 }>;
 
-export type AgentMessageSource =
-  | Readonly<{ kind: "text"; text: string }>
-  | Readonly<{ kind: "file"; path: string }>;
-
-export type LearnerTurn = Readonly<{
-  turnPath: string;
-  courseDir: string;
-}>;
-
 export const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
-
-export class LearnCommandError extends Error {
-  readonly exitCode: 1 | 2;
-
-  constructor(exitCode: 1 | 2, message: string) {
-    super(message);
-    this.name = "LearnCommandError";
-    this.exitCode = exitCode;
-  }
-}
 
 type Env = Readonly<Record<string, string | undefined>>;
 
 type DaemonMetadata = Readonly<{
   pid: number;
   port: number;
+  token: string;
   startedAt: string;
+}>;
+
+export type RunDaemonOptions = Readonly<{
+  portFile?: string;
 }>;
 
 type UiStatus =
@@ -170,17 +155,9 @@ type CoursePatchDraft = {
 };
 
 const LOCALHOST_BIND_HOST = "127.0.0.1";
-const LOCALHOST_PRINT_HOST = "localhost";
-const DAEMON_START_TIMEOUT_MS = 5_000;
-const DAEMON_START_POLL_MS = 50;
-const DAEMON_STOP_TIMEOUT_MS = 5_000;
-const DAEMON_STOP_POLL_MS = 50;
+const DAEMON_AUTH_COOKIE = "overlearn_daemon_token";
 const DEFAULT_HARNESS_ID = "claude-code";
 const MAX_AGENT_STREAM_REPLAY = 200;
-
-const sleep = async (milliseconds: number): Promise<void> => {
-  await new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
-};
 
 const jsonResponse = (value: unknown, init?: ResponseInit): Response =>
   new Response(JSON.stringify(value), {
@@ -207,15 +184,6 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const hasErrorCode = (error: unknown, code: string): boolean =>
   isRecord(error) && error["code"] === code;
 
-const isPidAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
 const escapeHtml = (value: string): string =>
   value
     .replaceAll("&", "&amp;")
@@ -223,9 +191,6 @@ const escapeHtml = (value: string): string =>
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
-
-const formatPublicUrl = (port: number): string =>
-  `http://${LOCALHOST_PRINT_HOST}:${port}`;
 
 const formatDaemonUrl = (port: number, path: string): string =>
   `http://${LOCALHOST_BIND_HOST}:${port}${path}`;
@@ -242,6 +207,7 @@ export const readDaemonMetadata = async (
       !isRecord(parsed) ||
       typeof parsed["pid"] !== "number" ||
       typeof parsed["port"] !== "number" ||
+      typeof parsed["token"] !== "string" ||
       typeof parsed["startedAt"] !== "string"
     ) {
       return undefined;
@@ -250,6 +216,7 @@ export const readDaemonMetadata = async (
     return {
       pid: parsed["pid"],
       port: parsed["port"],
+      token: parsed["token"],
       startedAt: parsed["startedAt"],
     };
   } catch (error) {
@@ -272,307 +239,6 @@ const writeDaemonMetadata = async (
 
 const clearDaemonMetadata = async (env: Env = process.env): Promise<void> => {
   await rm(daemonMetadataPath(env), { force: true });
-};
-
-const readDaemonHealth = async (
-  metadata: DaemonMetadata,
-): Promise<Record<string, unknown> | undefined> => {
-  try {
-    const response = await fetch(formatDaemonUrl(metadata.port, "/api/health"));
-    if (!response.ok) {
-      return undefined;
-    }
-
-    const body = (await response.json()) as unknown;
-    return isRecord(body) ? body : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
-const isUsableDaemon = async (
-  metadata: DaemonMetadata,
-): Promise<boolean> =>
-  isPidAlive(metadata.pid) && (await readDaemonHealth(metadata))?.["ok"] === true;
-
-const getDaemonSpawnCommand = (): readonly string[] => {
-  const executable = process.argv[0] ?? process.execPath;
-  const scriptPath = process.argv[1];
-
-  if (
-    scriptPath !== undefined &&
-    (scriptPath.endsWith(".ts") || scriptPath.endsWith(".js"))
-  ) {
-    return [executable, scriptPath, "__daemon"];
-  }
-
-  return [process.execPath, "__daemon"];
-};
-
-const spawnDaemonProcess = (env: Env): void => {
-  const [command, ...args] = getDaemonSpawnCommand();
-  if (command === undefined) {
-    throw new LearnCommandError(1, "Unable to determine daemon command.");
-  }
-
-  const child = spawn(command, args, {
-    detached: true,
-    env: {
-      ...process.env,
-      ...env,
-    },
-    stdio: "ignore",
-  });
-
-  child.unref();
-};
-
-const waitForDaemonMetadata = async (env: Env): Promise<DaemonMetadata> => {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < DAEMON_START_TIMEOUT_MS) {
-    const metadata = await readDaemonMetadata(env);
-    if (metadata !== undefined && (await isUsableDaemon(metadata))) {
-      return metadata;
-    }
-
-    await sleep(DAEMON_START_POLL_MS);
-  }
-
-  throw new LearnCommandError(1, "Daemon did not start within 5 seconds.");
-};
-
-const waitForDaemonShutdown = async (
-  env: Env,
-  pid: number,
-): Promise<boolean> => {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < DAEMON_STOP_TIMEOUT_MS) {
-    if (!isPidAlive(pid) && (await readDaemonMetadata(env)) === undefined) {
-      return true;
-    }
-
-    await sleep(DAEMON_STOP_POLL_MS);
-  }
-
-  return !isPidAlive(pid) && (await readDaemonMetadata(env)) === undefined;
-};
-
-const openBrowser = (url: string, env: Env): void => {
-  if (env["OVERLEARN_NO_BROWSER"] === "1") {
-    return;
-  }
-
-  const command = process.platform === "darwin" ? "open" : "xdg-open";
-
-  try {
-    const child = spawn(command, [url], {
-      detached: true,
-      stdio: "ignore",
-    });
-    child.unref();
-  } catch {
-    // Opening the browser is best-effort.
-  }
-};
-
-const findCourseByName = (store: Store, name: string): Course | undefined =>
-  listCourses(store).find(
-    (course) =>
-      course.status !== "archived" &&
-      (course.sourceName === name || course.title === name),
-  );
-
-const createCourseForStart = (name: string | undefined, env: Env): void => {
-  if (name === undefined || name.trim().length === 0) {
-    return;
-  }
-
-  const store = openStore({ env });
-  try {
-    if (findCourseByName(store, name) === undefined) {
-      createCourse(store, {
-        title: name,
-        sourceName: name,
-        status: "active",
-      });
-    }
-  } finally {
-    store.close();
-  }
-};
-
-const startAppDaemon = async (
-  env: Env = process.env,
-  options: Readonly<{ createCourseName?: string }> = {},
-): Promise<string> => {
-  if (options.createCourseName !== undefined) {
-    createCourseForStart(options.createCourseName, env);
-  }
-
-  const existingMetadata = await readDaemonMetadata(env);
-  if (existingMetadata !== undefined && (await isUsableDaemon(existingMetadata))) {
-    const url = formatPublicUrl(existingMetadata.port);
-    openBrowser(url, env);
-    return url;
-  }
-
-  if (existingMetadata !== undefined) {
-    await clearDaemonMetadata(env);
-  }
-
-  spawnDaemonProcess(env);
-  const metadata = await waitForDaemonMetadata(env);
-  const url = formatPublicUrl(metadata.port);
-  openBrowser(url, env);
-
-  return url;
-};
-
-export const startCourseDaemon = async (
-  name: string | undefined,
-  env: Env = process.env,
-): Promise<string> =>
-  name === undefined
-    ? startAppDaemon(env)
-    : startAppDaemon(env, { createCourseName: name });
-
-export const resumeCourseDaemon = async (
-  _name: string,
-  env: Env = process.env,
-): Promise<string> => startAppDaemon(env);
-
-export const waitForLearnerTurn = async (
-  ...args: readonly unknown[]
-): Promise<LearnerTurn> => {
-  void args;
-  throw new LearnCommandError(
-    2,
-    "learn wait has been removed. Use the app-level daemon course API instead.",
-  );
-};
-
-export const getCourseStatus = async (
-  _name: string | undefined,
-  env: Env = process.env,
-): Promise<CourseStatus> => {
-  const metadata = await readDaemonMetadata(env);
-  if (metadata === undefined || !isPidAlive(metadata.pid)) {
-    return {
-      daemonAlive: false,
-      waitPending: false,
-      courseDir: null,
-      activeCourseId: null,
-    };
-  }
-
-  const health = await readDaemonHealth(metadata);
-  if (health?.["ok"] !== true) {
-    return {
-      daemonAlive: false,
-      waitPending: false,
-      courseDir: null,
-      activeCourseId: null,
-    };
-  }
-
-  const activeCourseId =
-    typeof health["activeCourseId"] === "number" ? health["activeCourseId"] : null;
-
-  return {
-    daemonAlive: true,
-    waitPending: false,
-    courseDir: null,
-    activeCourseId,
-  };
-};
-
-export const stopCourseDaemon = async (
-  _name: string | undefined,
-  env: Env = process.env,
-): Promise<string> => {
-  const metadata = await readDaemonMetadata(env);
-  if (metadata === undefined) {
-    return "No overlearn daemon is running.";
-  }
-
-  if (!isPidAlive(metadata.pid)) {
-    await clearDaemonMetadata(env);
-    return "No overlearn daemon is running.";
-  }
-
-  try {
-    const response = await fetch(
-      formatDaemonUrl(metadata.port, "/api/shutdown"),
-      { method: "POST" },
-    );
-
-    if (!response.ok) {
-      throw new Error(`Shutdown failed with HTTP ${response.status}.`);
-    }
-  } catch {
-    try {
-      process.kill(metadata.pid, "SIGTERM");
-    } catch {
-      await clearDaemonMetadata(env);
-      return "No overlearn daemon is running.";
-    }
-  }
-
-  if (!(await waitForDaemonShutdown(env, metadata.pid))) {
-    throw new LearnCommandError(1, "Daemon did not stop within 5 seconds.");
-  }
-
-  return "Stopped overlearn daemon.";
-};
-
-const readAgentMessageText = async (
-  source: AgentMessageSource,
-  cwd: string,
-): Promise<string> =>
-  source.kind === "text"
-    ? source.text
-    : await Bun.file(resolve(cwd, source.path)).text();
-
-export const sayAgentMessage = async (
-  name: string | undefined,
-  source: AgentMessageSource,
-  env: Env = process.env,
-  cwd = process.cwd(),
-): Promise<string | undefined> => {
-  if (name === undefined) {
-    throw new LearnCommandError(1, "learn say now requires a store course name.");
-  }
-
-  const text = await readAgentMessageText(source, cwd);
-  if (text.trim().length === 0) {
-    throw new LearnCommandError(1, "Agent message text cannot be empty.");
-  }
-
-  const store = openStore({ env });
-  try {
-    const course = findCourseByName(store, name);
-    if (course === undefined) {
-      throw new LearnCommandError(1, `No store course found: ${name}`);
-    }
-
-    appendTranscriptEntry(store, course.id, {
-      role: "agent",
-      kind: "text",
-      content: text,
-    });
-    return undefined;
-  } finally {
-    store.close();
-  }
-};
-
-export const notifyAgentTranscriptEntry = async (
-  ...args: readonly unknown[]
-): Promise<string | undefined> => {
-  void args;
-  return undefined;
 };
 
 const createSseHub = (
@@ -716,6 +382,70 @@ const writeWebResponse = async (
     }
   }
 };
+
+const parseCookieHeader = (header: string | null): ReadonlyMap<string, string> => {
+  const cookies = new Map<string, string>();
+  if (header === null || header.trim().length === 0) {
+    return cookies;
+  }
+
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+
+    const name = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    if (name.length > 0) {
+      cookies.set(name, value);
+    }
+  }
+
+  return cookies;
+};
+
+const bearerToken = (headers: Headers): string | undefined => {
+  const authorization = headers.get("authorization");
+  if (authorization === null) {
+    return undefined;
+  }
+
+  const [scheme, token, extra] = authorization.split(/\s+/);
+  if (scheme?.toLowerCase() !== "bearer" || token === undefined || extra !== undefined) {
+    return undefined;
+  }
+
+  return token;
+};
+
+const requestHasDaemonToken = (request: Request, daemonToken: string): boolean =>
+  bearerToken(request.headers) === daemonToken ||
+  parseCookieHeader(request.headers.get("cookie")).get(DAEMON_AUTH_COOKIE) ===
+    daemonToken;
+
+const incomingHasDaemonToken = (
+  request: IncomingMessage,
+  daemonToken: string,
+): boolean => {
+  const headers = headersFromIncoming(request);
+  return (
+    bearerToken(headers) === daemonToken ||
+    parseCookieHeader(headers.get("cookie")).get(DAEMON_AUTH_COOKIE) === daemonToken
+  );
+};
+
+const unauthorizedResponse = (): Response =>
+  textResponse("Overlearn daemon authentication is required.", 401);
+
+const authenticatedBootstrapResponse = (token: string): Response =>
+  new Response(null, {
+    status: 303,
+    headers: {
+      location: "/",
+      "set-cookie": `${DAEMON_AUTH_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict`,
+    },
+  });
 
 const readJsonBody = async (request: Request): Promise<unknown> => {
   const text = await request.text();
@@ -1202,8 +932,12 @@ const demoResponse = (store: Store, courseId: number, file: string): Response =>
   });
 };
 
-export const runDaemon = async (env: Env = process.env): Promise<void> => {
+export const runDaemon = async (
+  env: Env = process.env,
+  options: RunDaemonOptions = {},
+): Promise<void> => {
   const store = openStore({ env });
+  const daemonToken = randomBytes(32).toString("base64url");
   const tokenScopes = new Map<string, TokenScope>();
   const statuses = new Map<number, UiStatusPayload>();
   const activeTurnByCourse = new Map<number, number>();
@@ -1859,6 +1593,22 @@ export const runDaemon = async (env: Env = process.env): Promise<void> => {
     const requestUrl = new URL(request.url);
     const method = request.method;
 
+    if (method === "GET" && requestUrl.pathname === "/") {
+      const token = requestUrl.searchParams.get("token");
+      if (token !== null) {
+        return token === daemonToken
+          ? authenticatedBootstrapResponse(daemonToken)
+          : unauthorizedResponse();
+      }
+    }
+
+    if (
+      requestUrl.pathname.startsWith("/api/") &&
+      !requestHasDaemonToken(request, daemonToken)
+    ) {
+      return unauthorizedResponse();
+    }
+
     if (method === "GET" && requestUrl.pathname === "/api/health") {
       return jsonResponse(healthPayload());
     }
@@ -1964,6 +1714,14 @@ export const runDaemon = async (env: Env = process.env): Promise<void> => {
 
   const server = createServer((incoming, outgoing) => {
     if (incoming.url === "/api/events" && incoming.method === "GET") {
+      if (!incomingHasDaemonToken(incoming, daemonToken)) {
+        outgoing.writeHead(401, {
+          "content-type": "text/plain; charset=utf-8",
+        });
+        outgoing.end("Overlearn daemon authentication is required.");
+        return;
+      }
+
       sseHub.connect(incoming, outgoing);
       for (const replay of agentStreamReplay) {
         outgoing.write(`event: agent-stream\ndata: ${JSON.stringify(replay)}\n\n`);
@@ -2002,10 +1760,16 @@ export const runDaemon = async (env: Env = process.env): Promise<void> => {
     {
       pid: process.pid,
       port,
+      token: daemonToken,
       startedAt: new Date().toISOString(),
     },
     env,
   );
+
+  if (options.portFile !== undefined) {
+    await mkdir(dirname(options.portFile), { recursive: true });
+    await Bun.write(options.portFile, `${port}\n`);
+  }
 
   const cleanup = (): void => {
     void shutdown();

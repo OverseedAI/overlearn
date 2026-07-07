@@ -54,7 +54,7 @@ describe("daemon turn orchestration helpers", () => {
     expect(prompt).toContain("## Resume context required");
     expect(prompt).toContain("get_course_state");
     expect(prompt).toContain("Do not write course files directly");
-    expect(prompt).toContain("Do not run `learn emit`");
+    expect(prompt).toContain("no sidecar callback commands are available");
     expect(prompt).toContain("## Turn payload");
     expect(prompt).toContain('"turn": 7');
     expect(prompt).toContain('"type": "message"');
