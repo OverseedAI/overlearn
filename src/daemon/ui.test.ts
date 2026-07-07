@@ -46,6 +46,42 @@ describe("renderPage", () => {
     );
   });
 
+  test("renders the library shell, CRUD controls, and archived view entry", () => {
+    const html = renderEmptyPage();
+
+    expect(html).toContain('id="library-screen" class="library-screen"');
+    expect(html).toContain('<h1 id="library-title">Course library</h1>');
+    expect(html).toContain('id="course-library-list" class="course-card-grid"');
+    expect(html).toContain('id="new-course"');
+    expect(html).toContain('id="import-course"');
+    expect(html).toContain('id="import-notice"');
+    expect(html).toContain('id="library-course-form"');
+    expect(html).toContain('name="title" type="text"');
+    expect(html).toContain('name="description"');
+    expect(html).toContain('name="harnessId"');
+    expect(html).toContain('name="attachedDir"');
+    expect(html).toContain('data-library-status="archived"');
+    expect(html).toContain('id="back-to-library"');
+  });
+
+  test("wires library endpoints, history, and live SSE refreshes", () => {
+    const html = renderEmptyPage();
+
+    expect(html).toContain('requestJson("/api/harnesses")');
+    expect(html).toContain('"/api/courses?status=" + encodeURIComponent(status)');
+    expect(html).toContain('requestJson("/api/courses", {');
+    expect(html).toContain('method: "POST"');
+    expect(html).toContain('method: "PATCH"');
+    expect(html).toContain('method: "DELETE"');
+    expect(html).toContain('body: JSON.stringify({ status: "active" })');
+    expect(html).toContain('history.pushState({ screen: "library" }');
+    expect(html).toContain('location.href = "/?course="');
+    expect(html).toContain('const libraryEvents = new EventSource("/api/events")');
+    expect(html).toContain('libraryEvents.addEventListener("courses"');
+    expect(html).toContain('libraryEvents.addEventListener("tool-write"');
+    expect(html).toContain('libraryEvents.addEventListener("message"');
+  });
+
   test("renders topic navigation in the header dropdown with mastery progress", () => {
     const topics: TopicNode[] = [
       {
