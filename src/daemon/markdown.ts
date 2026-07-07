@@ -1,4 +1,14 @@
-import { isValidDemoFileName, type GlossaryEntry } from "../course";
+import { basename } from "node:path";
+
+export type GlossaryEntry = Readonly<{
+  term: string;
+}>;
+
+const isValidDemoFileName = (fileName: string): boolean =>
+  fileName.length > ".html".length &&
+  fileName === basename(fileName) &&
+  !fileName.includes("\\") &&
+  fileName.endsWith(".html");
 
 export type MarkdownRenderOptions = Readonly<{
   glossary?: readonly GlossaryEntry[];

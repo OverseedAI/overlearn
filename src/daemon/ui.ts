@@ -1,14 +1,89 @@
-import {
-  latestMasteryForTopic,
-  type ActiveFeynmanCheck,
-  type DemoEntry,
-  type GlossaryEntry,
-  type MasteryEntry,
-  type TopicNode,
-  type TranscriptEntry,
-} from "../course";
 import type { LessonSnapshot, RenderedLesson } from "./lessons";
 import { renderDemoEmbed, renderMarkdown } from "./markdown";
+
+export type DemoEntry = Readonly<{
+  file: string;
+  title?: string;
+  addedAt: string;
+}>;
+
+export type GlossaryEntry = Readonly<{
+  term: string;
+  def: string;
+  lesson?: string;
+  addedAt: string;
+}>;
+
+export type MasteryEntry = Readonly<{
+  concept: string;
+  score: number;
+  gaps?: string;
+  at: string;
+}>;
+
+export type TopicNode = Readonly<{
+  path: string;
+  title: string;
+  lesson?: string;
+  enteredAt?: string;
+  current: boolean;
+  demos?: readonly DemoEntry[];
+  children: readonly TopicNode[];
+}>;
+
+export type ActiveFeynmanCheck = Readonly<{
+  concept: string;
+  prompt: string;
+  keyPoints: readonly string[];
+  issuedAt: string;
+  replaced?: Readonly<{
+    concept: string;
+    issuedAt: string;
+    replacedAt: string;
+  }>;
+}>;
+
+export type TranscriptEntry =
+  | Readonly<{
+      role: "learner" | "agent";
+      text: string;
+      at: string;
+      kind?: "text";
+    }>
+  | Readonly<{
+      role: "agent";
+      kind: "demo";
+      file: string;
+      title?: string;
+      at: string;
+    }>
+  | Readonly<{
+      role: "agent";
+      kind: "lesson";
+      lesson: string;
+      at: string;
+    }>
+  | Readonly<{
+      role: "agent";
+      kind: "feynman-check";
+      concept: string;
+      prompt: string;
+      at: string;
+    }>
+  | Readonly<{
+      role: "learner";
+      kind: "feynman-answer";
+      concept: string;
+      text: string;
+      at: string;
+    }>
+  | Readonly<{
+      role: "system";
+      kind: "tool-call";
+      text: string;
+      at: string;
+      tool: string;
+    }>;
 
 type RenderedTranscriptEntry = TranscriptEntry &
   Readonly<{
@@ -34,9 +109,44 @@ type HarnessUiOption = Readonly<{
 }>;
 
 type RenderPageOptions = Readonly<{
+  courseId?: number;
   orchestrated?: boolean;
   harnesses?: readonly HarnessUiOption[];
 }>;
+
+const topicConceptIds = (topic: TopicNode): readonly string[] => {
+  const slug = topic.path.split("/").at(-1) ?? topic.path;
+  return slug === topic.path ? [topic.path] : [topic.path, slug];
+};
+
+const compareMasteryRecency = (
+  left: MasteryEntry,
+  right: MasteryEntry,
+): number => {
+  const timeDelta = Date.parse(left.at) - Date.parse(right.at);
+  if (timeDelta !== 0 && !Number.isNaN(timeDelta)) {
+    return timeDelta;
+  }
+
+  return left.at.localeCompare(right.at);
+};
+
+const latestMasteryForTopic = (
+  topic: TopicNode,
+  scores: readonly MasteryEntry[],
+): MasteryEntry | undefined => {
+  const candidates = new Set(topicConceptIds(topic));
+
+  return scores.reduce<MasteryEntry | undefined>((match, entry) => {
+    if (!candidates.has(entry.concept)) {
+      return match;
+    }
+
+    return match === undefined || compareMasteryRecency(entry, match) > 0
+      ? entry
+      : match;
+  }, undefined);
+};
 
 const escapeHtml = (value: string): string =>
   value
@@ -73,6 +183,8 @@ const initialStatus = __STATUS__;
 const initialHasSeenWait = __HAS_SEEN_WAIT__;
 const initialOrchestrated = __ORCHESTRATED__;
 const initialHarnesses = __HARNESSES__;
+const courseId = __COURSE_ID__;
+const courseApiBase = "/api/courses/" + encodeURIComponent(String(courseId));
 const courseDisplayTitle = __COURSE_TITLE__;
 const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
 const enabledComposerLabel = "Message the agent…";
@@ -261,7 +373,8 @@ const refreshHarnesses = async (refresh = false) => {
     return;
   }
 
-  const response = await fetch("/api/harnesses" + (refresh ? "?refresh=1" : ""));
+  const harnessQuery = "?courseId=" + encodeURIComponent(String(courseId)) + (refresh ? "&refresh=1" : "");
+  const response = await fetch("/api/harnesses" + harnessQuery);
   if (!response.ok) {
     return;
   }
@@ -278,7 +391,7 @@ const selectHarness = async (id) => {
   harnessBusy = true;
   renderHarnessSelector();
 
-  const response = await fetch("/api/harness", {
+  const response = await fetch(courseApiBase + "/harness", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id }),
@@ -626,7 +739,7 @@ const applyCurrentTopicSelection = () => {
 const submitNav = async (path) => {
   applyStatus("agent-working");
 
-  const response = await fetch("/api/nav", {
+  const response = await fetch(courseApiBase + "/nav", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path }),
@@ -666,7 +779,7 @@ const selectLesson = (lessonId) => {
 };
 
 const openDemo = (file) => {
-  window.open("/demos/" + encodeURIComponent(file), "_blank", "noopener");
+  window.open(courseApiBase + "/demos/" + encodeURIComponent(file), "_blank", "noopener");
 };
 
 const createDemoLeaf = (demo) => {
@@ -1662,7 +1775,7 @@ const submitMessage = async () => {
   textarea.value = "";
   autosizeComposer();
 
-  const response = await fetch("/api/submit", {
+  const response = await fetch(courseApiBase + "/submit", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ text }),
@@ -1682,7 +1795,7 @@ const submitDoneLearning = async () => {
   setDoneConfirmOpen(false);
   applyStatus("wrapping-up", hasSeenWait);
 
-  const response = await fetch("/api/done", { method: "POST" });
+  const response = await fetch(courseApiBase + "/done", { method: "POST" });
 
   if (!response.ok) {
     const message = await response.text();
@@ -1700,7 +1813,7 @@ const submitFeynmanAnswer = async () => {
 
   applyStatus("agent-working");
 
-  const response = await fetch("/api/feynman-answer", {
+  const response = await fetch(courseApiBase + "/feynman-answer", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1958,8 +2071,18 @@ window.addEventListener("resize", () => {
 });
 
 const events = new EventSource("/api/events");
-events.addEventListener("status", (event) => {
+const payloadForThisCourse = (event) => {
   const payload = JSON.parse(event.data);
+  if (payload.courseId !== undefined && payload.courseId !== courseId) {
+    return undefined;
+  }
+
+  return payload;
+};
+
+events.addEventListener("status", (event) => {
+  const payload = payloadForThisCourse(event);
+  if (payload === undefined) return;
   applyStatus(payload.status, payload.hasSeenWait ?? hasSeenWait);
   if (payload.status === "agent-failed" && payload.message !== undefined) {
     statusLine.textContent = payload.message;
@@ -1971,7 +2094,8 @@ events.addEventListener("status", (event) => {
   }
 });
 events.addEventListener("harnesses", (event) => {
-  const payload = JSON.parse(event.data);
+  const payload = payloadForThisCourse(event);
+  if (payload === undefined) return;
   const nextHarnesses = Array.isArray(payload) ? payload : payload.harnesses;
   if (!Array.isArray(nextHarnesses)) {
     return;
@@ -1987,13 +2111,17 @@ events.addEventListener("harnesses", (event) => {
   renderHarnessSelector();
 });
 events.addEventListener("message", (event) => {
-  appendEntry(JSON.parse(event.data));
+  const payload = payloadForThisCourse(event);
+  if (payload !== undefined) appendEntry(payload.entry ?? payload);
 });
 events.addEventListener("lesson", (event) => {
-  applyLessonEvent(JSON.parse(event.data));
+  const payload = payloadForThisCourse(event);
+  if (payload !== undefined) applyLessonEvent(payload.event ?? payload);
 });
 events.addEventListener("glossary", (event) => {
-  glossary = [...JSON.parse(event.data).entries];
+  const payload = payloadForThisCourse(event);
+  if (payload === undefined) return;
+  glossary = [...payload.entries];
   renderGlossaryList();
 
   if (currentTermElement !== undefined) {
@@ -2001,7 +2129,8 @@ events.addEventListener("glossary", (event) => {
   }
 });
 events.addEventListener("topics", (event) => {
-  const payload = JSON.parse(event.data);
+  const payload = payloadForThisCourse(event);
+  if (payload === undefined) return;
   topics = [...payload.topics];
   unassignedDemos = [...(payload.unassignedDemos ?? [])];
   userPinnedTopic = false;
@@ -2009,11 +2138,14 @@ events.addEventListener("topics", (event) => {
   renderNavigation();
 });
 events.addEventListener("mastery", (event) => {
-  masteryScores = [...JSON.parse(event.data).entries];
+  const payload = payloadForThisCourse(event);
+  if (payload === undefined) return;
+  masteryScores = [...payload.entries];
   renderNavigation();
 });
 events.addEventListener("feynman", (event) => {
-  const payload = JSON.parse(event.data);
+  const payload = payloadForThisCourse(event);
+  if (payload === undefined) return;
   const previous = activeFeynman;
   activeFeynman = payload.activeCheck ?? undefined;
   if (activeFeynman !== undefined) {
@@ -2029,12 +2161,15 @@ events.addEventListener("feynman", (event) => {
   renderFeynmanPanel();
 });
 events.addEventListener("transcript", (event) => {
+  const payload = payloadForThisCourse(event);
+  if (payload === undefined) return;
   const stick = transcriptNearBottom();
-  transcriptEntries = [...JSON.parse(event.data).entries];
+  transcriptEntries = [...payload.entries];
   renderTranscript({ stick });
 });
 events.addEventListener("agent-stream", (event) => {
-  applyAgentStream(JSON.parse(event.data));
+  const payload = payloadForThisCourse(event);
+  if (payload !== undefined) applyAgentStream(payload);
 });
 events.addEventListener("error", () => {
   if (eventsClosedIntentionally || currentStatus === "session-ended") {
@@ -2115,18 +2250,29 @@ const renderTranscriptEntry = (
   glossary: readonly GlossaryEntry[],
   demoFiles: ReadonlySet<string>,
   lessons: LessonSnapshot,
+  courseId: number | undefined,
 ): RenderedTranscriptEntry => {
+  const demoOptions = {
+    demoFiles,
+    ...(courseId === undefined
+      ? {}
+      : {
+          resolveDemoHref: (file: string) =>
+            `/api/courses/${courseId}/demos/${encodeURIComponent(file)}`,
+        }),
+  };
+
   if (entry.kind === "demo") {
     return {
       ...entry,
-      html: renderDemoEmbed(entry.file, entry.title, { demoFiles }),
+      html: renderDemoEmbed(entry.file, entry.title, demoOptions),
     };
   }
 
   if (entry.kind === undefined || entry.kind === "text") {
     return {
       ...entry,
-      html: renderMarkdown(entry.text, { glossary, demoFiles }),
+      html: renderMarkdown(entry.text, { glossary, ...demoOptions }),
     };
   }
 
@@ -2150,13 +2296,13 @@ const renderTranscriptEntry = (
   if (entry.kind === "feynman-check") {
     return {
       ...entry,
-      html: renderMarkdown(entry.prompt, { glossary, demoFiles }),
+      html: renderMarkdown(entry.prompt, { glossary, ...demoOptions }),
     };
   }
 
   return {
     ...entry,
-    html: renderMarkdown(entry.text, { glossary, demoFiles }),
+    html: renderMarkdown(entry.text, { glossary, ...demoOptions }),
   };
 };
 
@@ -2165,9 +2311,10 @@ const renderTranscript = (
   glossary: readonly GlossaryEntry[],
   demoFiles: ReadonlySet<string>,
   lessons: LessonSnapshot,
+  courseId: number | undefined,
 ): readonly RenderedTranscriptEntry[] =>
   transcript.map((entry) =>
-    renderTranscriptEntry(entry, glossary, demoFiles, lessons),
+    renderTranscriptEntry(entry, glossary, demoFiles, lessons, courseId),
   );
 
 const renderLessonCardEntry = (
@@ -2718,6 +2865,7 @@ export const renderPage = (
     glossary,
     demoFiles,
     lessons,
+    options.courseId,
   );
   const script = clientScript
     .replace(
@@ -2737,6 +2885,7 @@ export const renderPage = (
     .replace("__STATUS__", escapeScriptJson(status))
     .replace("__HAS_SEEN_WAIT__", escapeScriptJson(hasSeenWait))
     .replace("__ORCHESTRATED__", escapeScriptJson(options.orchestrated === true))
+    .replace("__COURSE_ID__", escapeScriptJson(options.courseId ?? null))
     .replace("__HARNESSES__", escapeScriptJson(options.harnesses ?? []));
 
   return `<!doctype html>

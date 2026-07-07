@@ -3,8 +3,9 @@ import type { FSWatcher } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-import type { GlossaryEntry } from "../course";
 import { renderMarkdown } from "./markdown";
+
+type GlossaryEntry = Readonly<{ term: string }>;
 
 export type RenderedLesson = Readonly<{
   id: string;

@@ -8,8 +8,8 @@ Inputs:
 - `text` is the learner's explanation.
 - `keyPoints` are rubric anchors supplied when the check was emitted.
 
-Grade the answer against the key points and the actual mechanism taught in the
-lesson files. Be honest, not generous. A missed key point is a named gap, not a
+Grade the answer against the key points and the actual mechanism in the current
+course state. Be honest, not generous. A missed key point is a named gap, not a
 reason to round up.
 
 Score bands:
@@ -28,10 +28,10 @@ Your grading response must always include:
 
 1. What was right, in concrete terms.
 2. The specific gaps, by name. If no gap remains, say `Gaps: none`.
-3. The exact command to record the score:
-   `learn emit mastery --concept <id> --score <n> --gaps '<named gaps>'`
+3. The exact `record_mastery` score you will write: concept, score, and named
+   gaps.
 
-After writing the score command, continue teaching per the pedagogy module.
+After calling `record_mastery`, continue teaching per the pedagogy module.
 Re-teach the named gaps concretely before moving on. Use a worked example or a
 small contrast case; do not merely restate the definition.
 
@@ -39,5 +39,5 @@ If key points were provided, each key point must be either satisfied or named as
 a gap. If key points were not provided, infer the expected mechanism from the
 current lesson and topic state, then grade against that mechanism.
 
-Emit mastery before the next teaching turn. Do not advance to a new major topic
-until the gaps have been addressed or deliberately carried forward.
+Record mastery before the next teaching turn. Do not advance to a new major
+topic until the gaps have been addressed or deliberately carried forward.

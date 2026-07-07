@@ -4,11 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  ensureCourseScaffold,
-  readDaemonMetadata,
-  type TurnFile,
-} from "../../src/course";
+import { readDaemonMetadata } from "../../src/daemon";
 import {
   killDaemon,
   type ProcessResult,
@@ -26,9 +22,8 @@ type ContractRuntime = Readonly<{
 }>;
 
 type ContractEnvContext = Readonly<{
-  coursesDir: string;
+  dataDir: string;
   courseName: string;
-  courseDir: string;
   logPath: string;
 }>;
 
@@ -38,9 +33,8 @@ type ContractExtraEnv =
 
 export type StartedContractDaemon = Readonly<{
   runtime: ContractRuntimeName;
-  coursesDir: string;
+  dataDir: string;
   courseName: string;
-  courseDir: string;
   env: Record<string, string>;
   logPath: string;
   url: string;
@@ -55,7 +49,6 @@ export type StartedContractDaemon = Readonly<{
 
 type StartContractOptions = Readonly<{
   scenario?: string;
-  orchestrated?: boolean;
   extraEnv?: ContractExtraEnv;
 }>;
 
@@ -193,7 +186,6 @@ export const checkContractRuntime = (
 const contractEnv = (
   context: ContractEnvContext,
   scenario: string,
-  orchestrated: boolean,
   extra: Record<string, string>,
 ): Record<string, string> => {
   const env: Record<string, string> = {};
@@ -204,9 +196,8 @@ const contractEnv = (
     }
   }
 
-  env["OVERLEARN_COURSES_DIR"] = context.coursesDir;
+  env["OVERLEARN_DATA_DIR"] = context.dataDir;
   env["OVERLEARN_NO_BROWSER"] = "1";
-  env["OVERLEARN_ORCHESTRATED"] = orchestrated ? "1" : "0";
   env["OVERLEARN_HARNESS_CMD"] = JSON.stringify([
     process.execPath,
     fixturePath,
@@ -240,27 +231,21 @@ export const startContractDaemon = async (
   }
 
   const scenario = options.scenario ?? "normal";
-  const orchestrated = options.orchestrated ?? true;
-  const coursesDir = await mkdtemp(join(tmpdir(), "overlearn-contract-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "overlearn-contract-store-"));
   const courseName = `contract-${runtime.name}-${scenario}-${Date.now()}`;
-  const courseDir = join(coursesDir, courseName);
-  const logPath = join(coursesDir, "fake-acp.jsonl");
-  const context = { coursesDir, courseName, courseDir, logPath };
+  const logPath = join(dataDir, "fake-acp.jsonl");
+  const context = { dataDir, courseName, logPath };
   const extra =
     typeof options.extraEnv === "function"
       ? options.extraEnv(context)
       : (options.extraEnv ?? {});
-  const env = contractEnv(context, scenario, orchestrated, extra);
+  const env = contractEnv(context, scenario, extra);
 
-  if (runtime.startCommand === "resume") {
-    await ensureCourseScaffold(courseName, env);
-  }
-
-  const start = await runRuntimeCli(
-    runtime,
-    [runtime.startCommand, courseName],
-    env,
-  );
+  const startArgs =
+    runtime.startCommand === "resume"
+      ? [runtime.startCommand, courseName]
+      : [runtime.startCommand];
+  const start = await runRuntimeCli(runtime, startArgs, env);
   if (start.exitCode !== 0 || start.stderr.length > 0) {
     throw new Error(
       [
@@ -273,7 +258,7 @@ export const startContractDaemon = async (
     );
   }
 
-  const metadata = await readDaemonMetadata(courseDir);
+  const metadata = await readDaemonMetadata(env);
   if (metadata === undefined) {
     throw new Error("Daemon metadata was not written.");
   }
@@ -303,19 +288,18 @@ export const startContractDaemon = async (
       return;
     }
 
-    await waitForDaemonStopped(courseDir, metadata.pid);
+    await waitForDaemonStopped(dataDir, metadata.pid);
   };
 
   const cleanup = async (): Promise<void> => {
     await stop();
-    await rm(coursesDir, { force: true, recursive: true });
+    await rm(dataDir, { force: true, recursive: true });
   };
 
   return {
     runtime: runtime.name,
-    coursesDir,
+    dataDir,
     courseName,
-    courseDir,
     env,
     logPath,
     url,
@@ -326,6 +310,3 @@ export const startContractDaemon = async (
     cleanup,
   };
 };
-
-export const readTurnFile = async (path: string): Promise<TurnFile> =>
-  JSON.parse(await Bun.file(path).text()) as TurnFile;

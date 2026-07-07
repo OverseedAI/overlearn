@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readDaemonMetadata } from "../../src/course";
+import { readDaemonMetadata } from "../../src/daemon";
 
 export type ProcessResult = Readonly<{
   exitCode: number;
@@ -104,14 +104,14 @@ export const killDaemon = async (pid: number): Promise<void> => {
 };
 
 export const waitForDaemonStopped = async (
-  courseDir: string,
+  dataDir: string,
   pid: number,
 ): Promise<void> => {
   await withTimeout(
     (async () => {
       while (
         isPidAlive(pid) ||
-        (await readDaemonMetadata(courseDir)) !== undefined
+        (await readDaemonMetadata({ OVERLEARN_DATA_DIR: dataDir })) !== undefined
       ) {
         await sleep(25);
       }
@@ -222,11 +222,12 @@ export const harnessPayloadHasSelected = (
   );
 };
 
-export const submitMessage = async (
+export const submitCourseMessage = async (
   url: string,
+  courseId: number,
   text: string,
 ): Promise<void> => {
-  const response = await fetch(`${url}/api/submit`, {
+  const response = await fetch(`${url}/api/courses/${courseId}/submit`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ text }),
@@ -235,8 +236,13 @@ export const submitMessage = async (
   expect(response.status).toBe(200);
 };
 
-export const submitDone = async (url: string): Promise<void> => {
-  const response = await fetch(`${url}/api/done`, { method: "POST" });
+export const submitCourseDone = async (
+  url: string,
+  courseId: number,
+): Promise<void> => {
+  const response = await fetch(`${url}/api/courses/${courseId}/done`, {
+    method: "POST",
+  });
 
   expect(response.status).toBe(200);
 };
