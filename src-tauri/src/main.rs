@@ -210,12 +210,15 @@ fn start_app_daemon(app: &AppHandle) -> Result<RunningDaemon, String> {
 }
 
 fn pid_is_alive(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
-        Path::new("/proc").join(pid.to_string()).exists()
+        // Signal 0 probes for existence without delivering anything; EPERM
+        // still means the process exists.
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let _ = pid;
         true
@@ -296,7 +299,48 @@ fn parse_http_response(response: &str) -> Result<(u16, String), String> {
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| "Invalid HTTP status from daemon.".to_string())?;
 
-    Ok((status, body.to_string()))
+    let chunked = head.lines().skip(1).any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("transfer-encoding")
+                && value.trim().eq_ignore_ascii_case("chunked")
+        })
+    });
+    let body = if chunked {
+        decode_chunked_body(body.as_bytes())?
+    } else {
+        body.to_string()
+    };
+
+    Ok((status, body))
+}
+
+// Bun's HTTP server responds with Transfer-Encoding: chunked, so the body
+// arrives as hex-size-prefixed chunks rather than a plain payload.
+fn decode_chunked_body(mut rest: &[u8]) -> Result<String, String> {
+    let malformed = || "Malformed chunked HTTP body from daemon.".to_string();
+    let mut decoded: Vec<u8> = Vec::new();
+
+    loop {
+        let line_end = rest
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or_else(malformed)?;
+        let size_line = std::str::from_utf8(&rest[..line_end]).map_err(|_| malformed())?;
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_hex, 16).map_err(|_| malformed())?;
+        rest = &rest[line_end + 2..];
+
+        if size == 0 {
+            break;
+        }
+        if rest.len() < size + 2 || &rest[size..size + 2] != b"\r\n" {
+            return Err(malformed());
+        }
+        decoded.extend_from_slice(&rest[..size]);
+        rest = &rest[size + 2..];
+    }
+
+    String::from_utf8(decoded).map_err(|_| malformed())
 }
 
 fn stop_daemon(state: &DesktopState) -> Result<(), String> {
@@ -594,4 +638,44 @@ fn main() {
         .expect("error while building Tauri application");
 
     app.run(handle_run_event);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_http_response;
+
+    #[test]
+    fn parses_content_length_response() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}";
+        assert_eq!(
+            parse_http_response(raw).unwrap(),
+            (200, "{\"ok\":true}".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_chunked_response() {
+        // The exact wire shape Bun's server sends for /api/health.
+        let raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\nb\r\n{\"ok\":true}\r\n0\r\n\r\n";
+        assert_eq!(
+            parse_http_response(raw).unwrap(),
+            (200, "{\"ok\":true}".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_multi_chunk_response() {
+        let raw =
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\n{\"ok\":\r\n5\r\ntrue}\r\n0\r\n\r\n";
+        assert_eq!(
+            parse_http_response(raw).unwrap(),
+            (200, "{\"ok\":true}".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_chunked_response() {
+        let raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nff\r\n{\"ok\":";
+        assert!(parse_http_response(raw).is_err());
+    }
 }
