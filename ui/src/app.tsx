@@ -3,6 +3,7 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AppSidebar } from "@/components/app-sidebar";
+import { AppScaleProvider } from "@/lib/app-scale";
 import { CourseStoreProvider } from "@/lib/course-store";
 import { ProfileProvider, useProfile } from "@/lib/profile";
 import { useRoute, type Route } from "@/lib/router";
@@ -83,13 +84,15 @@ function ThemedToaster() {
 
 export function App() {
   return (
-    <ThemeProvider>
-      <TooltipProvider delayDuration={300}>
-        <ProfileProvider>
-          <AppContent />
-          <ThemedToaster />
-        </ProfileProvider>
-      </TooltipProvider>
-    </ThemeProvider>
+    <AppScaleProvider>
+      <ThemeProvider>
+        <TooltipProvider delayDuration={300}>
+          <ProfileProvider>
+            <AppContent />
+            <ThemedToaster />
+          </ProfileProvider>
+        </TooltipProvider>
+      </ThemeProvider>
+    </AppScaleProvider>
   );
 }
