@@ -105,6 +105,7 @@ type AcpSessionState = {
   rpc: JsonRpcClient;
   acpSessionId: string;
   permissionPolicy: PermissionPolicy;
+  mcpToolCallResources: Map<string, string>;
   currentTurn?: TurnState;
   ended: boolean;
 };
@@ -116,7 +117,7 @@ type JsonRpcHandlers = Readonly<{
   onExit: (exitCode: number) => void;
 }>;
 
-const defaultRequestTimeoutMs = 2_000;
+const defaultRequestTimeoutMs = 30_000;
 const cancelSafetyTimeoutMs = 500;
 const processExitTimeoutMs = 1_000;
 const sleep = async (milliseconds: number): Promise<void> => {
@@ -954,23 +955,50 @@ const rawInputPath = (value: unknown): string | undefined => {
 const normalizeAcpPermissionRequest = (
   params: unknown,
   id: JsonRpcId,
+  state: AcpSessionState,
 ): PermissionRequest => {
   const record = isRecord(params) ? params : {};
   const toolCall = isRecord(record["toolCall"]) ? record["toolCall"] : {};
   const metadata = isJsonObject(toolCall) ? toolCall : undefined;
   const title = optionalString(toolCall, "title");
+  const toolCallId = optionalString(toolCall, "toolCallId");
+  const isMcpApproval =
+    isRecord(record["_meta"]) && record["_meta"]["is_mcp_tool_approval"] === true;
+  const mcpResource =
+    toolCallId === undefined ? undefined : state.mcpToolCallResources.get(toolCallId);
   const resource =
+    mcpResource ??
     firstLocationPath(toolCall["locations"]) ??
     rawInputPath(toolCall["rawInput"]) ??
     title;
 
   return {
     id: String(id),
-    action: optionalString(toolCall, "kind") ?? title ?? "unknown",
+    action: isMcpApproval
+      ? "mcp"
+      : (optionalString(toolCall, "kind") ?? title ?? "unknown"),
     ...(resource === undefined ? {} : { resource }),
     ...(title === undefined ? {} : { description: title }),
     ...(metadata === undefined ? {} : { metadata }),
   };
+};
+
+const rememberMcpToolCall = (
+  state: AcpSessionState,
+  event: ToolCallAgentEvent,
+): void => {
+  if (!isRecord(event.input)) {
+    return;
+  }
+
+  const server = optionalString(event.input, "server");
+  const tool = optionalString(event.input, "tool");
+
+  if (server === undefined || tool === undefined) {
+    return;
+  }
+
+  state.mcpToolCallResources.set(event.id, `${server}.${tool}`);
 };
 
 const permissionOptions = (params: unknown): readonly UnknownRecord[] => {
@@ -1026,7 +1054,7 @@ const handlePermissionRequest = async (
   params: unknown,
   id: JsonRpcId,
 ): Promise<void> => {
-  const request = normalizeAcpPermissionRequest(params, id);
+  const request = normalizeAcpPermissionRequest(params, id, state);
   const decision = evaluatePermissionRequest(request, state.permissionPolicy);
   const optionId = choosePermissionOption(
     permissionOptions(params),
@@ -1122,6 +1150,10 @@ const handleNotification = (
       decision,
     });
     return;
+  }
+
+  if (event.type === "tool-call") {
+    rememberMcpToolCall(state, event);
   }
 
   pushTurnEvent(state, event);
@@ -1345,6 +1377,7 @@ export const createAcpHarnessAdapter = (
           rpc,
           acpSessionId: sessionId,
           permissionPolicy: config.permissionPolicy ?? defaultPermissionPolicy,
+          mcpToolCallResources: new Map(),
           ended: false,
         };
         sessions.set(ref, state);

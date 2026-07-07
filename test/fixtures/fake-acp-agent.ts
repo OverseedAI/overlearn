@@ -10,7 +10,9 @@ import {
 type Scenario =
   | "normal"
   | "permission"
+  | "mcp-permission"
   | "never"
+  | "slow-initialize"
   | "crash-once"
   | "crash-always"
   | "malformed";
@@ -430,6 +432,76 @@ const runPermissionTurn = async (promptId: JsonRpcId): Promise<void> => {
   finishPrompt(promptId, "end_turn");
 };
 
+const runMcpPermissionTurn = async (promptId: JsonRpcId): Promise<void> => {
+  const toolCallId = "mcp-call-1";
+
+  await sleep(5);
+  update({
+    sessionUpdate: "tool_call",
+    toolCallId,
+    title: "mcp.overlearn-teaching.get_course_state",
+    kind: "execute",
+    status: "pending",
+    rawInput: {
+      server: "overlearn-teaching",
+      tool: "get_course_state",
+      arguments: {
+        transcriptLimit: 10,
+      },
+    },
+  });
+
+  const id = nextServerRequestId;
+  nextServerRequestId += 1;
+
+  send({
+    jsonrpc: "2.0",
+    id,
+    method: "session/request_permission",
+    params: {
+      sessionId,
+      toolCall: {
+        toolCallId,
+        kind: "execute",
+        status: "pending",
+      },
+      _meta: {
+        is_mcp_tool_approval: true,
+      },
+      options: [
+        {
+          optionId: "allow_once",
+          name: "Allow",
+          kind: "allow_once",
+        },
+        {
+          optionId: "decline",
+          name: "Decline",
+          kind: "reject_once",
+        },
+      ],
+    },
+  });
+
+  const response = await new Promise<Readonly<{ selectedOptionId?: string }>>(
+    (resolve) => {
+      pendingPermission = resolve;
+    },
+  );
+
+  await sleep(5);
+  update(
+    textChunk(
+      "agent_message_chunk",
+      response.selectedOptionId === "allow_once"
+        ? "mcp permission granted by fake"
+        : "mcp permission denied by fake",
+    ),
+  );
+  await sleep(5);
+  finishPrompt(promptId, "end_turn");
+};
+
 const runNeverTurn = async (): Promise<void> => {
   await sleep(5);
   update(textChunk("agent_thought_chunk", "waiting forever"));
@@ -465,6 +537,11 @@ const runTurn = (promptId: JsonRpcId): void => {
 
   if (scenario === "permission") {
     void runPermissionTurn(promptId);
+    return;
+  }
+
+  if (scenario === "mcp-permission") {
+    void runMcpPermissionTurn(promptId);
     return;
   }
 
@@ -519,6 +596,9 @@ for await (const line of input) {
         CLAUDECODE: process.env["CLAUDECODE"] ?? null,
       },
     });
+    if (scenario === "slow-initialize") {
+      await sleep(2_100);
+    }
     respond(message.id, {
       protocolVersion: 1,
       agentCapabilities: {

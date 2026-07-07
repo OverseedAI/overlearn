@@ -10,7 +10,10 @@ import type {
   SessionRef,
 } from "../adapter/types";
 import { assembleInstructionModules, formatInstructions } from "../instructions";
-import { teachingMcpServerName } from "../mcp/teaching";
+import {
+  teachingMcpServerName,
+  type TeachingToolName,
+} from "../mcp/teaching";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -271,6 +274,23 @@ const permissionRules = (
     resources.map((resource) => ({ action, resource, reason })),
   );
 
+const teachingMcpToolNames: readonly TeachingToolName[] = [
+  "get_course_state",
+  "upsert_topic",
+  "emit_demo",
+  "record_mastery",
+  "feynman_check",
+  "upsert_glossary_entry",
+  "propose_course_plan",
+];
+
+const teachingMcpPermissionRules = (): readonly PermissionRule[] =>
+  teachingMcpToolNames.map((tool) => ({
+    action: "mcp",
+    resource: `${teachingMcpServerName}.${tool}`,
+    reason: "Overlearn teaching MCP tools are pre-approved for this learning session.",
+  }));
+
 export const buildCoursePermissionPolicy = (
   attachedDir?: string | null,
 ): PermissionPolicy => {
@@ -280,11 +300,14 @@ export const buildCoursePermissionPolicy = (
       : [`${resolve(attachedDir)}/**`];
 
   return {
-    allow: permissionRules(
-      ["read", "search"],
-      resources,
-      "Attached directory reads are pre-approved for this learning session.",
-    ),
+    allow: [
+      ...teachingMcpPermissionRules(),
+      ...permissionRules(
+        ["read", "search"],
+        resources,
+        "Attached directory reads are pre-approved for this learning session.",
+      ),
+    ],
     defaultDecision: "deny",
     defaultReason: "Permission was not pre-approved by the course daemon.",
   };

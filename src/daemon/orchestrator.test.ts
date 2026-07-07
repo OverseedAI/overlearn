@@ -120,7 +120,13 @@ describe("daemon turn orchestration helpers", () => {
     const policy = buildCoursePermissionPolicy("/repos/example");
 
     expect(policy.defaultDecision).toBe("deny");
-    expect(policy.allow).toEqual([
+    expect(policy.allow).toEqual(expect.arrayContaining([
+      {
+        action: "mcp",
+        resource: `${teachingMcpServerName}.get_course_state`,
+        reason:
+          "Overlearn teaching MCP tools are pre-approved for this learning session.",
+      },
       {
         action: "read",
         resource: "/repos/example/**",
@@ -133,15 +139,32 @@ describe("daemon turn orchestration helpers", () => {
         reason:
           "Attached directory reads are pre-approved for this learning session.",
       },
-    ]);
+    ]));
+    expect(policy.allow).toHaveLength(9);
   });
 
-  test("default permission policy denies everything without an attached dir", () => {
-    expect(buildCoursePermissionPolicy(null)).toEqual({
-      allow: [],
+  test("default permission policy only allows Overlearn MCP without an attached dir", () => {
+    const policy = buildCoursePermissionPolicy(null);
+
+    expect(policy).toEqual({
+      allow: expect.arrayContaining([
+        {
+          action: "mcp",
+          resource: `${teachingMcpServerName}.get_course_state`,
+          reason:
+            "Overlearn teaching MCP tools are pre-approved for this learning session.",
+        },
+        {
+          action: "mcp",
+          resource: `${teachingMcpServerName}.propose_course_plan`,
+          reason:
+            "Overlearn teaching MCP tools are pre-approved for this learning session.",
+        },
+      ]),
       defaultDecision: "deny",
       defaultReason: "Permission was not pre-approved by the course daemon.",
     });
+    expect(policy.allow).toHaveLength(7);
   });
 
   test("parses harness command override strings and JSON arrays", () => {

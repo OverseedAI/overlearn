@@ -25,7 +25,9 @@ import type {
 type FakeScenario =
   | "normal"
   | "permission"
+  | "mcp-permission"
   | "never"
+  | "slow-initialize"
   | "crash-always"
   | "malformed";
 type FakeEnv = Readonly<Record<string, string | undefined>>;
@@ -308,6 +310,21 @@ describe("ACP harness adapter sessions", () => {
     });
   });
 
+  test("allows slow real-world ACP startup with the default request timeout", async () => {
+    const cwd = await createTempDir();
+    tempDirs.push(cwd);
+
+    const adapter = createAcpHarnessAdapter(fakeDefinition("slow-initialize"));
+    const session = await withTimeout(
+      adapter.newSession(cwd),
+      5_000,
+      "slow initialize session",
+    );
+
+    liveSessions.push({ adapter, session });
+    expect(session.id).toBe("fake-session");
+  });
+
   test("fake agent calls a configured HTTP MCP tool", async () => {
     const calls: McpJsonObject[] = [];
     const definition: McpServerDefinition = {
@@ -494,6 +511,65 @@ describe("ACP harness adapter sessions", () => {
       type: "text",
       text: "permission granted by fake",
     });
+  });
+
+  test("answers correlated MCP tool approvals from the session policy", async () => {
+    const { adapter, session } = await createFakeSession("mcp-permission", {
+      permissionPolicy: {
+        allow: [
+          {
+            action: "mcp",
+            resource: "overlearn-teaching.get_course_state",
+            reason: "Overlearn teaching MCP reads are pre-approved.",
+          },
+        ],
+      },
+    });
+    const events = await collectEvents(
+      adapter.prompt(session, "read course state"),
+      "mcp permission events",
+    );
+
+    expect(events).toEqual([
+      {
+        type: "tool-call",
+        id: "mcp-call-1",
+        name: "mcp.overlearn-teaching.get_course_state",
+        status: "started",
+        input: {
+          server: "overlearn-teaching",
+          tool: "get_course_state",
+          arguments: {
+            transcriptLimit: 10,
+          },
+        },
+      },
+      {
+        type: "permission-request",
+        request: {
+          id: "1",
+          action: "mcp",
+          resource: "overlearn-teaching.get_course_state",
+          metadata: {
+            toolCallId: "mcp-call-1",
+            kind: "execute",
+            status: "pending",
+          },
+        },
+        decision: {
+          allowed: true,
+          reason: "Overlearn teaching MCP reads are pre-approved.",
+        },
+      },
+      {
+        type: "text",
+        text: "mcp permission granted by fake",
+      },
+      {
+        type: "done",
+        reason: "complete",
+      },
+    ]);
   });
 
   test("denies permissions by default when no allowlist rule matches", () => {
