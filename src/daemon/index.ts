@@ -54,6 +54,11 @@ import {
   type TranscriptEntry as StoreTranscriptEntry,
 } from "../store";
 import {
+  exportCourseBundle,
+  importCoursePath,
+  type ExportCourseBundleOptions,
+} from "../store/bundle";
+import {
   createTeachingMcpHttpHandler,
   teachingTokenFromRequestPath,
   type TeachingWriteEvent,
@@ -585,6 +590,22 @@ const optionalRecordField = (
   const value = record[key];
   if (!isRecord(value)) {
     throw new Error(`${key} must be an object.`);
+  }
+
+  return value;
+};
+
+const optionalBooleanField = (
+  record: Record<string, unknown>,
+  key: string,
+): boolean | undefined => {
+  if (!Object.hasOwn(record, key)) {
+    return undefined;
+  }
+
+  const value = record[key];
+  if (typeof value !== "boolean") {
+    throw new Error(`${key} must be a boolean.`);
   }
 
   return value;
@@ -1855,6 +1876,46 @@ export const runDaemon = async (
     return jsonResponse({ courseId: course.id });
   };
 
+  const handleImportApi = async (request: Request): Promise<Response> => {
+    if (request.method !== "POST") {
+      return emptyResponse(405);
+    }
+
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      return textResponse("Import body must be an object.", 400);
+    }
+
+    try {
+      const result = await importCoursePath(store, requiredStringField(body, "path"));
+      sseHub.broadcast("courses", coursesPayload());
+      broadcastCourseCollections(result.course.id);
+
+      return jsonResponse({
+        courseId: result.course.id,
+        warnings: result.warnings,
+      });
+    } catch (error) {
+      return textResponse(
+        error instanceof Error ? error.message : "Import failed.",
+        400,
+      );
+    }
+  };
+
+  const parseExportOptions = async (
+    request: Request,
+  ): Promise<ExportCourseBundleOptions> => {
+    const body = await readJsonBody(request);
+    if (!isRecord(body)) {
+      throw new Error("Export body must be an object.");
+    }
+
+    return {
+      includeTranscript: optionalBooleanField(body, "includeTranscript") ?? false,
+    };
+  };
+
   const handleHarnessLoginApi = (harnessId: string): Response => {
     const definition = getHarnessAdapterDefinition(harnessId as HarnessAdapterId);
     if (definition === undefined) {
@@ -2035,6 +2096,31 @@ export const runDaemon = async (
       return await handleAcceptPlan(request, course);
     }
 
+    if (action === "export" && extra === undefined) {
+      if (request.method !== "POST") {
+        return emptyResponse(405);
+      }
+
+      let options: ExportCourseBundleOptions;
+      try {
+        options = await parseExportOptions(request);
+      } catch (error) {
+        return textResponse(
+          error instanceof Error ? error.message : "Invalid export request.",
+          400,
+        );
+      }
+
+      try {
+        return jsonResponse(await exportCourseBundle(store, courseId, options));
+      } catch (error) {
+        return textResponse(
+          error instanceof Error ? error.message : "Export failed.",
+          500,
+        );
+      }
+    }
+
     if (action === "nav" && extra === undefined && request.method === "POST") {
       try {
         return runCourseTurn(course, [await parseNav(request, courseId)], "teaching");
@@ -2205,6 +2291,10 @@ export const runDaemon = async (
 
     if (requestUrl.pathname === "/api/tutorial") {
       return handleTutorialApi(request);
+    }
+
+    if (requestUrl.pathname === "/api/import") {
+      return await handleImportApi(request);
     }
 
     const harnessLoginId = routeHarnessLoginRequest(requestUrl.pathname);

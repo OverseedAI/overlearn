@@ -229,7 +229,14 @@ const libraryClientScript = String.raw`
   const newCourseButton = document.querySelector("#new-course");
   const brainstormCourseButton = document.querySelector("#brainstorm-course");
   const importCourseButton = document.querySelector("#import-course");
-  const importNotice = document.querySelector("#import-notice");
+  const importPanel = document.querySelector("#library-import-panel");
+  const importForm = document.querySelector("#library-import-form");
+  const importPathInput = document.querySelector("#library-import-path-input");
+  const importSubmitButton = document.querySelector("#library-import-submit");
+  const importCancelButton = document.querySelector("#library-cancel-import");
+  const importStatus = document.querySelector("#library-import-status");
+  const importWarnings = document.querySelector("#library-import-warnings");
+  const exportTranscriptInput = document.querySelector("#library-export-include-transcript");
   const formPanel = document.querySelector("#library-form-panel");
   const formTitle = document.querySelector("#library-form-title");
   const courseForm = document.querySelector("#library-course-form");
@@ -269,6 +276,12 @@ const libraryClientScript = String.raw`
     libraryScreen === null ||
     libraryList === null ||
     libraryStatusText === null ||
+    importPanel === null ||
+    importForm === null ||
+    importPathInput === null ||
+    importSubmitButton === null ||
+    importStatus === null ||
+    importWarnings === null ||
     courseForm === null ||
     titleInput === null ||
     descriptionInput === null ||
@@ -312,11 +325,14 @@ const libraryClientScript = String.raw`
   let libraryError = undefined;
   let draftsError = undefined;
   let formBusy = false;
+  let importBusy = false;
   let ideationBusy = false;
   let wizardBusy = false;
   let loadedStatuses = new Set();
   let draftsLoaded = false;
   const refreshTimers = new Map();
+  const exportingCourseIds = new Set();
+  const courseExportResults = new Map();
 
   const isRecord = (value) =>
     value !== null && typeof value === "object" && !Array.isArray(value);
@@ -864,7 +880,47 @@ const libraryClientScript = String.raw`
     location.href = "/?course=" + encodeURIComponent(String(id)) + "#course";
   };
 
+  const renderImportWarnings = (warnings) => {
+    importWarnings.replaceChildren();
+    const entries = Array.isArray(warnings)
+      ? warnings.filter((warning) => typeof warning === "string" && warning.length > 0)
+      : [];
+    importWarnings.hidden = entries.length === 0;
+    if (entries.length === 0) {
+      return;
+    }
+
+    const list = document.createElement("ul");
+    list.className = "library-warning-list";
+    list.setAttribute("role", "list");
+    for (const warning of entries) {
+      const item = document.createElement("li");
+      item.textContent = warning;
+      list.append(item);
+    }
+
+    importWarnings.append(list);
+  };
+
+  const closeImportPanel = () => {
+    importPanel.hidden = true;
+    importStatus.hidden = true;
+    renderImportWarnings([]);
+    importForm.reset();
+  };
+
+  const openImportPanel = () => {
+    closeCourseForm();
+    closeIdeationPanel();
+    closeWizard();
+    importPanel.hidden = false;
+    importStatus.hidden = true;
+    renderImportWarnings([]);
+    importPathInput.focus();
+  };
+
   const openCourseForm = (mode, course) => {
+    closeImportPanel();
     closeIdeationPanel();
     closeWizard();
     editingCourseId = mode === "edit" ? course?.id : undefined;
@@ -894,6 +950,89 @@ const libraryClientScript = String.raw`
     formPanel.hidden = true;
     formStatus.hidden = true;
     courseForm.reset();
+  };
+
+  const createExportResult = (courseId) => {
+    const result = courseExportResults.get(String(courseId));
+    if (!isRecord(result)) {
+      return undefined;
+    }
+
+    const panel = document.createElement("div");
+    panel.className = "course-export-result";
+
+    if (typeof result.path === "string") {
+      const pathRow = document.createElement("div");
+      pathRow.className = "course-export-path-row";
+
+      const code = document.createElement("code");
+      code.dataset.courseExportPath = "true";
+      code.textContent = result.path;
+
+      const status = document.createElement("p");
+      status.className = "library-form-status";
+      status.setAttribute("aria-live", "polite");
+
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "library-button secondary";
+      copy.textContent = "Copy";
+      copy.addEventListener("click", () => {
+        void copyText(result.path, status);
+      });
+
+      pathRow.append(code, copy);
+      panel.append(pathRow, status);
+      return panel;
+    }
+
+    const error = document.createElement("p");
+    error.className = "library-form-status";
+    error.textContent =
+      typeof result.error === "string" ? result.error : "Export failed.";
+    panel.append(error);
+    return panel;
+  };
+
+  const exportCourse = async (course) => {
+    const id = courseIdNumber(course?.id);
+    if (id === undefined) {
+      return;
+    }
+
+    const key = String(id);
+    if (exportingCourseIds.has(key)) {
+      return;
+    }
+
+    exportingCourseIds.add(key);
+    courseExportResults.delete(key);
+    renderLibrary();
+
+    try {
+      const payload = await requestJson(
+        "/api/courses/" + encodeURIComponent(key) + "/export",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            includeTranscript: exportTranscriptInput?.checked === true,
+          }),
+        },
+      );
+      if (typeof payload?.path !== "string") {
+        throw new Error("Export did not return a path.");
+      }
+
+      courseExportResults.set(key, { path: payload.path });
+    } catch (error) {
+      courseExportResults.set(key, {
+        error: error instanceof Error ? error.message : "Export failed.",
+      });
+    } finally {
+      exportingCourseIds.delete(key);
+      renderLibrary();
+    }
   };
 
   const createCourseCard = (course) => {
@@ -950,6 +1089,17 @@ const libraryClientScript = String.raw`
     editButton.addEventListener("click", () => openCourseForm("edit", course));
     actions.append(editButton);
 
+    const exportButton = document.createElement("button");
+    exportButton.type = "button";
+    exportButton.className = "library-button secondary";
+    exportButton.textContent =
+      id !== undefined && exportingCourseIds.has(String(id)) ? "Exporting..." : "Export";
+    exportButton.disabled = id === undefined || exportingCourseIds.has(String(id));
+    exportButton.addEventListener("click", () => {
+      void exportCourse(course);
+    });
+    actions.append(exportButton);
+
     if (libraryStatus === "archived") {
       const unarchiveButton = document.createElement("button");
       unarchiveButton.type = "button";
@@ -971,6 +1121,11 @@ const libraryClientScript = String.raw`
     }
 
     card.append(header, stats, actions);
+    const exportResult = id === undefined ? undefined : createExportResult(id);
+    if (exportResult !== undefined) {
+      card.append(exportResult);
+    }
+
     return card;
   };
 
@@ -1254,6 +1409,7 @@ const libraryClientScript = String.raw`
 
   const openIdeationPanel = () => {
     closeCourseForm();
+    closeImportPanel();
     wizardPanel.hidden = true;
     ideationPanel.hidden = false;
     ideationStatus.hidden = true;
@@ -1277,6 +1433,7 @@ const libraryClientScript = String.raw`
 
     closeCourseForm();
     closeIdeationPanel();
+    closeImportPanel();
     wizardCourseId = id;
     wizardPlanDirty = false;
     wizardRenderedPlanKey = undefined;
@@ -1565,6 +1722,7 @@ const libraryClientScript = String.raw`
     libraryStatus = status;
     closeCourseForm();
     closeIdeationPanel();
+    closeImportPanel();
     closeWizard();
     void loadLibraryCourses(status);
   };
@@ -1759,6 +1917,45 @@ const libraryClientScript = String.raw`
     setLibraryVisible(false);
   };
 
+  const submitImport = async () => {
+    const path = importPathInput.value.trim();
+    if (path.length === 0 || importBusy) {
+      return;
+    }
+
+    importBusy = true;
+    importSubmitButton.disabled = true;
+    importStatus.hidden = false;
+    importStatus.textContent = "Importing course...";
+    renderImportWarnings([]);
+
+    try {
+      const payload = await requestJson("/api/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const importedId = courseIdNumber(payload?.courseId);
+      renderImportWarnings(payload?.warnings);
+      importStatus.textContent =
+        importedId === undefined
+          ? "Import complete."
+          : "Imported course " + String(importedId) + ".";
+
+      if (importedId !== undefined) {
+        await refreshLibraryCourse(importedId, { render: false }).catch(() => undefined);
+      }
+      await loadLibraryCourses(libraryStatus);
+      void loadDraftCourses();
+    } catch (error) {
+      importStatus.textContent =
+        error instanceof Error ? error.message : "Import failed.";
+    } finally {
+      importBusy = false;
+      importSubmitButton.disabled = false;
+    }
+  };
+
   const submitCourseForm = async () => {
     const title = titleInput.value.trim();
     if (title.length === 0 || formBusy) {
@@ -1880,10 +2077,8 @@ const libraryClientScript = String.raw`
 
   brainstormCourseButton?.addEventListener("click", openIdeationPanel);
 
-  importCourseButton?.addEventListener("click", () => {
-    importNotice.hidden = false;
-    importNotice.textContent = "Import is coming soon.";
-  });
+  importCourseButton?.addEventListener("click", openImportPanel);
+  importCancelButton?.addEventListener("click", closeImportPanel);
 
   onboardingWelcomeContinue?.addEventListener("click", () => {
     void (async () => {
@@ -2016,6 +2211,11 @@ const libraryClientScript = String.raw`
   courseForm.addEventListener("submit", (event) => {
     event.preventDefault();
     void submitCourseForm();
+  });
+
+  importForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitImport();
   });
 
   ideationForm.addEventListener("submit", (event) => {
@@ -5222,6 +5422,23 @@ export const renderPage = (
       gap: 0.5rem;
     }
 
+    .library-checkbox {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-height: 2.35rem;
+      color: var(--secondary);
+      font-size: 0.9rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .library-checkbox input {
+      width: 1rem;
+      height: 1rem;
+      accent-color: var(--accent-strong);
+    }
+
     .library-button,
     .back-to-library,
     .library-tab {
@@ -5291,6 +5508,15 @@ export const renderPage = (
       padding: 0.75rem 0.85rem;
     }
 
+    .library-warning-list {
+      display: grid;
+      gap: 0.25rem;
+      margin: 0;
+      padding-left: 1.1rem;
+      color: var(--warn-text);
+      line-height: 1.45;
+    }
+
     .library-form-panel {
       display: grid;
       gap: 0.85rem;
@@ -5349,6 +5575,12 @@ export const renderPage = (
 
     .library-form-actions {
       grid-column: 2;
+    }
+
+    .library-form-status-group {
+      display: grid;
+      gap: 0.35rem;
+      min-width: min(100%, 18rem);
     }
 
     .library-section-heading {
@@ -5522,6 +5754,31 @@ export const renderPage = (
       display: grid;
       gap: 0.9rem;
       padding: 1rem;
+    }
+
+    .course-export-result {
+      display: grid;
+      gap: 0.45rem;
+      border-top: 1px solid var(--border);
+      padding-top: 0.8rem;
+    }
+
+    .course-export-path-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .course-export-path-row code {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--body-text);
+      padding: 0.55rem 0.65rem;
+      font-size: 0.86rem;
+      white-space: nowrap;
     }
 
     .course-card-header {
@@ -7538,13 +7795,18 @@ export const renderPage = (
         flex: 1 1 auto;
       }
 
+      .library-checkbox {
+        flex: 1 1 100%;
+      }
+
       .library-course-form,
       .settings-form {
         grid-template-columns: 1fr;
       }
 
       .course-wizard-layout,
-      .plan-topic-row {
+      .plan-topic-row,
+      .course-export-path-row {
         grid-template-columns: 1fr;
       }
 
@@ -7775,10 +8037,31 @@ export const renderPage = (
           <button id="new-course" class="library-button primary" type="button">New course</button>
           <button id="brainstorm-course" class="library-button secondary" type="button">Brainstorm with your agent</button>
           <button id="import-course" class="library-button secondary" type="button">Import</button>
+          <label class="library-checkbox" for="library-export-include-transcript">
+            <input id="library-export-include-transcript" name="includeTranscript" type="checkbox">
+            <span>Include transcript in exports</span>
+          </label>
         </div>
       </header>
 
-      <p id="import-notice" class="library-notice" hidden></p>
+      <section id="library-import-panel" class="library-form-panel" aria-labelledby="library-import-title" hidden>
+        <div class="library-form-heading">
+          <h2 id="library-import-title">Import course</h2>
+          <button id="library-cancel-import" class="library-button ghost" type="button">Cancel</button>
+        </div>
+        <form id="library-import-form" class="library-course-form">
+          <label for="library-import-path-input">Folder path</label>
+          <input id="library-import-path-input" name="path" type="text" autocomplete="off" placeholder="/home/hal/courses/example" required>
+
+          <div class="library-form-actions">
+            <button id="library-import-submit" class="library-button primary" type="submit">Import course</button>
+            <div class="library-form-status-group">
+              <p id="library-import-status" class="library-form-status" aria-live="polite" hidden></p>
+              <div id="library-import-warnings" class="library-form-status" aria-live="polite" hidden></div>
+            </div>
+          </div>
+        </form>
+      </section>
 
       <section id="library-form-panel" class="library-form-panel" aria-labelledby="library-form-title" hidden>
         <div class="library-form-heading">
