@@ -56,7 +56,11 @@ describe("renderPage", () => {
     expect(html).toContain('id="new-course"');
     expect(html).toContain('id="brainstorm-course"');
     expect(html).toContain('id="import-course"');
-    expect(html).toContain('id="import-notice"');
+    expect(html).toContain('id="library-export-include-transcript"');
+    expect(html).toContain('id="library-import-panel"');
+    expect(html).toContain('id="library-import-form"');
+    expect(html).toContain('name="path" type="text"');
+    expect(html).toContain('id="library-import-warnings"');
     expect(html).toContain('id="library-course-form"');
     expect(html).toContain('name="title" type="text"');
     expect(html).toContain('name="description"');
@@ -206,6 +210,9 @@ describe("renderPage", () => {
     expect(html).toContain('requestJson("/api/courses", {');
     expect(html).toContain('requestJson("/api/courses/ideate", {');
     expect(html).toContain('requestJson("/api/tutorial", { method: "POST" })');
+    expect(html).toContain('requestJson("/api/import", {');
+    expect(html).toContain('"/export"');
+    expect(html).toContain('code.dataset.courseExportPath = "true"');
     expect(html).toContain('openTutorialCourse');
     expect(html).toContain('"/accept-plan"');
     expect(html).toContain('course.status === "active"');

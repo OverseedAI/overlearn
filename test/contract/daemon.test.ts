@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -131,6 +131,10 @@ const createFakeLoginCommand = async (binDir: string): Promise<string> => {
   await chmod(path, 0o755);
 
   return path;
+};
+
+const writeJson = async (path: string, value: unknown): Promise<void> => {
+  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 };
 
 const courseState = async (
@@ -606,6 +610,89 @@ describe(`daemon contract (${runtime.name})`, () => {
         sse.close();
         await rm(fakeHarness.binDir, { force: true, recursive: true });
       }
+    },
+    15_000,
+  );
+
+  contractTest(
+    "exports bundle directories and imports bundle or legacy course folders",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+
+      const course = await createCourse(daemon, {
+        title: "Bundle Contract Course",
+        description: "Exported through the app API.",
+      });
+
+      const unauthenticatedExport = await fetch(
+        `${daemon.url}/api/courses/${course.id}/export`,
+        { method: "POST" },
+      );
+      expect(unauthenticatedExport.status).toBe(401);
+
+      const exported = await authFetch(daemon, `/api/courses/${course.id}/export`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ includeTranscript: true }),
+      });
+      expect(exported.status).toBe(200);
+      const exportPayload = (await exported.json()) as Record<string, unknown>;
+      expect(typeof exportPayload["path"]).toBe("string");
+      const bundlePath = exportPayload["path"] as string;
+      expect(bundlePath.startsWith(join(daemon.dataDir, "exports") + "/")).toBe(true);
+      expect((await stat(bundlePath)).isDirectory()).toBe(true);
+      expect(await readFile(join(bundlePath, "course.json"), "utf8")).toContain(
+        '"format": "overlearn.course.bundle"',
+      );
+
+      const unauthenticatedImport = await fetch(`${daemon.url}/api/import`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: bundlePath }),
+      });
+      expect(unauthenticatedImport.status).toBe(401);
+
+      const imported = await authFetch(daemon, "/api/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: bundlePath }),
+      });
+      expect(imported.status).toBe(200);
+      const importPayload = (await imported.json()) as Record<string, unknown>;
+      expect(importPayload["warnings"]).toEqual([]);
+      expect(typeof importPayload["courseId"]).toBe("number");
+      expect(importPayload["courseId"]).not.toBe(course.id);
+      const importedState = await courseState(
+        daemon,
+        importPayload["courseId"] as number,
+      );
+      expect(importedState["course"]).toMatchObject({
+        title: "Bundle Contract Course",
+        description: "Exported through the app API.",
+      });
+
+      const legacyPath = join(daemon.dataDir, "legacy-course");
+      await mkdir(legacyPath, { recursive: true });
+      await writeJson(join(legacyPath, "course.json"), {
+        title: "Legacy Contract Course",
+        name: "legacy-contract",
+        topics: [{ path: "intro", title: "Intro", current: false }],
+      });
+
+      const legacy = await authFetch(daemon, "/api/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: legacyPath }),
+      });
+      expect(legacy.status).toBe(200);
+      await expect(legacy.json()).resolves.toMatchObject({
+        courseId: expect.any(Number),
+        warnings: ["Imported topic tree has no current topic."],
+      });
     },
     15_000,
   );
