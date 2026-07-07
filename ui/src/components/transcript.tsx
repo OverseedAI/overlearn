@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils";
 import type { AgentActivity, ToolActivity } from "@/lib/course-store";
 import type { TranscriptEntry } from "@/lib/types";
 
-const CHAT_TEXT_CLASS = "text-[16pt] leading-[1.55]";
+const CHAT_TEXT_CLASS = "text-[15pt] leading-[1.55]";
 
 function EntryShell({
   label,
@@ -359,7 +359,7 @@ export function Transcript({
         {entries.length === 0 && !activity && !showTyping ? (
           <div className="py-24 text-center">
             <BookOpenText className="mx-auto size-4 text-muted-foreground" />
-            <p className="mt-3 text-[16pt] leading-[1.45] text-pretty text-muted-foreground">
+            <p className="mt-3 text-[15pt] leading-[1.45] text-pretty text-muted-foreground">
               Your agent teaches through conversation. Say hello, ask for the
               first topic, or pick one from the sidebar.
             </p>

@@ -170,7 +170,7 @@ function Composer({
             void send();
           }
         }}
-        className="max-h-48 min-h-16 resize-none bg-card pr-12 text-[16pt] leading-[1.45] md:text-[16pt]"
+        className="max-h-48 min-h-16 resize-none bg-card pr-12 text-[15pt] leading-[1.45] md:text-[15pt]"
       />
       <Button
         type="submit"
