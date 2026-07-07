@@ -53,6 +53,7 @@ describe("renderPage", () => {
     expect(html).toContain('id="library-settings"');
     expect(html).toContain('id="course-library-list" class="course-card-grid"');
     expect(html).toContain('id="new-course"');
+    expect(html).toContain('id="brainstorm-course"');
     expect(html).toContain('id="import-course"');
     expect(html).toContain('id="import-notice"');
     expect(html).toContain('id="library-course-form"');
@@ -60,6 +61,14 @@ describe("renderPage", () => {
     expect(html).toContain('name="description"');
     expect(html).toContain('name="harnessId"');
     expect(html).toContain('name="attachedDir"');
+    expect(html).toContain('id="course-ideation-form"');
+    expect(html).toContain('name="seed"');
+    expect(html).toContain('id="course-wizard-panel"');
+    expect(html).toContain("data-wizard-review");
+    expect(html).toContain('id="plan-review-screen"');
+    expect(html).toContain("data-plan-review");
+    expect(html).toContain('id="drafts-section"');
+    expect(html).toContain('id="draft-course-list"');
     expect(html).toContain('data-library-status="archived"');
     expect(html).toContain('id="back-to-library"');
   });
@@ -189,12 +198,18 @@ describe("renderPage", () => {
 
     expect(html).toContain('requestJson("/api/harnesses" +');
     expect(html).toContain('"/api/courses?status=" + encodeURIComponent(status)');
+    expect(html).toContain('requestJson("/api/courses?status=draft")');
     expect(html).toContain('requestJson("/api/courses", {');
+    expect(html).toContain('requestJson("/api/courses/ideate", {');
+    expect(html).toContain('"/accept-plan"');
+    expect(html).toContain('course.status === "active"');
+    expect(html).toContain('course.status === "draft"');
     expect(html).toContain('method: "POST"');
     expect(html).toContain('method: "PATCH"');
     expect(html).toContain('method: "DELETE"');
     expect(html).toContain('body: JSON.stringify({ status: "active" })');
     expect(html).toContain('history.pushState({ screen: "library" }');
+    expect(html).toContain('history.pushState({ screen: "draft", courseId: id }');
     expect(html).toContain('location.href = "/?course="');
     expect(html).toContain('const libraryEvents = new EventSource("/api/events")');
     expect(html).toContain('libraryEvents.addEventListener("courses"');
