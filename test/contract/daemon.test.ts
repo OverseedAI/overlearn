@@ -1556,7 +1556,17 @@ describe(`daemon contract (${runtime.name})`, () => {
         return;
       }
 
-      const daemon = await start({ scenario: "normal" });
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          FAKE_ACP_MESSAGE_CHUNKS: JSON.stringify([
+            "Hi",
+            ".",
+            " We're",
+            " ready.",
+          ]),
+        },
+      });
       const sse = await createSseClient(daemon.url, daemon.token);
 
       try {
@@ -1577,6 +1587,24 @@ describe(`daemon contract (${runtime.name})`, () => {
             data["event"]["type"] === "done",
           "first turn done",
         );
+
+        // Streamed agent text chunks must be persisted as ONE transcript
+        // row (write-time coalescing), tagged with the turn number.
+        const firstState = await courseState(daemon, course.id);
+        const firstTranscript = firstState["transcript"];
+        expect(Array.isArray(firstTranscript)).toBe(true);
+        const agentMessages = (firstTranscript as readonly unknown[]).filter(
+          (entry) =>
+            isRecord(entry) &&
+            entry["role"] === "agent" &&
+            (entry["kind"] ?? "text") === "text",
+        );
+        expect(agentMessages).toHaveLength(1);
+        expect(agentMessages[0]).toMatchObject({
+          role: "agent",
+          text: "Hi. We're ready.",
+          turn: 1,
+        });
 
         const firstLogs = await waitForLogEntries(
           daemon.logPath,

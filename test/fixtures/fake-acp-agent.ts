@@ -45,6 +45,7 @@ const permissionTitle =
   process.env["FAKE_ACP_PERMISSION_TITLE"] ?? "Write the generated lesson.";
 const crashMarkerPath = process.env["FAKE_ACP_CRASH_MARKER"];
 const rawMcpCall = process.env["FAKE_ACP_MCP_CALL"];
+const rawMessageChunks = process.env["FAKE_ACP_MESSAGE_CHUNKS"];
 let nextServerRequestId = 1;
 let activePrompt: PendingPrompt | undefined;
 let configuredMcpServers: readonly McpServerConnection[] = [];
@@ -178,6 +179,22 @@ const parseMcpCall = (): FakeMcpCall | undefined => {
 };
 
 const fakeMcpCall = parseMcpCall();
+
+const parseMessageChunks = (): readonly string[] => {
+  if (rawMessageChunks === undefined || rawMessageChunks.trim().length === 0) {
+    return ["Here is the first explanation."];
+  }
+
+  const parsed = JSON.parse(rawMessageChunks) as unknown;
+
+  if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
+    throw new Error("FAKE_ACP_MESSAGE_CHUNKS must be a JSON array of strings.");
+  }
+
+  return parsed;
+};
+
+const messageChunks = parseMessageChunks();
 
 const mcpArgs = (args: unknown): McpJsonObject =>
   isRecord(args) ? (args as McpJsonObject) : {};
@@ -329,8 +346,10 @@ const runNormalTurn = async (promptId: JsonRpcId): Promise<void> => {
 
   await sleep(5);
   update(textChunk("agent_thought_chunk", "considering the lesson"));
-  await sleep(5);
-  update(textChunk("agent_message_chunk", "Here is the first explanation."));
+  for (const chunk of messageChunks) {
+    await sleep(5);
+    update(textChunk("agent_message_chunk", chunk));
+  }
   await sleep(5);
   update({
     sessionUpdate: "tool_call",

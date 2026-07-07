@@ -799,6 +799,7 @@ const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
         typeof payload["concept"] === "string" ? payload["concept"] : "unknown",
       text: entry.content,
       at,
+      turn: entry.turn,
     };
   }
 
@@ -809,6 +810,7 @@ const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
       text: entry.content,
       at,
       tool: typeof payload["tool"] === "string" ? payload["tool"] : "tool",
+      turn: entry.turn,
     };
   }
 
@@ -816,6 +818,7 @@ const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
     role: entry.role === "agent" ? "agent" : "learner",
     text: entry.content,
     at,
+    turn: entry.turn,
   };
 };
 

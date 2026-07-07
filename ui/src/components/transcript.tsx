@@ -255,13 +255,20 @@ function Entry({
 
 /**
  * Older courses persisted streamed agent text as one row per chunk. Merge
- * consecutive agent text entries written within a few seconds of each other
- * so they read as one message. (New turns are persisted whole by the daemon.)
+ * consecutive agent text entries from the same turn (falling back to a
+ * close-timestamp heuristic when turn is missing) so they read as one
+ * message. New turns are persisted whole by the daemon.
  */
 function coalesceAgentText(entries: TranscriptEntry[]): TranscriptEntry[] {
   const result: TranscriptEntry[] = [];
   for (const entry of entries) {
     const previous = result[result.length - 1];
+    const sameTurn =
+      previous?.turn !== undefined && entry.turn !== undefined
+        ? previous.turn === entry.turn
+        : Math.abs(
+            Date.parse(entry.at) - Date.parse(previous?.at ?? entry.at),
+          ) < 15_000;
     if (
       previous !== undefined &&
       previous.role === "agent" &&
@@ -270,7 +277,7 @@ function coalesceAgentText(entries: TranscriptEntry[]): TranscriptEntry[] {
       ("kind" in entry ? (entry.kind ?? "text") : "text") === "text" &&
       "text" in previous &&
       "text" in entry &&
-      Math.abs(Date.parse(entry.at) - Date.parse(previous.at)) < 15_000
+      sameTurn
     ) {
       result[result.length - 1] = {
         ...previous,

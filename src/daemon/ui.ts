@@ -50,6 +50,7 @@ export type TranscriptEntry =
       text: string;
       at: string;
       kind?: "text";
+      turn?: number;
     }>
   | Readonly<{
       role: "agent";
@@ -57,12 +58,14 @@ export type TranscriptEntry =
       file: string;
       title?: string;
       at: string;
+      turn?: number;
     }>
   | Readonly<{
       role: "agent";
       kind: "lesson";
       lesson: string;
       at: string;
+      turn?: number;
     }>
   | Readonly<{
       role: "agent";
@@ -70,6 +73,7 @@ export type TranscriptEntry =
       concept: string;
       prompt: string;
       at: string;
+      turn?: number;
     }>
   | Readonly<{
       role: "learner";
@@ -77,6 +81,7 @@ export type TranscriptEntry =
       concept: string;
       text: string;
       at: string;
+      turn?: number;
     }>
   | Readonly<{
       role: "system";
@@ -84,6 +89,7 @@ export type TranscriptEntry =
       text: string;
       at: string;
       tool: string;
+      turn?: number;
     }>;
 
 type RenderedTranscriptEntry = TranscriptEntry &
