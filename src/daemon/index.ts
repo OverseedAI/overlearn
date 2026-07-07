@@ -64,6 +64,7 @@ import {
   type TeachingWriteEvent,
 } from "../mcp/teaching";
 import { renderMarkdown } from "./markdown";
+import { serveSpaAsset, spaAvailable } from "./spa";
 import {
   createDaemonTurnOrchestrator,
   type ActiveTeachingSessionRegistration,
@@ -2348,6 +2349,21 @@ export const runDaemon = async (
       }
 
       return await teachingMcpHandler(request);
+    }
+
+    if (
+      method === "GET" &&
+      (requestUrl.pathname === "/" || requestUrl.pathname.startsWith("/assets/")) &&
+      env["OVERLEARN_LEGACY_UI"] !== "1" &&
+      spaAvailable()
+    ) {
+      const spaResponse = serveSpaAsset(requestUrl.pathname);
+      if (spaResponse !== undefined) {
+        return spaResponse;
+      }
+      if (requestUrl.pathname !== "/") {
+        return textResponse("Not found.", 404);
+      }
     }
 
     if (method === "GET" && requestUrl.pathname === "/") {

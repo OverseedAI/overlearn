@@ -10,6 +10,9 @@ export default typescriptEslint.config(
       ".bun-cache/**",
       ".tmp/**",
       "src-tauri/target/**",
+      // The SPA package lints/typechecks with its own toolchain (ui/tsconfig.json).
+      "ui/**",
+      "src/daemon/spa-assets.gen.ts",
     ],
   },
   eslint.configs.recommended,
