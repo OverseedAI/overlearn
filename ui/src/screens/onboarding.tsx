@@ -68,7 +68,7 @@ function WelcomeStep() {
           void continueToNext();
         }}
       >
-        <Label htmlFor="onboarding-name">Name (optional)</Label>
+        <Label htmlFor="onboarding-name">Preferred name (optional)</Label>
         <Input
           id="onboarding-name"
           name="name"

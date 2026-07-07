@@ -46,7 +46,7 @@ function ProfileSection() {
           void save();
         }}
       >
-        <Label htmlFor="settings-name">Display name</Label>
+        <Label htmlFor="settings-name">Preferred name</Label>
         <Input
           id="settings-name"
           name="name"
@@ -182,7 +182,7 @@ export function SettingsScreen() {
         <h1 className="text-sm font-medium">Settings</h1>
       </header>
       <div className="mx-auto w-full max-w-2xl px-4 py-10">
-        <div className="space-y-10 divide-y divide-border [&>section]:pt-10 [&>section:first-child]:pt-0">
+        <div className="divide-y divide-border [&>section]:py-10 [&>section:first-child]:pt-0 [&>section:last-child]:pb-0">
           <ProfileSection />
           <AgentSection />
           {profile ? <DataSection dataDir={dataDir} /> : null}
