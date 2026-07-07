@@ -20,7 +20,9 @@ use tauri::{
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 
-const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(5);
+// Generous: on first macOS launch Gatekeeper deep-scans the ~64MB sidecar
+// before it may execute, which alone can take several seconds.
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(30);
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HTTP_TIMEOUT: Duration = Duration::from_millis(800);
 
@@ -156,7 +158,10 @@ fn wait_for_live_daemon(data_dir: &Path) -> Result<RunningDaemon, String> {
         thread::sleep(DAEMON_POLL_INTERVAL);
     }
 
-    Err("Daemon did not become healthy within 5 seconds.".to_string())
+    Err(format!(
+        "Daemon did not become healthy within {} seconds.",
+        DAEMON_START_TIMEOUT.as_secs()
+    ))
 }
 
 fn start_app_daemon(app: &AppHandle) -> Result<RunningDaemon, String> {
@@ -518,12 +523,33 @@ fn make_tray_icon() -> Image<'static> {
     Image::new_owned(rgba, size, size)
 }
 
+fn show_startup_failure(app: &AppHandle, message: &str) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+    app.dialog()
+        .message(format!(
+            "Overlearn could not start its background service.\n\n{message}\n\n\
+             For detailed logs, run the app binary from a terminal:\n\
+             /Applications/Overlearn.app/Contents/MacOS/overlearn-desktop"
+        ))
+        .title("Overlearn failed to start")
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
+}
+
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     setup_window_focus(app.handle()).map_err(to_boxed_error)?;
     build_tray(app.handle()).map_err(to_boxed_error)?;
 
     let state = app.state::<DesktopState>();
-    let daemon = start_app_daemon(app.handle()).map_err(to_boxed_error)?;
+    let daemon = match start_app_daemon(app.handle()) {
+        Ok(daemon) => daemon,
+        Err(message) => {
+            eprintln!("Overlearn daemon failed to start: {message}");
+            show_startup_failure(app.handle(), &message);
+            std::process::exit(1);
+        }
+    };
     state
         .set_daemon(Some(daemon.clone()))
         .map_err(to_boxed_error)?;
@@ -560,6 +586,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(DesktopState::default())
         .setup(setup_app)
