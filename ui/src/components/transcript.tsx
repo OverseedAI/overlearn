@@ -259,9 +259,28 @@ function Entry({
  * close-timestamp heuristic when turn is missing) so they read as one
  * message. New turns are persisted whole by the daemon.
  */
+/**
+ * Older daemons persisted a row per generic harness tool call, with the raw
+ * ACP call id when the harness sent no name ("call_abc123 completed").
+ * These are working noise, not learning record — hide them. Teaching writes
+ * ("recorded mastery …", "wrote lesson …") keep their readable rows.
+ */
+function isLegacyToolCallNoise(entry: TranscriptEntry): boolean {
+  return (
+    entry.role === "system" &&
+    "kind" in entry &&
+    entry.kind === "tool-call" &&
+    "text" in entry &&
+    /^call_[\w-]+ (completed|failed)/.test(entry.text)
+  );
+}
+
 function coalesceAgentText(entries: TranscriptEntry[]): TranscriptEntry[] {
   const result: TranscriptEntry[] = [];
   for (const entry of entries) {
+    if (isLegacyToolCallNoise(entry)) {
+      continue;
+    }
     const previous = result[result.length - 1];
     const sameTurn =
       previous?.turn !== undefined && entry.turn !== undefined

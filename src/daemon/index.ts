@@ -1310,31 +1310,12 @@ export const runDaemon = async (
 
     if (event.type === "done" || event.type === "error") {
       flushPendingAgentText(payload.courseId);
-      return;
     }
 
-    if (
-      event.type === "tool-call" &&
-      (event.status === "completed" || event.status === "failed")
-    ) {
-      flushPendingAgentText(payload.courseId);
-      const tool = event.name ?? event.id;
-      const summary =
-        event.status === "failed"
-          ? `${tool} failed${event.error === undefined ? "" : `: ${event.error}`}`
-          : `${tool} completed`;
-      const entry = appendUiTranscript(store, payload.courseId, {
-        turn: payload.turn,
-        role: "system",
-        kind: "tool-call",
-        content: summary,
-        payload: {
-          tool,
-          status: event.status,
-        },
-      });
-      sseHub.broadcast("message", { courseId: payload.courseId, entry });
-    }
+    // Generic harness tool calls are working noise, not part of the learning
+    // record — the live activity stream shows them in flight, and meaningful
+    // writes (lessons, mastery, glossary) get readable rows via
+    // onTeachingWrite. Only agent text is persisted from the raw stream.
   };
 
   const onAgentEvent = (payload: AgentStreamPayload): void => {
