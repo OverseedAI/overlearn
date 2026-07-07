@@ -21,6 +21,8 @@ import { cn } from "@/lib/utils";
 import type { AgentActivity, ToolActivity } from "@/lib/course-store";
 import type { TranscriptEntry } from "@/lib/types";
 
+const CHAT_TEXT_CLASS = "text-[16pt] leading-[1.55]";
+
 function EntryShell({
   label,
   children,
@@ -42,7 +44,7 @@ function LearnerBubble({ label, text }: { label: string; text: string }) {
   return (
     <EntryShell label={label} className="flex flex-col items-end text-right">
       <div className="max-w-[85%] rounded-lg bg-muted px-4 py-2.5 text-left">
-        <Markdown text={text} />
+        <Markdown text={text} className={CHAT_TEXT_CLASS} />
       </div>
     </EntryShell>
   );
@@ -143,7 +145,9 @@ export function LiveActivity({ activity }: { activity: AgentActivity }) {
             ))}
           </div>
         ) : null}
-        {activity.text.length > 0 ? <Markdown text={activity.text} /> : null}
+        {activity.text.length > 0 ? (
+          <Markdown text={activity.text} className={CHAT_TEXT_CLASS} />
+        ) : null}
         {activity.error !== undefined ? (
           <p className="flex items-center gap-2 text-sm text-destructive">
             <CircleAlert className="size-4 shrink-0" />
@@ -228,7 +232,7 @@ function Entry({
         <div className="rounded-lg border border-warning/40 bg-warning/5 px-4 py-3">
           <p className="text-sm font-medium">{entry.concept}</p>
           <div className="mt-1">
-            <Markdown text={entry.prompt} />
+            <Markdown text={entry.prompt} className={CHAT_TEXT_CLASS} />
           </div>
         </div>
       </EntryShell>
@@ -245,7 +249,7 @@ function Entry({
     }
     return (
       <EntryShell label="Agent">
-        <Markdown text={entry.text} />
+        <Markdown text={entry.text} className={CHAT_TEXT_CLASS} />
       </EntryShell>
     );
   }
@@ -355,7 +359,7 @@ export function Transcript({
         {entries.length === 0 && !activity && !showTyping ? (
           <div className="py-24 text-center">
             <BookOpenText className="mx-auto size-4 text-muted-foreground" />
-            <p className="mt-3 text-sm text-pretty text-muted-foreground">
+            <p className="mt-3 text-[16pt] leading-[1.45] text-pretty text-muted-foreground">
               Your agent teaches through conversation. Say hello, ask for the
               first topic, or pick one from the sidebar.
             </p>
