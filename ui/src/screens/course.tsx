@@ -6,15 +6,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -193,63 +184,6 @@ function Composer({
   );
 }
 
-function DoneLearningButton({
-  courseId,
-  disabled,
-}: {
-  courseId: number;
-  disabled: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  const confirm = async () => {
-    setBusy(true);
-    try {
-      await api.doneLearning(courseId);
-      setOpen(false);
-    } catch (error) {
-      toast.error(
-        error instanceof ApiError ? error.message : "Couldn’t end the session.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button type="button" variant="outline" size="sm" disabled={disabled}>
-          Done learning
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-sm">
-        <DialogHeader>
-          <DialogTitle>End this session?</DialogTitle>
-          <DialogDescription>
-            The agent will wrap up, record where you left off, and Overlearn
-            will close.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => setOpen(false)}
-          >
-            Keep learning
-          </Button>
-          <Button type="button" size="sm" disabled={busy} onClick={confirm}>
-            Wrap up
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 export function CourseScreen() {
   const { store, courseId } = useCourseStore();
   const [railOpen, setRailOpen] = useState(
@@ -307,7 +241,6 @@ export function CourseScreen() {
         <StatusDot status={store.status} />
         <div className="ms-auto flex items-center gap-1">
           <HarnessPicker courseId={courseId} disabled={busy || ended} />
-          <DoneLearningButton courseId={courseId} disabled={busy || ended} />
           <Tooltip>
             <TooltipTrigger asChild>
               <Button

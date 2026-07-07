@@ -133,7 +133,7 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
       command: "gemini",
       args: [],
       interactive: true,
-      note: "Gemini opens an interactive terminal auth flow, so Overlearn shows the command to run yourself.",
+      note: "Google no longer supports Gemini CLI OAuth sign-in for individual accounts (it points to Antigravity, which has no agent-protocol mode yet). Set GEMINI_API_KEY (or GOOGLE_API_KEY) in your environment instead.",
     },
     auth: {
       env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],

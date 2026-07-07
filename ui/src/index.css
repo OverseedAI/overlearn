@@ -32,7 +32,8 @@
   --destructive-foreground: oklch(0.985 0.008 84);
   --success: oklch(0.53 0.11 145);
   --success-foreground: oklch(0.985 0.008 84);
-  --warning: oklch(0.62 0.13 70);
+  /* Dark enough to be readable as text on the ivory background. */
+  --warning: oklch(0.52 0.12 70);
   --warning-foreground: oklch(0.985 0.008 84);
   --border: oklch(0.28 0.03 60 / 12%);
   --input: oklch(0.28 0.03 60 / 16%);

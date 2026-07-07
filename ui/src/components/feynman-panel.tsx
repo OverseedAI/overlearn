@@ -44,9 +44,7 @@ export function FeynmanPanel({
 
   return (
     <div className="rounded-lg border border-warning/40 bg-warning/5 p-4">
-      <p className="text-xs font-medium text-warning-foreground/80 dark:text-warning">
-        Feynman check
-      </p>
+      <p className="text-xs font-medium text-warning">Feynman check</p>
       <p className="mt-1 text-sm font-medium">{check.concept}</p>
       <div className="mt-1">
         <Markdown text={check.prompt} />
