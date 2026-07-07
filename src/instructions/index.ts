@@ -1,5 +1,4 @@
 import { readFileSync, statSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -27,18 +26,6 @@ export type AssembledInstructionModule = InstructionModuleResolution &
 export type ResolveModuleOptions = Readonly<{
   courseDir?: string;
   env?: Env;
-}>;
-
-export type EjectInstructionModulesOptions = Readonly<{
-  toDir?: string;
-  force?: boolean;
-  env?: Env;
-}>;
-
-export type EjectedInstructionModule = Readonly<{
-  name: InstructionModuleName;
-  path: string;
-  status: "written" | "skipped" | "overwritten";
 }>;
 
 const builtinModules = {
@@ -189,52 +176,3 @@ export const formatInstructionsJson = (
     })),
     text: formatInstructions(modules),
   });
-
-export const ejectInstructionModules = async (
-  options: EjectInstructionModulesOptions = {},
-): Promise<readonly EjectedInstructionModule[]> => {
-  const targetDir = resolve(options.toDir ?? getUserInstructionDir(options.env));
-  const force = options.force ?? false;
-
-  await mkdir(targetDir, { recursive: true });
-
-  const results: EjectedInstructionModule[] = [];
-  for (const name of BUILTIN_MODULE_NAMES) {
-    const path = join(targetDir, moduleFileName(name));
-    const exists = await Bun.file(path).exists();
-
-    if (exists && !force) {
-      results.push({ name, path, status: "skipped" });
-      continue;
-    }
-
-    await Bun.write(path, `${trimModule(builtinModules[name])}\n`);
-    results.push({
-      name,
-      path,
-      status: exists ? "overwritten" : "written",
-    });
-  }
-
-  return results;
-};
-
-export const formatEjectInstructionModules = (
-  modules: readonly EjectedInstructionModule[],
-): string => {
-  const lines = modules.map((module) => {
-    if (module.status === "skipped") {
-      return `skipped ${module.name}: ${module.path} already exists; use --force to overwrite`;
-    }
-
-    if (module.status === "overwritten") {
-      return `overwrote ${module.name}: ${module.path} from builtin`;
-    }
-
-    return `wrote ${module.name}: ${module.path} from builtin`;
-  });
-
-  return [...lines, "edit these to customize; delete to revert to builtin"].join(
-    "\n",
-  );
-};

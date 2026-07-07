@@ -258,7 +258,7 @@ export const renderIndex = (courses: readonly CourseMetadata[]): string =>
       <div class="brand">
         <a href="/">overlearn</a>
         <h1>Shared Courses</h1>
-        <p class="subtle">Course bundles published by learners — fetch one with learn fetch &lt;slug&gt;.</p>
+        <p class="subtle">Course bundle metadata published by learners.</p>
       </div>
       <p class="subtle">${courses.length} courses</p>
     </header>
@@ -290,9 +290,9 @@ export const renderCoursePage = (course: CourseMetadata): string =>
       </div>
       <aside>
         <div class="panel">
-          <h2>Fetch</h2>
+          <h2>Open</h2>
           <div style="height:0.8rem"></div>
-          <code class="snippet">learn fetch ${escapeHtml(course.slug)}</code>
+          <p class="subtle">Use the desktop app to work with course data.</p>
         </div>
         <div class="panel">
           <h2>Metadata</h2>

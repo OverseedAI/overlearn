@@ -222,14 +222,23 @@ export const harnessPayloadHasSelected = (
   );
 };
 
+export const daemonAuthHeaders = (
+  token: string,
+  headers: Record<string, string> = {},
+): Record<string, string> => ({
+  authorization: `Bearer ${token}`,
+  ...headers,
+});
+
 export const submitCourseMessage = async (
   url: string,
+  token: string,
   courseId: number,
   text: string,
 ): Promise<void> => {
   const response = await fetch(`${url}/api/courses/${courseId}/submit`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: daemonAuthHeaders(token, { "content-type": "application/json" }),
     body: JSON.stringify({ text }),
   });
 
@@ -238,10 +247,12 @@ export const submitCourseMessage = async (
 
 export const submitCourseDone = async (
   url: string,
+  token: string,
   courseId: number,
 ): Promise<void> => {
   const response = await fetch(`${url}/api/courses/${courseId}/done`, {
     method: "POST",
+    headers: daemonAuthHeaders(token),
   });
 
   expect(response.status).toBe(200);
@@ -322,6 +333,7 @@ const parseSseBlock = (block: string): SseEvent | undefined => {
 
 export const createSseClient = async (
   url: string,
+  token: string,
 ): Promise<
   Readonly<{
     waitFor: (
@@ -335,7 +347,14 @@ export const createSseClient = async (
   }>
 > => {
   const abort = new AbortController();
-  const response = await fetch(`${url}/api/events`, { signal: abort.signal });
+  const response = await fetch(`${url}/api/events`, {
+    headers: daemonAuthHeaders(token),
+    signal: abort.signal,
+  });
+  if (!response.ok) {
+    throw new Error(`SSE stream did not open: HTTP ${response.status}.`);
+  }
+
   const reader = response.body?.getReader();
   if (reader === undefined) {
     throw new Error("SSE stream did not open.");

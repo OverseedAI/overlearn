@@ -53,7 +53,7 @@ jobs:
           rustup default stable
           rustup component add rustfmt clippy
 
-      - name: Build CLI
+      - name: Build sidecar
         run: bun run build
 
       - name: Copy sidecar

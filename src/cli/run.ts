@@ -1,6 +1,3 @@
-import { isValidConceptId, parseKeyPointsText } from "../course";
-import type { HarnessTool } from "../harness";
-
 export type CliExitCode = 0 | 1 | 2;
 
 export type CliResult = Readonly<{
@@ -11,142 +8,19 @@ export type CliResult = Readonly<{
 
 export type CliCommand =
   | Readonly<{ kind: "result"; result: CliResult }>
-  | Readonly<{ kind: "start"; name?: string }>
-  | Readonly<{ kind: "resume"; name: string }>
-  | Readonly<{ kind: "wait"; name?: string }>
-  | Readonly<{ kind: "stop"; name?: string }>
-  | Readonly<{ kind: "instructions"; name?: string; json: boolean }>
-  | Readonly<{ kind: "instructions-eject"; toDir?: string; force: boolean }>
-  | Readonly<{
-      kind: "uninstall";
-      tool: HarnessTool;
-      project: boolean;
-      force: boolean;
-    }>
-  | Readonly<{ kind: "status"; name?: string; json: true }>
-  | Readonly<{
-      kind: "export";
-      name?: string;
-      outDir?: string;
-      includeTranscript: boolean;
-      force: boolean;
-      json: boolean;
-    }>
-  | Readonly<{ kind: "share"; name?: string; json: boolean }>
-  | Readonly<{ kind: "unpublish"; name?: string; json: boolean }>
-  | Readonly<{
-      kind: "fetch";
-      input: string;
-      force: boolean;
-      json: boolean;
-    }>
-  | Readonly<{
-      kind: "say";
-      name?: string;
-      source:
-        | Readonly<{ kind: "text"; text: string }>
-        | Readonly<{ kind: "file"; path: string }>;
-    }>
-  | Readonly<{
-      kind: "emit";
-      name?: string;
-      emit:
-        | Readonly<{
-            kind: "glossary";
-            term: string;
-            def: string;
-            lesson?: string;
-            json: boolean;
-          }>
-        | Readonly<{
-            kind: "topic";
-            path: string;
-            title?: string;
-            lesson?: string;
-            json: boolean;
-          }>
-        | Readonly<{
-            kind: "demo";
-            file: string;
-            topic?: string;
-            title?: string;
-            json: boolean;
-          }>
-        | Readonly<{
-            kind: "feynman";
-            concept: string;
-            prompt: string;
-            keyPoints: readonly string[];
-            json: boolean;
-          }>
-        | Readonly<{
-            kind: "mastery";
-            concept: string;
-            score: number;
-            gaps?: string;
-            json: boolean;
-          }>;
-    }>
-  | Readonly<{ kind: "daemon" }>;
+  | Readonly<{ kind: "daemon"; dataDir?: string; portFile?: string }>
+  | Readonly<{ kind: "mcp-proxy"; args: readonly string[] }>;
 
 const formatHelp = (version: string): string =>
   [
-    `overlearn ${version}`,
+    `overlearn internal ${version}`,
     "",
     "Usage:",
-    "  learn start [name]",
-    "  learn resume <name>",
-    "  learn wait [name]",
-    "  learn stop [name]",
-    "  learn done [name]",
-    "  learn instructions [name] [--json]",
-    "  learn instructions --eject [--to <dir>] [--force]",
-    "  learn uninstall <claude-code|codex> [--project] [--force]",
-    "  learn status [name] --json",
-    "  learn export [name] [--out <dir>] [--include-transcript] [--force] [--json]",
-    "  learn share [name] [--json]",
-    "  learn unpublish [name-or-slug] [--json]",
-    "  learn fetch <slug-or-url> [--force] [--json]",
-    "  learn say [name] --text <markdown>",
-    "  learn say [name] --file <path>",
-    "  learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]",
-    "  learn emit topic [name] --enter <topic/path> [--title <title>] [--lesson <lesson-id>] [--json]",
-    "  learn emit demo [name] --file <file.html> [--topic <topic/path>] [--title <title>] [--json]",
-    "  learn emit feynman [name] --concept <id> --prompt <prompt> [--key-points <points>] [--json]",
-    "  learn emit mastery [name] --concept <id> --score <0-100> [--gaps <gaps>] [--json]",
-    "  learn --help",
-    "  learn --version",
+    "  overlearn-internal daemon [--data-dir <dir>] [--port-file <path>]",
+    "  overlearn-internal mcp-proxy <url> [header=value ...]",
+    "  overlearn-internal --help",
+    "  overlearn-internal --version",
   ].join("\n");
-
-const emitGlossaryUsage =
-  "Usage: learn emit glossary [name] --term <term> --def <definition> [--lesson <lesson-id>] [--json]";
-const emitTopicUsage =
-  "Usage: learn emit topic [name] --enter <topic/path> [--title <title>] [--lesson <lesson-id>] [--json]";
-const emitDemoUsage =
-  "Usage: learn emit demo [name] --file <file.html> [--topic <topic/path>] [--title <title>] [--json]";
-const emitFeynmanUsage =
-  "Usage: learn emit feynman [name] --concept <id> --prompt <prompt> [--key-points <points>] [--json]";
-const emitMasteryUsage =
-  "Usage: learn emit mastery [name] --concept <id> --score <0-100> [--gaps <gaps>] [--json]";
-
-const validateConceptId = (
-  concept: string,
-  version: string,
-): CliCommand | undefined => {
-  if (concept.trim().length === 0) {
-    return result(1, formatHelp(version), "Concept id cannot be empty.");
-  }
-
-  if (!isValidConceptId(concept.trim())) {
-    return result(
-      1,
-      formatHelp(version),
-      `Invalid concept id: ${concept}. Use slash-separated lowercase letters, numbers, and hyphens.`,
-    );
-  }
-
-  return undefined;
-};
 
 const result = (
   exitCode: CliExitCode,
@@ -164,815 +38,64 @@ const result = (
         },
 });
 
-const optionalNameCommand = (
-  kind: "start" | "wait" | "stop",
+const daemonCommand = (
   args: readonly string[],
   version: string,
 ): CliCommand => {
-  const [name, extra] = args;
-
-  if (extra !== undefined) {
-    return result(1, formatHelp(version), `Too many arguments for ${kind}.`);
-  }
-
-  return name === undefined ? { kind } : { kind, name };
-};
-
-const requiredNameCommand = (
-  kind: "resume",
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  const [name, extra] = args;
-
-  if (name === undefined || extra !== undefined) {
-    return result(1, formatHelp(version), `Usage: learn ${kind} <name>`);
-  }
-
-  return { kind, name };
-};
-
-const optionalNameJsonCommand = (
-  kind: "instructions" | "status",
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  let name: string | undefined;
-  let json = false;
-
-  for (const arg of args) {
-    if (arg === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (arg.startsWith("-")) {
-      return result(1, formatHelp(version), `Unknown option for ${kind}: ${arg}`);
-    }
-
-    if (name !== undefined) {
-      return result(1, formatHelp(version), `Too many arguments for ${kind}.`);
-    }
-
-    name = arg;
-  }
-
-  if (kind === "status") {
-    if (!json) {
-      return result(1, formatHelp(version), "Usage: learn status [name] --json");
-    }
-
-    return name === undefined
-      ? { kind, json: true }
-      : { kind, name, json: true };
-  }
-
-  return name === undefined ? { kind, json } : { kind, name, json };
-};
-
-const instructionsUsage =
-  "Usage: learn instructions [name] [--json] or learn instructions --eject [--to <dir>] [--force]";
-
-const exportUsage =
-  "Usage: learn export [name] [--out <dir>] [--include-transcript] [--force] [--json]";
-const shareUsage = "Usage: learn share [name] [--json]";
-const unpublishUsage = "Usage: learn unpublish [name-or-slug] [--json]";
-const fetchUsage = "Usage: learn fetch <slug-or-url> [--force] [--json]";
-const uninstallUsage =
-  "Usage: learn uninstall <claude-code|codex> [--project] [--force]";
-const installRemovedMessage =
-  "Overlearn now drives the agent directly; install is no longer needed.";
-
-const instructionsCommand = (
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  let name: string | undefined;
-  let json = false;
-  let eject = false;
-  let toDir: string | undefined;
-  let force = false;
+  let dataDir: string | undefined;
+  let portFile: string | undefined;
   let index = 0;
 
   while (index < args.length) {
     const arg = args[index];
     index += 1;
 
-    if (arg === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (arg === "--eject") {
-      eject = true;
-      continue;
-    }
-
-    if (arg === "--force") {
-      force = true;
-      continue;
-    }
-
-    if (arg === "--to") {
+    if (arg === "--data-dir") {
       const value = args[index];
       index += 1;
-
-      if (value === undefined) {
-        return result(1, formatHelp(version), instructionsUsage);
+      if (value === undefined || value.trim().length === 0) {
+        return result(1, formatHelp(version), "Usage: overlearn-internal daemon [--data-dir <dir>] [--port-file <path>]");
       }
 
-      toDir = value;
+      dataDir = value;
       continue;
     }
 
-    if (arg === undefined || arg.startsWith("-")) {
-      return result(
-        1,
-        formatHelp(version),
-        `Unknown option for instructions: ${String(arg)}`,
-      );
-    }
+    if (arg === "--port-file") {
+      const value = args[index];
+      index += 1;
+      if (value === undefined || value.trim().length === 0) {
+        return result(1, formatHelp(version), "Usage: overlearn-internal daemon [--data-dir <dir>] [--port-file <path>]");
+      }
 
-    if (name !== undefined) {
-      return result(
-        1,
-        formatHelp(version),
-        "Too many arguments for instructions.",
-      );
-    }
-
-    name = arg;
-  }
-
-  if (eject) {
-    if (name !== undefined || json) {
-      return result(1, formatHelp(version), instructionsUsage);
-    }
-
-    return toDir === undefined
-      ? { kind: "instructions-eject", force }
-      : { kind: "instructions-eject", toDir, force };
-  }
-
-  if (toDir !== undefined || force) {
-    return result(1, formatHelp(version), instructionsUsage);
-  }
-
-  return name === undefined
-    ? { kind: "instructions", json }
-    : { kind: "instructions", name, json };
-};
-
-const sayCommand = (args: readonly string[], version: string): CliCommand => {
-  const [first, second, third, fourth] = args;
-  const hasName = first !== undefined && !first.startsWith("-");
-  const name = hasName ? first : undefined;
-  const flag = hasName ? second : first;
-  const value = hasName ? third : second;
-  const extra = hasName ? fourth : third;
-
-  if (flag === undefined || value === undefined || extra !== undefined) {
-    return result(1, formatHelp(version), "Usage: learn say [name] --text <markdown> or --file <path>");
-  }
-
-  if (flag === "--text") {
-    return {
-      kind: "say",
-      ...(name === undefined ? {} : { name }),
-      source: { kind: "text", text: value },
-    };
-  }
-
-  if (flag === "--file") {
-    return {
-      kind: "say",
-      ...(name === undefined ? {} : { name }),
-      source: { kind: "file", path: value },
-    };
-  }
-
-  return result(1, formatHelp(version), "Usage: learn say [name] --text <markdown> or --file <path>");
-};
-
-const emitGlossaryCommand = (
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  let index = 0;
-  const first = args[index];
-  const name = first !== undefined && !first.startsWith("-") ? first : undefined;
-
-  if (name !== undefined) {
-    index += 1;
-  }
-
-  let term: string | undefined;
-  let def: string | undefined;
-  let lesson: string | undefined;
-  let json = false;
-
-  while (index < args.length) {
-    const flag = args[index];
-    index += 1;
-
-    if (flag === "--json") {
-      json = true;
+      portFile = value;
       continue;
     }
 
-    if (flag !== "--term" && flag !== "--def" && flag !== "--lesson") {
-      return result(1, formatHelp(version), emitGlossaryUsage);
-    }
-
-    const value = args[index];
-    index += 1;
-
-    if (value === undefined) {
-      return result(1, formatHelp(version), emitGlossaryUsage);
-    }
-
-    if (flag === "--term") {
-      term = value;
-    } else if (flag === "--def") {
-      def = value;
-    } else {
-      lesson = value;
-    }
-  }
-
-  if (term === undefined || def === undefined) {
-    return result(1, formatHelp(version), emitGlossaryUsage);
-  }
-
-  if (term.trim().length === 0) {
-    return result(1, formatHelp(version), "Glossary term cannot be empty.");
-  }
-
-  if (def.trim().length === 0) {
-    return result(1, formatHelp(version), "Glossary definition cannot be empty.");
-  }
-
-  if (lesson !== undefined && lesson.trim().length === 0) {
-    return result(1, formatHelp(version), "Glossary lesson cannot be empty.");
+    return result(1, formatHelp(version), `Unknown daemon option: ${String(arg)}`);
   }
 
   return {
-    kind: "emit",
-    ...(name === undefined ? {} : { name }),
-    emit:
-      lesson === undefined
-        ? {
-            kind: "glossary",
-            term,
-            def,
-            json,
-          }
-        : {
-            kind: "glossary",
-            term,
-            def,
-            lesson,
-            json,
-          },
+    kind: "daemon",
+    ...(dataDir === undefined ? {} : { dataDir }),
+    ...(portFile === undefined ? {} : { portFile }),
   };
 };
 
-const emitTopicCommand = (
+const mcpProxyCommand = (
   args: readonly string[],
   version: string,
 ): CliCommand => {
-  let index = 0;
-  const first = args[index];
-  const name = first !== undefined && !first.startsWith("-") ? first : undefined;
-
-  if (name !== undefined) {
-    index += 1;
-  }
-
-  let path: string | undefined;
-  let title: string | undefined;
-  let lesson: string | undefined;
-  let json = false;
-
-  while (index < args.length) {
-    const flag = args[index];
-    index += 1;
-
-    if (flag === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (flag !== "--enter" && flag !== "--title" && flag !== "--lesson") {
-      return result(1, formatHelp(version), emitTopicUsage);
-    }
-
-    const value = args[index];
-    index += 1;
-
-    if (value === undefined) {
-      return result(1, formatHelp(version), emitTopicUsage);
-    }
-
-    if (flag === "--enter") {
-      path = value;
-    } else if (flag === "--title") {
-      title = value;
-    } else {
-      lesson = value;
-    }
-  }
-
-  if (path === undefined) {
-    return result(1, formatHelp(version), emitTopicUsage);
-  }
-
-  if (path.trim().length === 0) {
-    return result(1, formatHelp(version), "Topic path cannot be empty.");
-  }
-
-  if (title !== undefined && title.trim().length === 0) {
-    return result(1, formatHelp(version), "Topic title cannot be empty.");
-  }
-
-  if (lesson !== undefined && lesson.trim().length === 0) {
-    return result(1, formatHelp(version), "Topic lesson cannot be empty.");
-  }
-
-  return {
-    kind: "emit",
-    ...(name === undefined ? {} : { name }),
-    emit: {
-      kind: "topic",
-      path,
-      ...(title === undefined ? {} : { title }),
-      ...(lesson === undefined ? {} : { lesson }),
-      json,
-    },
-  };
-};
-
-const emitDemoCommand = (
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  let index = 0;
-  const first = args[index];
-  const name = first !== undefined && !first.startsWith("-") ? first : undefined;
-
-  if (name !== undefined) {
-    index += 1;
-  }
-
-  let file: string | undefined;
-  let topic: string | undefined;
-  let title: string | undefined;
-  let json = false;
-
-  while (index < args.length) {
-    const flag = args[index];
-    index += 1;
-
-    if (flag === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (flag !== "--file" && flag !== "--topic" && flag !== "--title") {
-      return result(1, formatHelp(version), emitDemoUsage);
-    }
-
-    const value = args[index];
-    index += 1;
-
-    if (value === undefined) {
-      return result(1, formatHelp(version), emitDemoUsage);
-    }
-
-    if (flag === "--file") {
-      file = value;
-    } else if (flag === "--topic") {
-      topic = value;
-    } else {
-      title = value;
-    }
-  }
-
-  if (file === undefined) {
-    return result(1, formatHelp(version), emitDemoUsage);
-  }
-
-  if (file.trim().length === 0) {
-    return result(1, formatHelp(version), "Demo file cannot be empty.");
-  }
-
-  if (topic !== undefined && topic.trim().length === 0) {
-    return result(1, formatHelp(version), "Demo topic cannot be empty.");
-  }
-
-  if (title !== undefined && title.trim().length === 0) {
-    return result(1, formatHelp(version), "Demo title cannot be empty.");
-  }
-
-  return {
-    kind: "emit",
-    ...(name === undefined ? {} : { name }),
-    emit: {
-      kind: "demo",
-      file,
-      ...(topic === undefined ? {} : { topic }),
-      ...(title === undefined ? {} : { title }),
-      json,
-    },
-  };
-};
-
-const emitFeynmanCommand = (
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  let index = 0;
-  const first = args[index];
-  const name = first !== undefined && !first.startsWith("-") ? first : undefined;
-
-  if (name !== undefined) {
-    index += 1;
-  }
-
-  let concept: string | undefined;
-  let prompt: string | undefined;
-  let keyPointsText: string | undefined;
-  let json = false;
-
-  while (index < args.length) {
-    const flag = args[index];
-    index += 1;
-
-    if (flag === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (
-      flag !== "--concept" &&
-      flag !== "--prompt" &&
-      flag !== "--key-points"
-    ) {
-      return result(1, formatHelp(version), emitFeynmanUsage);
-    }
-
-    const value = args[index];
-    index += 1;
-
-    if (value === undefined) {
-      return result(1, formatHelp(version), emitFeynmanUsage);
-    }
-
-    if (flag === "--concept") {
-      concept = value;
-    } else if (flag === "--prompt") {
-      prompt = value;
-    } else {
-      keyPointsText = value;
-    }
-  }
-
-  if (concept === undefined || prompt === undefined) {
-    return result(1, formatHelp(version), emitFeynmanUsage);
-  }
-
-  const conceptError = validateConceptId(concept, version);
-  if (conceptError !== undefined) {
-    return conceptError;
-  }
-
-  if (prompt.trim().length === 0) {
-    return result(1, formatHelp(version), "Feynman prompt cannot be empty.");
-  }
-
-  const keyPoints =
-    keyPointsText === undefined ? [] : parseKeyPointsText(keyPointsText);
-  if (keyPointsText !== undefined && keyPoints.length === 0) {
-    return result(1, formatHelp(version), "Feynman key points cannot be empty.");
-  }
-
-  return {
-    kind: "emit",
-    ...(name === undefined ? {} : { name }),
-    emit: {
-      kind: "feynman",
-      concept: concept.trim(),
-      prompt,
-      keyPoints,
-      json,
-    },
-  };
-};
-
-const emitMasteryCommand = (
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  let index = 0;
-  const first = args[index];
-  const name = first !== undefined && !first.startsWith("-") ? first : undefined;
-
-  if (name !== undefined) {
-    index += 1;
-  }
-
-  let concept: string | undefined;
-  let scoreText: string | undefined;
-  let gaps: string | undefined;
-  let json = false;
-
-  while (index < args.length) {
-    const flag = args[index];
-    index += 1;
-
-    if (flag === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (flag !== "--concept" && flag !== "--score" && flag !== "--gaps") {
-      return result(1, formatHelp(version), emitMasteryUsage);
-    }
-
-    const value = args[index];
-    index += 1;
-
-    if (value === undefined) {
-      return result(1, formatHelp(version), emitMasteryUsage);
-    }
-
-    if (flag === "--concept") {
-      concept = value;
-    } else if (flag === "--score") {
-      scoreText = value;
-    } else {
-      gaps = value;
-    }
-  }
-
-  if (concept === undefined || scoreText === undefined) {
-    return result(1, formatHelp(version), emitMasteryUsage);
-  }
-
-  const conceptError = validateConceptId(concept, version);
-  if (conceptError !== undefined) {
-    return conceptError;
-  }
-
-  const score = Number.parseInt(scoreText, 10);
-  if (
-    !/^\d+$/.test(scoreText) ||
-    !Number.isInteger(score) ||
-    score < 0 ||
-    score > 100
-  ) {
+  const [url] = args;
+  if (url === undefined || url.trim().length === 0) {
     return result(
       1,
       formatHelp(version),
-      "Mastery score must be an integer from 0 to 100.",
+      "Usage: overlearn-internal mcp-proxy <url> [header=value ...]",
     );
   }
 
-  if (gaps !== undefined && gaps.trim().length === 0) {
-    return result(1, formatHelp(version), "Mastery gaps cannot be empty.");
-  }
-
-  return {
-    kind: "emit",
-    ...(name === undefined ? {} : { name }),
-    emit: {
-      kind: "mastery",
-      concept: concept.trim(),
-      score,
-      ...(gaps === undefined ? {} : { gaps }),
-      json,
-    },
-  };
-};
-
-const emitCommand = (args: readonly string[], version: string): CliCommand => {
-  const [kind, ...rest] = args;
-
-  if (kind === "glossary") {
-    return emitGlossaryCommand(rest, version);
-  }
-
-  if (kind === "topic") {
-    return emitTopicCommand(rest, version);
-  }
-
-  if (kind === "demo") {
-    return emitDemoCommand(rest, version);
-  }
-
-  if (kind === "feynman") {
-    return emitFeynmanCommand(rest, version);
-  }
-
-  if (kind === "mastery") {
-    return emitMasteryCommand(rest, version);
-  }
-
-  if (kind === undefined) {
-    return result(1, formatHelp(version), "Usage: learn emit <kind> ...");
-  }
-
-  return result(1, formatHelp(version), `Unknown emit kind: ${kind}`);
-};
-
-const exportCommand = (
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  let name: string | undefined;
-  let outDir: string | undefined;
-  let includeTranscript = false;
-  let force = false;
-  let json = false;
-  let index = 0;
-
-  while (index < args.length) {
-    const arg = args[index];
-    index += 1;
-
-    if (arg === "--include-transcript") {
-      includeTranscript = true;
-      continue;
-    }
-
-    if (arg === "--force") {
-      force = true;
-      continue;
-    }
-
-    if (arg === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (arg === "--out") {
-      const value = args[index];
-      index += 1;
-
-      if (value === undefined) {
-        return result(1, formatHelp(version), exportUsage);
-      }
-
-      if (value.trim().length === 0) {
-        return result(1, formatHelp(version), "Export output dir cannot be empty.");
-      }
-
-      outDir = value;
-      continue;
-    }
-
-    if (arg === undefined || arg.startsWith("-")) {
-      return result(1, formatHelp(version), `Unknown option for export: ${String(arg)}`);
-    }
-
-    if (name !== undefined) {
-      return result(1, formatHelp(version), "Too many arguments for export.");
-    }
-
-    name = arg;
-  }
-
-  return {
-    kind: "export",
-    ...(name === undefined ? {} : { name }),
-    ...(outDir === undefined ? {} : { outDir }),
-    includeTranscript,
-    force,
-    json,
-  };
-};
-
-const optionalNameRegistryCommand = (
-  kind: "share" | "unpublish",
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  let name: string | undefined;
-  let json = false;
-
-  for (const arg of args) {
-    if (arg === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (arg.startsWith("-")) {
-      return result(
-        1,
-        formatHelp(version),
-        kind === "share" ? shareUsage : unpublishUsage,
-      );
-    }
-
-    if (name !== undefined) {
-      return result(1, formatHelp(version), `Too many arguments for ${kind}.`);
-    }
-
-    name = arg;
-  }
-
-  return name === undefined ? { kind, json } : { kind, name, json };
-};
-
-const fetchCommand = (
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  let input: string | undefined;
-  let force = false;
-  let json = false;
-
-  for (const arg of args) {
-    if (arg === "--force") {
-      force = true;
-      continue;
-    }
-
-    if (arg === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (arg.startsWith("-")) {
-      return result(1, formatHelp(version), fetchUsage);
-    }
-
-    if (input !== undefined) {
-      return result(1, formatHelp(version), "Too many arguments for fetch.");
-    }
-
-    input = arg;
-  }
-
-  if (input === undefined) {
-    return result(1, formatHelp(version), fetchUsage);
-  }
-
-  return { kind: "fetch", input, force, json };
-};
-
-const parseHarnessTool = (
-  value: string | undefined,
-): HarnessTool | undefined =>
-  value === "claude-code" || value === "codex" ? value : undefined;
-
-const uninstallCommand = (
-  args: readonly string[],
-  version: string,
-): CliCommand => {
-  let tool: HarnessTool | undefined;
-  let project = false;
-  let force = false;
-
-  for (const arg of args) {
-    if (arg === "--project") {
-      project = true;
-      continue;
-    }
-
-    if (arg === "--force") {
-      force = true;
-      continue;
-    }
-
-    if (arg.startsWith("-")) {
-      return result(1, formatHelp(version), uninstallUsage);
-    }
-
-    if (tool !== undefined) {
-      return result(1, formatHelp(version), "Too many arguments for uninstall.");
-    }
-
-    tool = parseHarnessTool(arg);
-    if (tool === undefined) {
-      return result(
-        1,
-        formatHelp(version),
-        `Unknown tool for uninstall: ${arg}. Expected claude-code or codex.`,
-      );
-    }
-  }
-
-  if (tool === undefined) {
-    return result(1, formatHelp(version), uninstallUsage);
-  }
-
-  return {
-    kind: "uninstall",
-    tool,
-    project,
-    force,
-  };
+  return { kind: "mcp-proxy", args };
 };
 
 export const parseCli = (
@@ -981,80 +104,23 @@ export const parseCli = (
 ): CliCommand => {
   const [arg, ...rest] = args;
 
-  if (arg === "--version" || arg === "-v") {
-    return result(0, version);
-  }
-
   if (arg === undefined || arg === "--help" || arg === "-h") {
     return result(0, formatHelp(version));
   }
 
-  if (arg === "start") {
-    return optionalNameCommand("start", rest, version);
+  if (arg === "--version" || arg === "-v") {
+    return result(0, version);
   }
 
-  if (arg === "resume") {
-    return requiredNameCommand("resume", rest, version);
+  if (arg === "daemon") {
+    return daemonCommand(rest, version);
   }
 
-  if (arg === "wait") {
-    return optionalNameCommand("wait", rest, version);
+  if (arg === "mcp-proxy") {
+    return mcpProxyCommand(rest, version);
   }
 
-  if (arg === "stop" || arg === "done") {
-    return optionalNameCommand("stop", rest, version);
-  }
-
-  if (arg === "instructions") {
-    return instructionsCommand(rest, version);
-  }
-
-  if (arg === "install") {
-    return result(1, "", installRemovedMessage);
-  }
-
-  if (arg === "uninstall") {
-    return uninstallCommand(rest, version);
-  }
-
-  if (arg === "status") {
-    return optionalNameJsonCommand("status", rest, version);
-  }
-
-  if (arg === "export") {
-    return exportCommand(rest, version);
-  }
-
-  if (arg === "share") {
-    return optionalNameRegistryCommand("share", rest, version);
-  }
-
-  if (arg === "unpublish") {
-    return optionalNameRegistryCommand("unpublish", rest, version);
-  }
-
-  if (arg === "fetch") {
-    return fetchCommand(rest, version);
-  }
-
-  if (arg === "say") {
-    return sayCommand(rest, version);
-  }
-
-  if (arg === "emit") {
-    return emitCommand(rest, version);
-  }
-
-  if (arg === "__daemon") {
-    const [extra] = rest;
-    if (extra !== undefined) {
-      return result(1, "", "Usage: learn __daemon");
-    }
-
-    return { kind: "daemon" };
-  }
-
-  return result(1, formatHelp(version), `Unknown option: ${arg}`);
+  return result(1, formatHelp(version), `Unsupported internal command: ${arg}`);
 };
 
 export const runCli = (args: readonly string[], version: string): CliResult => {

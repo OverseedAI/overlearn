@@ -6,6 +6,7 @@ import {
   canBindLocalhost,
   createFakeHarnessPath,
   createSseClient,
+  daemonAuthHeaders,
   harnessById,
   harnessPayloadHasSelected,
   isRecord,
@@ -69,11 +70,24 @@ const start = async (
   return daemon;
 };
 
+const authFetch = (
+  daemon: StartedContractDaemon,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> =>
+  fetch(`${daemon.url}${path}`, {
+    ...init,
+    headers: daemonAuthHeaders(
+      daemon.token,
+      Object.fromEntries(new Headers(init.headers).entries()),
+    ),
+  });
+
 const createCourse = async (
-  url: string,
+  daemon: StartedContractDaemon,
   input: Record<string, unknown>,
 ): Promise<CourseResource> => {
-  const response = await fetch(`${url}/api/courses`, {
+  const response = await authFetch(daemon, "/api/courses", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
@@ -84,10 +98,10 @@ const createCourse = async (
 };
 
 const courseState = async (
-  url: string,
+  daemon: StartedContractDaemon,
   courseId: number,
 ): Promise<Record<string, unknown>> => {
-  const response = await fetch(`${url}/api/courses/${courseId}`);
+  const response = await authFetch(daemon, `/api/courses/${courseId}`);
 
   expect(response.status).toBe(200);
   return (await response.json()) as Record<string, unknown>;
@@ -148,11 +162,20 @@ describe(`daemon contract (${runtime.name})`, () => {
           }),
         },
       });
-      const sse = await createSseClient(daemon.url);
+      const sse = await createSseClient(daemon.url, daemon.token);
 
       try {
+        const unauthenticated = await fetch(`${daemon.url}/api/health`);
+        expect(unauthenticated.status).toBe(401);
+
+        const bootstrap = await fetch(`${daemon.url}/?token=${daemon.token}`, {
+          redirect: "manual",
+        });
+        expect(bootstrap.status).toBe(303);
+        expect(bootstrap.headers.get("set-cookie")).toContain("HttpOnly");
+
         const health = (await (
-          await fetch(`${daemon.url}/api/health`)
+          await authFetch(daemon, "/api/health")
         ).json()) as Record<string, unknown>;
         expect(health).toMatchObject({
           ok: true,
@@ -161,7 +184,7 @@ describe(`daemon contract (${runtime.name})`, () => {
           activeCourseId: null,
         });
 
-        const created = await createCourse(daemon.url, {
+        const created = await createCourse(daemon, {
           title: "Contract Course",
           description: "Store-backed contract course",
           harnessId: "codex",
@@ -174,12 +197,13 @@ describe(`daemon contract (${runtime.name})`, () => {
         });
 
         const list = (await (
-          await fetch(`${daemon.url}/api/courses?status=active`)
+          await authFetch(daemon, "/api/courses?status=active")
         ).json()) as readonly CourseResource[];
         expect(list.map((course) => course.id)).toContain(createdId);
 
-        const harnessResponse = await fetch(
-          `${daemon.url}/api/harnesses?courseId=${createdId}`,
+        const harnessResponse = await authFetch(
+          daemon,
+          `/api/harnesses?courseId=${createdId}`,
         );
         expect(harnessResponse.status).toBe(200);
         const harnesses = (await harnessResponse.json()) as unknown;
@@ -190,7 +214,12 @@ describe(`daemon contract (${runtime.name})`, () => {
           version: "codex-acp 9.9.9",
         });
 
-        await submitCourseMessage(daemon.url, createdId, "contract hello");
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          createdId,
+          "contract hello",
+        );
         await sse.waitFor(
           "status",
           (data) =>
@@ -228,7 +257,7 @@ describe(`daemon contract (${runtime.name})`, () => {
           "turn done stream",
         );
 
-        const state = await courseState(daemon.url, createdId);
+        const state = await courseState(daemon, createdId);
         expect(state["mastery"]).toContainEqual(
           expect.objectContaining({
             concept: "compound-growth",
@@ -256,8 +285,7 @@ describe(`daemon contract (${runtime.name})`, () => {
         expect(firstPrompt).toContain('"text": "contract hello"');
         expect(firstPrompt).toContain("## Resume context required");
         expect(firstPrompt).toContain("get_course_state");
-        expect(firstPrompt).toContain("Do not run `learn emit`, `learn say`");
-        expect(firstPrompt).not.toContain("Use `learn say`");
+        expect(firstPrompt).toContain("no sidecar callback commands are available");
       } finally {
         sse.close();
         await rm(fakeHarness.binDir, { force: true, recursive: true });
@@ -283,16 +311,21 @@ describe(`daemon contract (${runtime.name})`, () => {
           GEMINI_API_KEY: "test-gemini",
         },
       });
-      const firstClient = await createSseClient(daemon.url);
-      const secondClient = await createSseClient(daemon.url);
+      const firstClient = await createSseClient(daemon.url, daemon.token);
+      const secondClient = await createSseClient(daemon.url, daemon.token);
 
       try {
-        const course = await createCourse(daemon.url, {
+        const course = await createCourse(daemon, {
           title: "Swap Course",
           harnessId: "claude-code",
         });
 
-        await submitCourseMessage(daemon.url, course.id, "start on adapter A");
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "start on adapter A",
+        );
         await firstClient.waitFor(
           "agent-stream",
           (data) =>
@@ -312,7 +345,7 @@ describe(`daemon contract (${runtime.name})`, () => {
           "idle after first turn",
         );
 
-        const response = await fetch(`${daemon.url}/api/courses/${course.id}/harness`, {
+        const response = await authFetch(daemon, `/api/courses/${course.id}/harness`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ id: "codex" }),
@@ -324,7 +357,7 @@ describe(`daemon contract (${runtime.name})`, () => {
           swapped: true,
         });
 
-        const state = await courseState(daemon.url, course.id);
+        const state = await courseState(daemon, course.id);
         expect(state["course"]).toMatchObject({ harnessId: "codex" });
 
         await firstClient.waitFor(
@@ -405,14 +438,19 @@ describe(`daemon contract (${runtime.name})`, () => {
       }
 
       const daemon = await start({ scenario: "never" });
-      const first = await createSseClient(daemon.url);
+      const first = await createSseClient(daemon.url, daemon.token);
       let second: Awaited<ReturnType<typeof createSseClient>> | undefined;
 
       try {
-        const course = await createCourse(daemon.url, {
+        const course = await createCourse(daemon, {
           title: "Replay Course",
         });
-        await submitCourseMessage(daemon.url, course.id, "stream for a while");
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "stream for a while",
+        );
         const streamed = await first.waitFor(
           "agent-stream",
           (data) =>
@@ -431,7 +469,7 @@ describe(`daemon contract (${runtime.name})`, () => {
           event: { type: "thinking", text: "waiting forever" },
         });
 
-        second = await createSseClient(daemon.url);
+        second = await createSseClient(daemon.url, daemon.token);
         const replayed = await second.waitFor(
           "agent-stream",
           (data) =>
@@ -460,13 +498,18 @@ describe(`daemon contract (${runtime.name})`, () => {
       }
 
       const daemon = await start({ scenario: "never" });
-      const sse = await createSseClient(daemon.url);
+      const sse = await createSseClient(daemon.url, daemon.token);
 
       try {
-        const course = await createCourse(daemon.url, {
+        const course = await createCourse(daemon, {
           title: "Running Harness Course",
         });
-        await submitCourseMessage(daemon.url, course.id, "keep working");
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "keep working",
+        );
         await sse.waitFor(
           "agent-stream",
           (data) =>
@@ -477,8 +520,9 @@ describe(`daemon contract (${runtime.name})`, () => {
           "running turn thinking",
         );
 
-        const response = await fetch(
-          `${daemon.url}/api/courses/${course.id}/harness`,
+        const response = await authFetch(
+          daemon,
+          `/api/courses/${course.id}/harness`,
           {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -511,16 +555,21 @@ describe(`daemon contract (${runtime.name})`, () => {
           FAKE_ACP_PERMISSION_PATH: join(dataDir, "attached", "notes.md"),
         }),
       });
-      const sse = await createSseClient(daemon.url);
+      const sse = await createSseClient(daemon.url, daemon.token);
       const attachedDir = join(daemon.dataDir, "attached");
       const permissionPath = join(attachedDir, "notes.md");
 
       try {
-        const course = await createCourse(daemon.url, {
+        const course = await createCourse(daemon, {
           title: "Attached Permission Course",
           attachedDir,
         });
-        await submitCourseMessage(daemon.url, course.id, "read the source");
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "read the source",
+        );
 
         const permission = await sse.waitFor(
           "agent-stream",
@@ -582,14 +631,19 @@ describe(`daemon contract (${runtime.name})`, () => {
           FAKE_ACP_PERMISSION_PATH: join(dataDir, "unattached", "notes.md"),
         }),
       });
-      const sse = await createSseClient(daemon.url);
+      const sse = await createSseClient(daemon.url, daemon.token);
       const permissionPath = join(daemon.dataDir, "unattached", "notes.md");
 
       try {
-        const course = await createCourse(daemon.url, {
+        const course = await createCourse(daemon, {
           title: "Denied Permission Course",
         });
-        await submitCourseMessage(daemon.url, course.id, "read without attach");
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "read without attach",
+        );
 
         const permission = await sse.waitFor(
           "agent-stream",
@@ -646,13 +700,18 @@ describe(`daemon contract (${runtime.name})`, () => {
         scenario: "never",
         extraEnv: { OVERLEARN_TURN_TIMEOUT_MS: "50" },
       });
-      const sse = await createSseClient(daemon.url);
+      const sse = await createSseClient(daemon.url, daemon.token);
 
       try {
-        const course = await createCourse(daemon.url, {
+        const course = await createCourse(daemon, {
           title: "Timeout Course",
         });
-        await submitCourseMessage(daemon.url, course.id, "wait forever");
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "wait forever",
+        );
         await sse.waitFor(
           "agent-stream",
           (data) =>
@@ -683,7 +742,7 @@ describe(`daemon contract (${runtime.name})`, () => {
         );
 
         const health = (await (
-          await fetch(`${daemon.url}/api/health`)
+          await authFetch(daemon, "/api/health")
         ).json()) as Record<string, unknown>;
         expect(health["ok"]).toBe(true);
       } finally {
@@ -701,13 +760,18 @@ describe(`daemon contract (${runtime.name})`, () => {
       }
 
       const daemon = await start({ scenario: "crash-always" });
-      const sse = await createSseClient(daemon.url);
+      const sse = await createSseClient(daemon.url, daemon.token);
 
       try {
-        const course = await createCourse(daemon.url, {
+        const course = await createCourse(daemon, {
           title: "Crash Course",
         });
-        await submitCourseMessage(daemon.url, course.id, "please crash");
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "please crash",
+        );
         await sse.waitFor(
           "status",
           (data) =>
@@ -733,7 +797,7 @@ describe(`daemon contract (${runtime.name})`, () => {
         ).toHaveLength(2);
 
         const health = (await (
-          await fetch(`${daemon.url}/api/health`)
+          await authFetch(daemon, "/api/health")
         ).json()) as Record<string, unknown>;
         expect(health["ok"]).toBe(true);
       } finally {
@@ -751,11 +815,16 @@ describe(`daemon contract (${runtime.name})`, () => {
       }
 
       const daemon = await start({ scenario: "normal" });
-      const sse = await createSseClient(daemon.url);
+      const sse = await createSseClient(daemon.url, daemon.token);
 
       try {
-        const course = await createCourse(daemon.url, { title: "Done Course" });
-        await submitCourseMessage(daemon.url, course.id, "start before done");
+        const course = await createCourse(daemon, { title: "Done Course" });
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "start before done",
+        );
         await sse.waitFor(
           "agent-stream",
           (data) =>
@@ -775,7 +844,7 @@ describe(`daemon contract (${runtime.name})`, () => {
         );
         const tokenUrl = mcpUrlFromLogs(firstLogs);
 
-        await submitCourseDone(daemon.url, course.id);
+        await submitCourseDone(daemon.url, daemon.token, course.id);
         await sse.waitFor(
           "status",
           (data) =>
@@ -823,11 +892,16 @@ describe(`daemon contract (${runtime.name})`, () => {
 
       const daemon = await start({ scenario: "normal" });
 
-      const first = await createCourse(daemon.url, { title: "First Course" });
-      const second = await createCourse(daemon.url, { title: "Second Course" });
+      const first = await createCourse(daemon, { title: "First Course" });
+      const second = await createCourse(daemon, { title: "Second Course" });
 
-      await submitCourseMessage(daemon.url, first.id, "start first");
-      const response = await fetch(`${daemon.url}/api/courses/${second.id}/submit`, {
+      await submitCourseMessage(
+        daemon.url,
+        daemon.token,
+        first.id,
+        "start first",
+      );
+      const response = await authFetch(daemon, `/api/courses/${second.id}/submit`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text: "start second" }),

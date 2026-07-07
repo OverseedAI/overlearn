@@ -9,15 +9,16 @@ import {
   killDaemon,
   type ProcessResult,
   runProcess,
+  sleep,
+  streamText,
   waitForDaemonStopped,
 } from "../helpers/daemon";
 
-export type ContractRuntimeName = "source" | "binary" | "sidecar";
+export type ContractRuntimeName = "source" | "sidecar";
 
 type ContractRuntime = Readonly<{
   name: ContractRuntimeName;
   command: readonly string[];
-  startCommand: "start" | "resume";
   missing?: string;
 }>;
 
@@ -38,6 +39,7 @@ export type StartedContractDaemon = Readonly<{
   env: Record<string, string>;
   logPath: string;
   url: string;
+  token: string;
   pid: number;
   runCli: (
     args: readonly string[],
@@ -54,7 +56,6 @@ type StartContractOptions = Readonly<{
 
 const repoRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const cliPath = join(repoRoot, "src", "cli", "index.ts");
-const binaryPath = join(repoRoot, "dist", "learn");
 const sidecarBinDir = join(repoRoot, "src-tauri", "bin");
 const fixturePath = join(repoRoot, "test", "fixtures", "fake-acp-agent.ts");
 
@@ -117,12 +118,12 @@ const resolveSidecarPath = (): string => {
 const requestedRuntimeName = (): ContractRuntimeName => {
   const raw = process.env["OVERLEARN_CONTRACT_RUNTIME"] ?? "source";
 
-  if (raw === "source" || raw === "binary" || raw === "sidecar") {
+  if (raw === "source" || raw === "sidecar") {
     return raw;
   }
 
   throw new Error(
-    `Unknown OVERLEARN_CONTRACT_RUNTIME: ${raw}. Expected source, binary, or sidecar.`,
+    `Unknown OVERLEARN_CONTRACT_RUNTIME: ${raw}. Expected source or sidecar.`,
   );
 };
 
@@ -133,22 +134,6 @@ export const resolveContractRuntime = (): ContractRuntime => {
     return {
       name,
       command: [process.execPath, cliPath],
-      startCommand: "start",
-    };
-  }
-
-  if (name === "binary") {
-    const missing = existsSync(binaryPath)
-      ? {}
-      : {
-          missing: `Missing ${binaryPath}. Run \`bun run build\` before \`OVERLEARN_CONTRACT_RUNTIME=binary bun run test:contract\`.`,
-        };
-
-    return {
-      name,
-      command: [binaryPath],
-      startCommand: "start",
-      ...missing,
     };
   }
 
@@ -162,7 +147,6 @@ export const resolveContractRuntime = (): ContractRuntime => {
   return {
     name,
     command: [sidecarPath],
-    startCommand: "resume",
     ...missing,
   };
 };
@@ -197,7 +181,6 @@ const contractEnv = (
   }
 
   env["OVERLEARN_DATA_DIR"] = context.dataDir;
-  env["OVERLEARN_NO_BROWSER"] = "1";
   env["OVERLEARN_HARNESS_CMD"] = JSON.stringify([
     process.execPath,
     fixturePath,
@@ -222,6 +205,51 @@ const runRuntimeCli = (
     `${runtime.name} ${args.join(" ")}`,
   );
 
+const authHeaders = (token: string): Record<string, string> => ({
+  authorization: `Bearer ${token}`,
+});
+
+const readStartedMetadata = async (
+  env: Record<string, string>,
+  child: ReturnType<typeof Bun.spawn>,
+  runtimeName: ContractRuntimeName,
+): Promise<NonNullable<Awaited<ReturnType<typeof readDaemonMetadata>>>> => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const metadata = await readDaemonMetadata(env);
+    if (metadata !== undefined) {
+      const response = await fetch(`http://127.0.0.1:${metadata.port}/api/health`, {
+        headers: authHeaders(metadata.token),
+      }).catch(() => undefined);
+
+      if (response?.ok === true) {
+        return metadata;
+      }
+    }
+
+    const exited = await Promise.race([
+      child.exited.then((exitCode) => exitCode),
+      sleep(25).then(() => undefined),
+    ]);
+    if (exited !== undefined) {
+      const [stdout, stderr] = await Promise.all([
+        streamText(child.stdout),
+        streamText(child.stderr),
+      ]);
+      throw new Error(
+        [
+          `${runtimeName} daemon exited before writing healthy metadata with exit ${exited}.`,
+          stderr.trim(),
+          stdout.trim(),
+        ]
+          .filter((line) => line.length > 0)
+          .join("\n"),
+      );
+    }
+  }
+
+  throw new Error("Daemon metadata was not written.");
+};
+
 export const startContractDaemon = async (
   runtime: ContractRuntime,
   options: StartContractOptions = {},
@@ -241,32 +269,14 @@ export const startContractDaemon = async (
       : (options.extraEnv ?? {});
   const env = contractEnv(context, scenario, extra);
 
-  const startArgs =
-    runtime.startCommand === "resume"
-      ? [runtime.startCommand, courseName]
-      : [runtime.startCommand];
-  const start = await runRuntimeCli(runtime, startArgs, env);
-  if (start.exitCode !== 0 || start.stderr.length > 0) {
-    throw new Error(
-      [
-        `${runtime.name} ${runtime.startCommand} failed with exit ${start.exitCode}.`,
-        start.stderr.trim(),
-        start.stdout.trim(),
-      ]
-        .filter((line) => line.length > 0)
-        .join("\n"),
-    );
-  }
-
-  const metadata = await readDaemonMetadata(env);
-  if (metadata === undefined) {
-    throw new Error("Daemon metadata was not written.");
-  }
-
-  const url =
-    runtime.name === "sidecar"
-      ? `http://localhost:${metadata.port}`
-      : start.stdout.trim();
+  const child = Bun.spawn([...runtime.command, "daemon"], {
+    env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const metadata = await readStartedMetadata(env, child, runtime.name);
+  const url = `http://localhost:${metadata.port}`;
   if (!/^http:\/\/localhost:\d+$/.test(url)) {
     throw new Error(`Unexpected daemon URL: ${url}`);
   }
@@ -279,7 +289,10 @@ export const startContractDaemon = async (
     stopped = true;
 
     try {
-      const response = await fetch(`${url}/api/shutdown`, { method: "POST" });
+      const response = await fetch(`${url}/api/shutdown`, {
+        method: "POST",
+        headers: authHeaders(metadata.token),
+      });
       if (!response.ok) {
         throw new Error(`Shutdown failed with HTTP ${response.status}.`);
       }
@@ -303,6 +316,7 @@ export const startContractDaemon = async (
     env,
     logPath,
     url,
+    token: metadata.token,
     pid: metadata.pid,
     runCli: (args, extraEnv = {}) =>
       runRuntimeCli(runtime, args, { ...env, ...extraEnv }),

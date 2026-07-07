@@ -346,7 +346,7 @@ export const buildTurnPrompt = (input: TurnPromptInput): string =>
     "# Overlearn daemon turn",
     "",
     "The daemon owns the event loop for this course. Your durable interface is only the overlearn-teaching MCP server plus the conversation with the learner.",
-    "Do not write course files directly. Do not run `learn emit`, `learn say`, `learn wait`, `learn stop`, or any other `learn` callback command from this turn.",
+    "Do not write course files directly. Use only the MCP tools and the conversation response; no sidecar callback commands are available.",
     `Course id: ${input.courseId}`,
     `Course title: ${input.courseTitle}`,
     resumePreamble(input),
