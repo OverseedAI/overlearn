@@ -307,6 +307,7 @@ export function CourseScreen() {
         {railOpen ? (
           <aside className="hidden w-80 shrink-0 border-l lg:block">
             <StudyRail
+              courseId={courseId}
               lessons={lessons}
               glossary={glossary}
               tab={railTab}

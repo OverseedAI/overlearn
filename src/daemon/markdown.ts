@@ -252,7 +252,9 @@ export const renderDemoEmbed = (
     options.resolveDemoHref?.(file) ?? `/demos/${encodeURIComponent(file)}`;
 
   return [
-    `<article class="demo-card" data-demo-file="${escapeHtml(file)}">`,
+    `<article class="demo-card" data-demo-file="${escapeHtml(
+      file,
+    )}" data-demo-title="${escapeHtml(displayTitle)}">`,
     '<div class="demo-titlebar">',
     `<div class="demo-title"><span class="demo-badge">demo</span>${escapeHtml(
       displayTitle,

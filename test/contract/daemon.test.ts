@@ -480,15 +480,35 @@ describe(`daemon contract (${runtime.name})`, () => {
           ANTHROPIC_API_KEY: "test-anthropic",
           OPENAI_API_KEY: "test-openai",
           GEMINI_API_KEY: "test-gemini",
-          FAKE_ACP_MCP_CALL: JSON.stringify({
-            server: "overlearn-teaching",
-            tool: "record_mastery",
-            args: {
-              concept: "compound-growth",
-              score: 84,
-              gaps: "none",
+          FAKE_ACP_MCP_CALL: JSON.stringify([
+            {
+              server: "overlearn-teaching",
+              tool: "record_mastery",
+              args: {
+                concept: "compound-growth",
+                score: 84,
+                gaps: "none",
+              },
             },
-          }),
+            {
+              server: "overlearn-teaching",
+              tool: "emit_demo",
+              args: {
+                title: "Compound growth",
+                body: "<h1>Compound growth</h1><script>document.title='demo';</script>",
+                format: "html",
+                fileName: "compound-growth.html",
+              },
+            },
+            {
+              server: "overlearn-teaching",
+              tool: "upsert_lesson",
+              args: {
+                lessonId: "compound-growth",
+                body: '# Compound growth\n\n:::demo compound-growth.html "Compound growth"',
+              },
+            },
+          ]),
         },
       });
       const sse = await createSseClient(daemon.url, daemon.token);
@@ -586,6 +606,12 @@ describe(`daemon contract (${runtime.name})`, () => {
           "turn done stream",
         );
 
+        await sse.waitFor(
+          "lesson",
+          (data) => isRecord(data) && data["courseId"] === createdId,
+          "lesson changed event",
+        );
+
         const state = await courseState(daemon, createdId);
         expect(state["mastery"]).toContainEqual(
           expect.objectContaining({
@@ -600,6 +626,41 @@ describe(`daemon contract (${runtime.name})`, () => {
             text: "recorded mastery compound-growth=84",
           }),
         );
+        expect(state["transcript"]).toContainEqual(
+          expect.objectContaining({
+            role: "agent",
+            kind: "demo",
+            file: "compound-growth.html",
+            title: "Compound growth",
+          }),
+        );
+        expect(state["transcript"]).toContainEqual(
+          expect.objectContaining({
+            role: "agent",
+            kind: "lesson",
+            lesson: "compound-growth",
+          }),
+        );
+
+        const lessons = state["lessons"];
+        expect(isRecord(lessons)).toBe(true);
+        const renderedLessons = isRecord(lessons) ? lessons["lessons"] : [];
+        expect(renderedLessons).toContainEqual(
+          expect.objectContaining({
+            id: "compound-growth",
+            html: expect.stringContaining('data-demo-file="compound-growth.html"'),
+          }),
+        );
+
+        const demoPage = await authFetch(
+          daemon,
+          `/api/courses/${createdId}/demos/compound-growth.html`,
+        );
+        expect(demoPage.status).toBe(200);
+        expect(demoPage.headers.get("content-security-policy")).toContain(
+          "default-src 'none'",
+        );
+        expect(await demoPage.text()).toContain("<h1>Compound growth</h1>");
 
         const logs = await waitForLogEntries(
           daemon.logPath,

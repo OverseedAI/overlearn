@@ -25,6 +25,7 @@ import {
   listFeynmanChecks,
   listGlossary,
   listLatestMasteryScores,
+  listLessons,
   openStore,
   readTopicTree,
   type Course,
@@ -37,6 +38,7 @@ const expectedToolNames: readonly TeachingToolName[] = [
   "get_course_state",
   "upsert_topic",
   "emit_demo",
+  "upsert_lesson",
   "record_mastery",
   "feynman_check",
   "upsert_glossary_entry",
@@ -350,6 +352,21 @@ const exerciseDraftTools = async (
     },
   });
 
+  const lessonResult = parseResult(
+    await withTimeout(
+      client.callTool("upsert_lesson", {
+        lessonId: "rule-of-72",
+        body: '# Rule of 72\n\nDivide 72 by the growth rate.\n\n:::demo growth.html "Growth table"',
+      }),
+      3_000,
+      "upsert_lesson",
+    ),
+  );
+  expect(lessonResult).toMatchObject({
+    ok: true,
+    lesson: { id: "rule-of-72" },
+  });
+
   const state = parseResult(
     await withTimeout(
       client.callTool("get_course_state", { transcriptLimit: 3 }),
@@ -375,6 +392,9 @@ const exerciseDraftTools = async (
   expect(asArray(state["transcriptTail"], "transcriptTail")).toHaveLength(3);
   expect(asArray(state["glossary"], "glossary")).toEqual([
     expect.objectContaining({ term: "Doubling time" }),
+  ]);
+  expect(asArray(state["lessons"], "lessons")).toEqual([
+    expect.objectContaining({ id: "rule-of-72" }),
   ]);
 
   const rootTopics = asArray(state["topics"], "topics");
@@ -428,11 +448,27 @@ const exerciseDraftTools = async (
     "record_mastery",
     "feynman_check",
     "emit_demo",
+    "upsert_lesson",
     "propose_course_plan",
   ]);
   expect(
     fixture.writes.every((event) => event.courseId === fixture.draftCourse.id),
   ).toBe(true);
+  const demoId = asRecord(demoResult["demo"], "demo")["id"];
+  expect(
+    fixture.writes.find((event) => event.tool === "emit_demo")?.attachment,
+  ).toEqual({
+    kind: "demo",
+    // Markdown demos fall back to the synthesized servable .html key.
+    file: `demo-${demoId}.html`,
+    title: "Growth table",
+  });
+  expect(
+    fixture.writes.find((event) => event.tool === "upsert_lesson")?.attachment,
+  ).toEqual({
+    kind: "lesson",
+    lessonId: "rule-of-72",
+  });
 
   expect(getCourse(fixture.store, fixture.draftCourse.id)).toMatchObject({
     title: "Planned Finance",
@@ -452,6 +488,9 @@ const exerciseDraftTools = async (
     1,
   );
   expect(listDemos(fixture.store, fixture.draftCourse.id)).toHaveLength(1);
+  expect(listLessons(fixture.store, fixture.draftCourse.id)).toMatchObject([
+    { lessonId: "rule-of-72" },
+  ]);
 };
 
 const exerciseActiveScope = async (

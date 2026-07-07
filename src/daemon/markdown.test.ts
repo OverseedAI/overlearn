@@ -74,6 +74,8 @@ describe("renderMarkdown demo directives", () => {
 
     expect(html).toContain("<p>Before</p>");
     expect(html).toContain('class="demo-card"');
+    expect(html).toContain('data-demo-file="growth.html"');
+    expect(html).toContain('data-demo-title="Growth curve"');
     expect(html).toContain("Growth curve");
     expect(html).toContain('src="/demos/growth.html"');
     expect(html).toContain('sandbox="allow-scripts"');

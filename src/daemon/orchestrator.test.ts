@@ -140,7 +140,7 @@ describe("daemon turn orchestration helpers", () => {
           "Attached directory reads are pre-approved for this learning session.",
       },
     ]));
-    expect(policy.allow).toHaveLength(9);
+    expect(policy.allow).toHaveLength(10);
   });
 
   test("default permission policy only allows Overlearn MCP without an attached dir", () => {
@@ -164,7 +164,7 @@ describe("daemon turn orchestration helpers", () => {
       defaultDecision: "deny",
       defaultReason: "Permission was not pre-approved by the course daemon.",
     });
-    expect(policy.allow).toHaveLength(7);
+    expect(policy.allow).toHaveLength(8);
   });
 
   test("parses harness command override strings and JSON arrays", () => {

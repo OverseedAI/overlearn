@@ -5,7 +5,7 @@ import { cn } from "./utils";
 
 marked.setOptions({ gfm: true, breaks: true });
 
-const PROSE =
+export const PROSE =
   "prose prose-sm dark:prose-invert max-w-none " +
   "prose-headings:font-semibold prose-pre:rounded-lg " +
   "prose-code:before:content-none prose-code:after:content-none";
