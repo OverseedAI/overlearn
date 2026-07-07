@@ -253,6 +253,36 @@ function Entry({
   return null;
 }
 
+/**
+ * Older courses persisted streamed agent text as one row per chunk. Merge
+ * consecutive agent text entries written within a few seconds of each other
+ * so they read as one message. (New turns are persisted whole by the daemon.)
+ */
+function coalesceAgentText(entries: TranscriptEntry[]): TranscriptEntry[] {
+  const result: TranscriptEntry[] = [];
+  for (const entry of entries) {
+    const previous = result[result.length - 1];
+    if (
+      previous !== undefined &&
+      previous.role === "agent" &&
+      entry.role === "agent" &&
+      ("kind" in previous ? (previous.kind ?? "text") : "text") === "text" &&
+      ("kind" in entry ? (entry.kind ?? "text") : "text") === "text" &&
+      "text" in previous &&
+      "text" in entry &&
+      Math.abs(Date.parse(entry.at) - Date.parse(previous.at)) < 15_000
+    ) {
+      result[result.length - 1] = {
+        ...previous,
+        text: previous.text + entry.text,
+      };
+    } else {
+      result.push(entry);
+    }
+  }
+  return result;
+}
+
 export function Transcript({
   entries,
   courseId,
@@ -296,7 +326,16 @@ export function Transcript({
       aria-live="polite"
     >
       <div className="mx-auto w-full max-w-3xl space-y-6 px-6 py-8">
-        {entries.map((entry, index) => (
+        {entries.length === 0 && !activity && !showTyping ? (
+          <div className="py-24 text-center">
+            <BookOpenText className="mx-auto size-4 text-muted-foreground" />
+            <p className="mt-3 text-sm text-pretty text-muted-foreground">
+              Your agent teaches through conversation. Say hello, ask for the
+              first topic, or pick one from the sidebar.
+            </p>
+          </div>
+        ) : null}
+        {coalesceAgentText(entries).map((entry, index) => (
           <Entry
             key={`${entry.at}-${index}`}
             entry={entry}

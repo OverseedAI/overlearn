@@ -29,6 +29,24 @@ agent's in-context memory does not.
 Release steps and desktop artifact locations are documented in
 [docs/release.md](docs/release.md).
 
+## UI
+
+The interface is a Vite + React + Tailwind v4 + shadcn/ui SPA in [`ui/`](ui/),
+served by the daemon at `/` from assets embedded into the sidecar binary
+(`bun run ui:build` → gitignored `src/daemon/spa-assets.gen.ts`; `bun run
+build` does this automatically). Design conventions live in
+[`ui/DESIGN.md`](ui/DESIGN.md).
+
+For fast UI iteration against a running daemon, read `port`/`token` from the
+daemon's `daemon.json` and start the Vite dev server with its proxy:
+
+```sh
+OVERLEARN_DAEMON_PORT=<port> OVERLEARN_DAEMON_TOKEN=<token> bun run --cwd ui dev
+```
+
+Set `OVERLEARN_LEGACY_UI=1` on the daemon to fall back to the previous
+server-rendered UI.
+
 ## Testing
 
 Run the main checks:

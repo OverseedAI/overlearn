@@ -341,9 +341,18 @@ describe(`daemon contract (${runtime.name})`, () => {
         });
         expect(advanced.status).toBe(200);
 
+        // The page shell may be the SPA (title arrives via API) or the legacy
+        // server-rendered page (title inline) — assert both layers directly.
         const opened = await authFetch(daemon, `/?course=${courseId}`);
         expect(opened.status).toBe(200);
-        await expect(opened.text()).resolves.toContain("Learning Overlearn");
+        await expect(opened.text()).resolves.toContain("Overlearn");
+
+        const openedState = await authFetch(daemon, `/api/courses/${courseId}`);
+        expect(openedState.status).toBe(200);
+        const openedStateBody = (await openedState.json()) as {
+          course: { title: string };
+        };
+        expect(openedStateBody.course.title).toBe("Learning Overlearn");
 
         await submitCourseMessage(
           daemon.url,

@@ -1199,6 +1199,7 @@ export const runDaemon = async (
   };
 
   const onTeachingWrite = (event: TeachingWriteEvent): void => {
+    flushPendingAgentText(event.courseId);
     const turn = activeTurnByCourse.get(event.courseId);
     const entry = appendUiTranscript(store, event.courseId, {
       ...(turn === undefined ? {} : { turn }),
@@ -1266,17 +1267,46 @@ export const runDaemon = async (
     }
   };
 
+  // ACP harnesses stream agent text as per-chunk events; buffer them per
+  // course/turn and persist one transcript row per contiguous message so the
+  // stored transcript (and exports) aren't fragmented into token deltas.
+  const pendingAgentText = new Map<number, { turn: number; text: string }>();
+
+  const flushPendingAgentText = (courseId: number): void => {
+    const pending = pendingAgentText.get(courseId);
+    pendingAgentText.delete(courseId);
+    if (pending === undefined || pending.text.length === 0) {
+      return;
+    }
+
+    const entry = appendUiTranscript(store, courseId, {
+      turn: pending.turn,
+      role: "agent",
+      kind: "text",
+      content: pending.text,
+    });
+    sseHub.broadcast("message", { courseId, entry });
+  };
+
   const appendAgentEventTranscript = (payload: AgentStreamPayload): void => {
     const event = payload.event;
 
     if (event.type === "text") {
-      const entry = appendUiTranscript(store, payload.courseId, {
-        turn: payload.turn,
-        role: "agent",
-        kind: "text",
-        content: event.text,
-      });
-      sseHub.broadcast("message", { courseId: payload.courseId, entry });
+      const pending = pendingAgentText.get(payload.courseId);
+      if (pending !== undefined && pending.turn === payload.turn) {
+        pending.text += event.text;
+      } else {
+        flushPendingAgentText(payload.courseId);
+        pendingAgentText.set(payload.courseId, {
+          turn: payload.turn,
+          text: event.text,
+        });
+      }
+      return;
+    }
+
+    if (event.type === "done" || event.type === "error") {
+      flushPendingAgentText(payload.courseId);
       return;
     }
 
@@ -1284,6 +1314,7 @@ export const runDaemon = async (
       event.type === "tool-call" &&
       (event.status === "completed" || event.status === "failed")
     ) {
+      flushPendingAgentText(payload.courseId);
       const tool = event.name ?? event.id;
       const summary =
         event.status === "failed"

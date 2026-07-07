@@ -36,15 +36,21 @@ function TopicBranch({
     return (
       <SidebarMenuSubItem>
         <SidebarMenuSubButton
+          asChild
           isActive={topic.current}
           aria-disabled={disabled}
-          onClick={() => {
-            if (!disabled && !topic.current) {
-              onNavigate(topic.path);
-            }
-          }}
         >
-          <span className="truncate">{topic.title}</span>
+          <button
+            type="button"
+            className="w-full"
+            onClick={() => {
+              if (!disabled && !topic.current) {
+                onNavigate(topic.path);
+              }
+            }}
+          >
+            <span className="truncate">{topic.title}</span>
+          </button>
         </SidebarMenuSubButton>
       </SidebarMenuSubItem>
     );
@@ -55,16 +61,21 @@ function TopicBranch({
       <Collapsible defaultOpen={containsCurrent(topic)} className="group/branch">
         <div className="flex items-center">
           <SidebarMenuSubButton
+            asChild
             isActive={topic.current}
             aria-disabled={disabled}
             className="flex-1"
-            onClick={() => {
-              if (!disabled && !topic.current) {
-                onNavigate(topic.path);
-              }
-            }}
           >
-            <span className="truncate">{topic.title}</span>
+            <button
+              type="button"
+              onClick={() => {
+                if (!disabled && !topic.current) {
+                  onNavigate(topic.path);
+                }
+              }}
+            >
+              <span className="truncate">{topic.title}</span>
+            </button>
           </SidebarMenuSubButton>
           <CollapsibleTrigger asChild>
             <button
