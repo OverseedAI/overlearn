@@ -26,6 +26,7 @@ type FakeScenario =
   | "normal"
   | "permission"
   | "mcp-permission"
+  | "claude-mcp-permission"
   | "never"
   | "slow-initialize"
   | "crash-always"
@@ -570,6 +571,49 @@ describe("ACP harness adapter sessions", () => {
         reason: "complete",
       },
     ]);
+  });
+
+  test("approves MCP tools named mcp__server__tool without an approval flag", async () => {
+    const { adapter, session } = await createFakeSession(
+      "claude-mcp-permission",
+      {
+        permissionPolicy: {
+          allow: [
+            {
+              action: "mcp",
+              resource: "overlearn-teaching.get_course_state",
+              reason: "Overlearn teaching MCP reads are pre-approved.",
+            },
+          ],
+        },
+      },
+    );
+    const events = await collectEvents(
+      adapter.prompt(session, "read course state"),
+      "claude mcp permission events",
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      "tool-call",
+      "permission-request",
+      "text",
+      "done",
+    ]);
+    expect(events[1]).toEqual({
+      type: "permission-request",
+      request: expect.objectContaining({
+        action: "mcp",
+        resource: "overlearn-teaching.get_course_state",
+      }),
+      decision: {
+        allowed: true,
+        reason: "Overlearn teaching MCP reads are pre-approved.",
+      },
+    });
+    expect(events[2]).toEqual({
+      type: "text",
+      text: "claude mcp permission granted by fake",
+    });
   });
 
   test("denies permissions by default when no allowlist rule matches", () => {

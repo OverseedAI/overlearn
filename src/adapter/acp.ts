@@ -53,6 +53,8 @@ export type AcpAdapterDefinition = Readonly<{
   id: HarnessAdapterId;
   name: string;
   command: string;
+  /** Older binary names still accepted when the primary is not installed. */
+  commandFallbacks?: readonly string[];
   args: readonly string[];
   versionArgs?: readonly string[];
   auth?: AcpAuthDetection;
@@ -952,6 +954,23 @@ const rawInputPath = (value: unknown): string | undefined => {
   return optionalString(value, "path") ?? optionalString(value, "file");
 };
 
+// Claude Code names MCP tools "mcp__<server>__<tool>"; permission rules use
+// "<server>.<tool>", so translate when a permission request carries that form.
+const mcpToolResource = (value: string | undefined): string | undefined => {
+  if (value === undefined || !value.startsWith("mcp__")) {
+    return undefined;
+  }
+
+  const rest = value.slice("mcp__".length);
+  const separator = rest.indexOf("__");
+
+  if (separator <= 0 || separator + 2 >= rest.length) {
+    return undefined;
+  }
+
+  return `${rest.slice(0, separator)}.${rest.slice(separator + 2)}`;
+};
+
 const normalizeAcpPermissionRequest = (
   params: unknown,
   id: JsonRpcId,
@@ -962,10 +981,18 @@ const normalizeAcpPermissionRequest = (
   const metadata = isJsonObject(toolCall) ? toolCall : undefined;
   const title = optionalString(toolCall, "title");
   const toolCallId = optionalString(toolCall, "toolCallId");
+  const namedMcpResource =
+    mcpToolResource(title) ??
+    mcpToolResource(optionalString(toolCall, "name")) ??
+    mcpToolResource(optionalString(toolCall, "toolName"));
   const isMcpApproval =
-    isRecord(record["_meta"]) && record["_meta"]["is_mcp_tool_approval"] === true;
+    (isRecord(record["_meta"]) &&
+      record["_meta"]["is_mcp_tool_approval"] === true) ||
+    namedMcpResource !== undefined;
   const mcpResource =
-    toolCallId === undefined ? undefined : state.mcpToolCallResources.get(toolCallId);
+    (toolCallId === undefined
+      ? undefined
+      : state.mcpToolCallResources.get(toolCallId)) ?? namedMcpResource;
   const resource =
     mcpResource ??
     firstLocationPath(toolCall["locations"]) ??
@@ -1245,18 +1272,36 @@ const detectVersion = (
   }
 };
 
+const commandCandidates = (
+  definition: AcpAdapterDefinition,
+  override: AcpAdapterOverride,
+): readonly string[] =>
+  override.command !== undefined
+    ? [override.command]
+    : [definition.command, ...(definition.commandFallbacks ?? [])];
+
+const resolveInstalledCommand = (
+  definition: AcpAdapterDefinition,
+  override: AcpAdapterOverride,
+  env: Readonly<Record<string, string>>,
+): string | undefined =>
+  commandCandidates(definition, override).find((candidate) => {
+    const path =
+      env["PATH"] === undefined
+        ? Bun.which(candidate)
+        : Bun.which(candidate, { PATH: env["PATH"] });
+
+    return path !== null;
+  });
+
 const detectAdapter = (
   definition: AcpAdapterDefinition,
   override: AcpAdapterOverride,
 ): AdapterDetection => {
-  const command = override.command ?? definition.command;
   const env = mergeEnv(process.env, override.env ?? {});
-  const path =
-    env["PATH"] === undefined
-      ? Bun.which(command)
-      : Bun.which(command, { PATH: env["PATH"] });
+  const command = resolveInstalledCommand(definition, override, env);
 
-  if (path === null) {
+  if (command === undefined) {
     return {
       installed: false,
       authenticated: false,
@@ -1299,8 +1344,10 @@ export const createAcpHarnessAdapter = (
       let state: AcpSessionState | undefined;
       const requestTimeoutMs =
         override.requestTimeoutMs ?? defaultRequestTimeoutMs;
+      const spawnEnv = mergeEnv(process.env, override.env ?? {});
       const commandLine = [
-        override.command ?? definition.command,
+        resolveInstalledCommand(definition, override, spawnEnv) ??
+          definition.command,
         ...(override.args ?? definition.args),
       ];
       const rpc = startJsonRpcClient(

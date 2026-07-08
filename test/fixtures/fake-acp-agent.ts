@@ -11,6 +11,7 @@ type Scenario =
   | "normal"
   | "permission"
   | "mcp-permission"
+  | "claude-mcp-permission"
   | "never"
   | "slow-initialize"
   | "crash-once"
@@ -532,6 +533,71 @@ const runMcpPermissionTurn = async (promptId: JsonRpcId): Promise<void> => {
   finishPrompt(promptId, "end_turn");
 };
 
+// Mirrors claude-code-acp's wire shape: the MCP tool is only identifiable by
+// its "mcp__<server>__<tool>" title, with no _meta approval flag and no
+// server/tool fields in rawInput.
+const runClaudeMcpPermissionTurn = async (promptId: JsonRpcId): Promise<void> => {
+  const toolCallId = "toolu_1";
+  const toolTitle = "mcp__overlearn-teaching__get_course_state";
+
+  await sleep(5);
+  update({
+    sessionUpdate: "tool_call",
+    toolCallId,
+    title: toolTitle,
+    kind: "other",
+    status: "pending",
+    rawInput: {},
+  });
+
+  const id = nextServerRequestId;
+  nextServerRequestId += 1;
+
+  send({
+    jsonrpc: "2.0",
+    id,
+    method: "session/request_permission",
+    params: {
+      sessionId,
+      toolCall: {
+        toolCallId,
+        title: toolTitle,
+        rawInput: {},
+      },
+      options: [
+        {
+          optionId: "allow_once",
+          name: "Yes",
+          kind: "allow_once",
+        },
+        {
+          optionId: "reject_once",
+          name: "No",
+          kind: "reject_once",
+        },
+      ],
+    },
+  });
+
+  const response = await new Promise<Readonly<{ selectedOptionId?: string }>>(
+    (resolve) => {
+      pendingPermission = resolve;
+    },
+  );
+
+  await sleep(5);
+  update(
+    textChunk(
+      "agent_message_chunk",
+      response.selectedOptionId === "allow_once"
+        ? "claude mcp permission granted by fake"
+        : "claude mcp permission denied by fake",
+    ),
+  );
+  await sleep(5);
+  finishPrompt(promptId, "end_turn");
+};
+
 const runNeverTurn = async (): Promise<void> => {
   await sleep(5);
   update(textChunk("agent_thought_chunk", "waiting forever"));
@@ -572,6 +638,11 @@ const runTurn = (promptId: JsonRpcId): void => {
 
   if (scenario === "mcp-permission") {
     void runMcpPermissionTurn(promptId);
+    return;
+  }
+
+  if (scenario === "claude-mcp-permission") {
+    void runClaudeMcpPermissionTurn(promptId);
     return;
   }
 

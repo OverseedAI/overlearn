@@ -67,7 +67,11 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
   {
     id: "claude-code",
     name: "Claude Code",
-    command: "claude-code-acp",
+    // @zed-industries/claude-code-acp was renamed to
+    // @agentclientprotocol/claude-agent-acp; keep the old binary as a fallback
+    // for existing installs.
+    command: "claude-agent-acp",
+    commandFallbacks: ["claude-code-acp"],
     args: [],
     versionArgs: ["--version"],
     install: {
@@ -76,7 +80,7 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
         "install",
         "-g",
         "@anthropic-ai/claude-code",
-        "@zed-industries/claude-code-acp",
+        "@agentclientprotocol/claude-agent-acp",
       ],
       docsUrl: "https://docs.anthropic.com/en/docs/claude-code/setup",
     },
