@@ -205,7 +205,7 @@ function NewCourseDialog({
     }
     let cancelled = false;
     api
-      .listHarnesses()
+      .listHarnesses({ scope: "profile" })
       .then((list) => {
         if (!cancelled) {
           setHarnesses(list);
