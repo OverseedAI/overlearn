@@ -45,7 +45,7 @@ describe("createTutorialCourse", () => {
         isCurrent: true,
       });
       expect(topics[0]?.body).toContain("Your connected agent teaches");
-      expect(topics.at(-1)?.body).toContain("brainstorm wizard");
+      expect(topics.at(-1)?.body).toContain("seed prompt");
     });
   });
 

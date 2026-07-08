@@ -45,14 +45,14 @@ const expectedToolNames: readonly TeachingToolName[] = [
   "record_mastery",
   "feynman_check",
   "upsert_glossary_entry",
-  "propose_course_plan",
+  "update_course_info",
 ];
 
 type Transport = "http" | "stdio-proxy";
 
 type Fixture = Readonly<{
   store: Store;
-  draftCourse: Course;
+  teachingCourse: Course;
   activeCourse: Course;
   scopes: ReadonlyMap<string, TeachingSessionScope>;
   setActiveTurn: (token: string, turn: ActiveTeachingTurn | null) => void;
@@ -152,9 +152,9 @@ const withFixture = async (
   const store = openStore({ databasePath: join(dir, "overlearn.sqlite") });
 
   try {
-    const draftCourse = createCourse(store, {
-      title: "Draft Finance",
-      description: "Draft description",
+    const teachingCourse = createCourse(store, {
+      title: "Seeded Finance",
+      description: "Seed description",
       status: "active",
       harnessId: "codex",
       attachedDir: "/tmp/finance",
@@ -167,7 +167,7 @@ const withFixture = async (
     });
 
     for (let turn = 1; turn <= 25; turn += 1) {
-      appendTranscriptEntry(store, draftCourse.id, {
+      appendTranscriptEntry(store, teachingCourse.id, {
         turn,
         role: turn % 2 === 0 ? "agent" : "learner",
         content: `transcript turn ${turn}`,
@@ -180,7 +180,7 @@ const withFixture = async (
       [
         "token-a",
         {
-          courseId: draftCourse.id,
+          courseId: teachingCourse.id,
           getActiveTurn: () => activeTurns.get("token-a") ?? undefined,
         },
       ],
@@ -199,7 +199,7 @@ const withFixture = async (
 
     await run({
       store,
-      draftCourse,
+      teachingCourse,
       activeCourse,
       scopes,
       setActiveTurn,
@@ -238,7 +238,7 @@ const createClient = (
   );
 };
 
-const exerciseDraftTools = async (
+const exerciseTeachingTools = async (
   client: McpClient,
   fixture: Fixture,
 ): Promise<void> => {
@@ -379,7 +379,7 @@ const exerciseDraftTools = async (
     },
   });
 
-  const tangentTopic = upsertTopic(fixture.store, fixture.draftCourse.id, {
+  const tangentTopic = upsertTopic(fixture.store, fixture.teachingCourse.id, {
     path: "finance/tangent",
     title: "Finance tangent",
     isCurrent: false,
@@ -485,8 +485,8 @@ const exerciseDraftTools = async (
   expect(state).toMatchObject({
     server: teachingMcpServerName,
     course: {
-      id: fixture.draftCourse.id,
-      title: "Draft Finance",
+      id: fixture.teachingCourse.id,
+      title: "Seeded Finance",
       status: "active",
       attachedDir: "/tmp/finance",
       harness: "codex",
@@ -559,23 +559,78 @@ const exerciseDraftTools = async (
     ],
   });
 
-  const planResult = await withTimeout(
-    client.callTool("propose_course_plan", {
-      title: "Planned Finance",
-      description: "A sharper plan.",
-      topics: [
-        {
-          path: "basics",
-          title: "Basics",
-          summary: "Core mental math.",
-        },
-      ],
-    }),
-    3_000,
-    "propose_course_plan",
+  const courseInfoResult = parseResult(
+    await withTimeout(
+      client.callTool("update_course_info", {
+        title: "Practical Finance",
+        description: "A sharper seed-driven course.",
+      }),
+      3_000,
+      "update_course_info",
+    ),
   );
-  expect(planResult.isError).toBe(true);
-  expect(parseResult(planResult)["error"]).toContain("only valid for draft courses");
+  expect(courseInfoResult).toMatchObject({
+    ok: true,
+    course: {
+      id: fixture.teachingCourse.id,
+      title: "Practical Finance",
+      description: "A sharper seed-driven course.",
+      status: "active",
+    },
+  });
+  const titleOnlyResult = parseResult(
+    await withTimeout(
+      client.callTool("update_course_info", {
+        title: "Practical Finance Renamed",
+      }),
+      3_000,
+      "update_course_info title only",
+    ),
+  );
+  expect(titleOnlyResult).toMatchObject({
+    ok: true,
+    course: {
+      title: "Practical Finance Renamed",
+      description: "A sharper seed-driven course.",
+    },
+  });
+  const descriptionCleared = parseResult(
+    await withTimeout(
+      client.callTool("update_course_info", {
+        description: null,
+      }),
+      3_000,
+      "update_course_info clear description",
+    ),
+  );
+  expect(descriptionCleared).toMatchObject({
+    ok: true,
+    course: {
+      title: "Practical Finance Renamed",
+      description: null,
+    },
+  });
+
+  const firstTopicResult = parseResult(
+    await withTimeout(
+      client.callTool("upsert_topic", {
+        path: "orientation-start",
+        title: "Orientation start",
+        body: "The mentor chose this as the first topic.",
+        setCurrent: true,
+      }),
+      3_000,
+      "orientation first topic entry",
+    ),
+  );
+  expect(firstTopicResult).toMatchObject({
+    ok: true,
+    topic: {
+      path: "orientation-start",
+      title: "Orientation start",
+      current: true,
+    },
+  });
 
   expect(fixture.writes.map((event) => event.tool)).toEqual([
     "upsert_topic",
@@ -587,9 +642,13 @@ const exerciseDraftTools = async (
     "emit_demo",
     "emit_demo",
     "emit_demo",
+    "update_course_info",
+    "update_course_info",
+    "update_course_info",
+    "upsert_topic",
   ]);
   expect(
-    fixture.writes.every((event) => event.courseId === fixture.draftCourse.id),
+    fixture.writes.every((event) => event.courseId === fixture.teachingCourse.id),
   ).toBe(true);
   const demoId = asRecord(demoResult["demo"], "demo")["id"];
   const noteEntryId = asRecord(noteResult["entry"], "note entry result")["id"];
@@ -613,43 +672,52 @@ const exerciseDraftTools = async (
     markdown: "The Rule of 72 estimates doubling time as 72 / rate.",
   });
 
-  expect(getCourse(fixture.store, fixture.draftCourse.id)).toMatchObject({
-    title: "Draft Finance",
-    description: "Draft description",
+  expect(getCourse(fixture.store, fixture.teachingCourse.id)).toMatchObject({
+    title: "Practical Finance Renamed",
+    description: null,
   });
-  const persistedTopics = readTopicTree(fixture.store, fixture.draftCourse.id);
-  expect(persistedTopics.map((topic) => topic.path)).toEqual(["finance"]);
+  const persistedTopics = readTopicTree(fixture.store, fixture.teachingCourse.id);
+  expect(persistedTopics.map((topic) => topic.path)).toEqual([
+    "finance",
+    "orientation-start",
+  ]);
   expect(persistedTopics[0]?.children.map((topic) => topic.path)).toEqual([
     "finance/rule-of-72",
     "finance/tangent",
   ]);
   expect(persistedTopics[0]?.children[0]).toMatchObject({
     path: "finance/rule-of-72",
-    isCurrent: true,
+    isCurrent: false,
+    state: "visited",
   });
   expect(persistedTopics[0]?.children[1]).toMatchObject({
     path: "finance/tangent",
     isCurrent: false,
     enteredAt: null,
   });
-  expect(listGlossary(fixture.store, fixture.draftCourse.id)).toHaveLength(1);
-  expect(listLatestMasteryScores(fixture.store, fixture.draftCourse.id)).toHaveLength(
+  expect(persistedTopics[1]).toMatchObject({
+    path: "orientation-start",
+    isCurrent: true,
+    state: "current",
+  });
+  expect(listGlossary(fixture.store, fixture.teachingCourse.id)).toHaveLength(1);
+  expect(listLatestMasteryScores(fixture.store, fixture.teachingCourse.id)).toHaveLength(
     1,
   );
-  expect(listFeynmanChecks(fixture.store, fixture.draftCourse.id)).toHaveLength(
+  expect(listFeynmanChecks(fixture.store, fixture.teachingCourse.id)).toHaveLength(
     1,
   );
-  expect(listDemos(fixture.store, fixture.draftCourse.id)).toHaveLength(2);
+  expect(listDemos(fixture.store, fixture.teachingCourse.id)).toHaveLength(2);
   const currentJournal = listJournalEntries(
     fixture.store,
-    fixture.draftCourse.id,
+    fixture.teachingCourse.id,
     currentTopicId as number,
   );
   expect(currentJournal.map((entry) => entry.kind)).toEqual(["note", "demo"]);
   expect(currentJournal[1]?.demoId).toBe(demoId as number);
   expect(currentJournal[1]?.turn).toBe(26);
   expect(
-    listJournalEntries(fixture.store, fixture.draftCourse.id, tangentTopic.id).map(
+    listJournalEntries(fixture.store, fixture.teachingCourse.id, tangentTopic.id).map(
       (entry) => entry.kind,
     ),
   ).toEqual(["note"]);
@@ -691,24 +759,14 @@ const exerciseActiveScope = async (
   );
 
   const writesBeforeReject = fixture.writes.length;
-  const rejectedPlan = await withTimeout(
-    client.callTool("propose_course_plan", {
-      title: "Should not write",
-      description: "Rejected.",
-      topics: [
-        {
-          path: "blocked",
-          title: "Blocked",
-          summary: "This should not persist.",
-        },
-      ],
-    }),
+  const rejectedUpdate = await withTimeout(
+    client.callTool("update_course_info", {}),
     3_000,
-    "active propose_course_plan",
+    "active update_course_info empty",
   );
-  expect(rejectedPlan.isError).toBe(true);
-  expect(parseResult(rejectedPlan)["error"]).toContain(
-    "only valid for draft courses",
+  expect(rejectedUpdate.isError).toBe(true);
+  expect(parseResult(rejectedUpdate)["error"]).toContain(
+    "requires title or description",
   );
   expect(fixture.writes).toHaveLength(writesBeforeReject);
 
@@ -730,14 +788,14 @@ const runTransportScenario = async (transport: Transport): Promise<void> => {
       },
     });
     const server = startFetchServer(handler);
-    const draftClient = createClient(transport, server.url, "token-a");
+    const teachingClient = createClient(transport, server.url, "token-a");
     const activeClient = createClient(transport, server.url, "token-b");
 
     try {
-      await exerciseDraftTools(draftClient, fixture);
+      await exerciseTeachingTools(teachingClient, fixture);
       await exerciseActiveScope(activeClient, fixture);
     } finally {
-      await withTimeout(draftClient.close(), 3_000, "draft client close");
+      await withTimeout(teachingClient.close(), 3_000, "teaching client close");
       await withTimeout(activeClient.close(), 3_000, "active client close");
       server.stop();
     }
@@ -755,7 +813,7 @@ describe("teaching MCP server", () => {
 
   test("defaults writes to the active turn snapshot topic", async () => {
     await withFixture(async (fixture) => {
-      const snapshotTopic = upsertTopic(fixture.store, fixture.draftCourse.id, {
+      const snapshotTopic = upsertTopic(fixture.store, fixture.teachingCourse.id, {
         path: "snapshot-topic",
         title: "Snapshot topic",
       });
@@ -765,7 +823,7 @@ describe("teaching MCP server", () => {
         topicPath: snapshotTopic.path,
       };
 
-      upsertTopic(fixture.store, fixture.draftCourse.id, {
+      upsertTopic(fixture.store, fixture.teachingCourse.id, {
         path: "clicked-mid-turn",
         title: "Clicked mid-turn",
       });
@@ -773,7 +831,7 @@ describe("teaching MCP server", () => {
       const definition = createTeachingMcpServer({
         store: fixture.store,
         scope: {
-          courseId: fixture.draftCourse.id,
+          courseId: fixture.teachingCourse.id,
           getActiveTurn: () => activeTurn,
         },
         onWrite: (event) => {
@@ -804,7 +862,7 @@ describe("teaching MCP server", () => {
       expect(fixture.writes).toHaveLength(1);
       expect(fixture.writes.at(0)).toMatchObject({
         tool: "upsert_glossary_entry",
-        courseId: fixture.draftCourse.id,
+        courseId: fixture.teachingCourse.id,
         activeTurn,
       });
     });

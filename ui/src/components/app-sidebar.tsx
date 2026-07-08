@@ -139,7 +139,7 @@ export function AppSidebar({ route }: { route: Route }) {
             <SidebarMenu>
               <SidebarMenuItem>
                 <SidebarMenuButton
-                  isActive={route.view === "library" || route.view === "wizard"}
+                  isActive={route.view === "library"}
                   onClick={() => navigate({ view: "library" })}
                 >
                   <LibraryBig className="size-4 shrink-0" />

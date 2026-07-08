@@ -8,10 +8,10 @@ The quick form is best when you already know what you want:
 - Description: "Teach me indexes, transactions, and query planning with small examples."
 - Attached folder: optional, useful when the course should reference a project.
 
-The brainstorm wizard is better when the course shape is unclear. Give it a seed like:
+The seed prompt is better when the course shape is unclear. Give it a seed like:
 
 > I want to understand OAuth well enough to implement it safely in a small app.
 
-The agent will propose a title, description, and topic tree. Review that plan before accepting it. Rename vague topics, delete topics that do not matter, and keep the first course small enough to finish.
+The agent will name the course, ask where you want to enter the territory, and start teaching from the first useful topic. Keep the first course small enough to finish.
 
-A strong first course has five to eight teachable topics, a clear reason you care, and at least one way to practice. Overlearn can help you make the plan, but you should keep ownership of the goal.
+A strong first course has a clear reason you care, at least one way to practice, and enough focus for the next teaching turn to be obvious.

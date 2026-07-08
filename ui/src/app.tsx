@@ -13,7 +13,6 @@ import { CourseScreen } from "@/screens/course";
 import { LibraryScreen } from "@/screens/library";
 import { OnboardingScreen } from "@/screens/onboarding";
 import { SettingsScreen } from "@/screens/settings";
-import { WizardScreen } from "@/screens/wizard";
 
 function ScreenFor({ route }: { route: Route }) {
   switch (route.view) {
@@ -23,8 +22,6 @@ function ScreenFor({ route }: { route: Route }) {
       return <SettingsScreen />;
     case "course":
       return <CourseScreen />;
-    case "wizard":
-      return <WizardScreen />;
   }
 }
 
@@ -61,10 +58,7 @@ function AppContent() {
     return <OnboardingScreen />;
   }
 
-  const courseId =
-    route.view === "course" || route.view === "wizard"
-      ? route.courseId
-      : undefined;
+  const courseId = route.view === "course" ? route.courseId : undefined;
 
   const shell = (
     <SidebarProvider>

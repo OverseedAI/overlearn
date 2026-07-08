@@ -9,7 +9,6 @@ import type {
   ProfileResource,
   ServerEvents,
   SessionSummary,
-  TopicTreeInput,
   TranscriptPage,
 } from "./types";
 
@@ -181,9 +180,9 @@ export const api = {
     attachedDir?: string;
     sourceName?: string;
   }) => post<CourseResource>("/api/courses", body),
-  ideate: (seed: string) =>
+  createCourseFromSeed: (seed: string) =>
     post<{ ok: true; course: CourseResource; turn: number }>(
-      "/api/courses/ideate",
+      "/api/courses",
       { seed },
     ),
   importCourse: (path: string) =>
@@ -219,18 +218,9 @@ export const api = {
       status: CourseStatus;
     }>,
   ) => patch<CourseResource>(`/api/courses/${id}`, body),
-  deleteCourse: (id: number) =>
-    del<CourseResource | { ok: true; deleted: true }>(`/api/courses/${id}`),
+  deleteCourse: (id: number) => del<CourseResource>(`/api/courses/${id}`),
   submit: (id: number, text: string) =>
     post<{ ok: true; turn: number }>(`/api/courses/${id}/submit`, { text }),
-  acceptPlan: (
-    id: number,
-    body: { title?: string; description?: string; topics?: TopicTreeInput[] },
-  ) =>
-    post<{ ok: true; course: CourseResource; greetingQueued: true }>(
-      `/api/courses/${id}/accept-plan`,
-      body,
-    ),
   nav: (id: number, path: string) =>
     post<{ ok: true; turn: number }>(`/api/courses/${id}/nav`, { path }),
   reviewWeak: (id: number) =>

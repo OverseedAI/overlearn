@@ -3,8 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 export type Route =
   | { view: "library" }
   | { view: "settings" }
-  | { view: "course"; courseId: number }
-  | { view: "wizard"; courseId: number };
+  | { view: "course"; courseId: number };
 
 function parseRoute(): Route {
   // Compatibility with the previous UI / Tauri bootstrap: /?course=<id>
@@ -15,9 +14,6 @@ function parseRoute(): Route {
 
   if (head === "course" && Number.isInteger(Number(tail))) {
     return { view: "course", courseId: Number(tail) };
-  }
-  if (head === "wizard" && Number.isInteger(Number(tail))) {
-    return { view: "wizard", courseId: Number(tail) };
   }
   if (head === "settings") {
     return { view: "settings" };
@@ -36,8 +32,6 @@ function routeToHash(route: Route): string {
       return "#/settings";
     case "course":
       return `#/course/${route.courseId}`;
-    case "wizard":
-      return `#/wizard/${route.courseId}`;
   }
 }
 

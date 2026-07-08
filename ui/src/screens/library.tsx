@@ -430,7 +430,7 @@ function BrainstormDialog({
     }
     setSubmitting(true);
     try {
-      const result = await api.ideate(trimmed);
+      const result = await api.createCourseFromSeed(trimmed);
       onStarted(result.course.id);
     } catch (error) {
       toast.error(errorMessage(error));
@@ -445,8 +445,8 @@ function BrainstormDialog({
         <DialogHeader>
           <DialogTitle>Brainstorm with your agent</DialogTitle>
           <DialogDescription>
-            Describe what you want to learn and your agent will propose a
-            course plan you can edit before accepting.
+            Describe what you want to learn and your agent will start teaching
+            from that seed.
           </DialogDescription>
         </DialogHeader>
         <form className="space-y-4" onSubmit={(event) => void handleSubmit(event)}>
@@ -476,7 +476,7 @@ function BrainstormDialog({
               size="sm"
               disabled={submitting || seed.trim().length === 0}
             >
-              Start brainstorm
+              Start course
             </Button>
           </DialogFooter>
         </form>
@@ -557,66 +557,6 @@ function ExportDialog({
   );
 }
 
-function DiscardDraftDialog({
-  course,
-  onOpenChange,
-  onDiscarded,
-}: {
-  course: CourseResource | undefined;
-  onOpenChange: (open: boolean) => void;
-  onDiscarded: () => void;
-}) {
-  const [discarding, setDiscarding] = useState(false);
-
-  const handleDiscard = async () => {
-    if (course === undefined || discarding) {
-      return;
-    }
-    setDiscarding(true);
-    try {
-      await api.deleteCourse(course.id);
-      onDiscarded();
-    } catch (error) {
-      toast.error(errorMessage(error));
-    } finally {
-      setDiscarding(false);
-    }
-  };
-
-  return (
-    <Dialog open={course !== undefined} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Discard draft?</DialogTitle>
-          <DialogDescription>
-            This permanently deletes “{course?.title ?? "this draft"}” and its
-            ideation conversation. This can’t be undone.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            onClick={() => onOpenChange(false)}
-          >
-            Cancel
-          </Button>
-          <Button
-            type="button"
-            variant="destructive"
-            size="sm"
-            disabled={discarding}
-            onClick={() => void handleDiscard()}
-          >
-            Discard
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 export function LibraryScreen() {
   const { navigate } = useRoute();
   const { profile } = useProfile();
@@ -626,9 +566,6 @@ export function LibraryScreen() {
   const [importOpen, setImportOpen] = useState(false);
   const [brainstormOpen, setBrainstormOpen] = useState(false);
   const [exportCourseId, setExportCourseId] = useState<number | undefined>(
-    undefined,
-  );
-  const [discardDraftId, setDiscardDraftId] = useState<number | undefined>(
     undefined,
   );
 
@@ -647,10 +584,6 @@ export function LibraryScreen() {
     return unsubscribe;
   }, [refresh]);
 
-  const drafts = useMemo(
-    () => (courses ?? []).filter((course) => course.status === "draft"),
-    [courses],
-  );
   const active = useMemo(
     () => (courses ?? []).filter((course) => course.status === "active"),
     [courses],
@@ -661,7 +594,6 @@ export function LibraryScreen() {
   );
 
   const exportCourse = courses?.find((course) => course.id === exportCourseId);
-  const discardCourse = courses?.find((course) => course.id === discardDraftId);
 
   const handleArchive = async (courseId: number) => {
     try {
@@ -712,46 +644,6 @@ export function LibraryScreen() {
 
       <div className="min-h-0 flex-1 overflow-y-auto p-6">
         <div className="mx-auto max-w-5xl space-y-8">
-          {drafts.length > 0 && (
-            <section>
-              <h2 className="mb-2 text-sm font-medium text-muted-foreground">
-                Drafts
-              </h2>
-              <div className="divide-y divide-border rounded-lg border">
-                {drafts.map((course) => (
-                  <div
-                    key={course.id}
-                    className="flex cursor-pointer items-center gap-3 px-4 py-2.5 hover:bg-accent/30"
-                    onClick={() =>
-                      navigate({ view: "wizard", courseId: course.id })
-                    }
-                  >
-                    <span className="min-w-0 flex-1 truncate text-sm">
-                      {course.title.trim().length > 0
-                        ? course.title
-                        : "Untitled draft"}
-                    </span>
-                    <Badge variant="secondary">Draft</Badge>
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      Updated {formatDate(course.updatedAt)}
-                    </span>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setDiscardDraftId(course.id);
-                      }}
-                    >
-                      Discard
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
           <Tabs value={tab} onValueChange={(value) => setTab(value as "active" | "archived")}>
             <TabsList>
               <TabsTrigger value="active">Active</TabsTrigger>
@@ -862,7 +754,7 @@ export function LibraryScreen() {
         onStarted={(courseId) => {
           setBrainstormOpen(false);
           refresh();
-          navigate({ view: "wizard", courseId });
+          navigate({ view: "course", courseId });
         }}
       />
       <ExportDialog
@@ -871,18 +763,6 @@ export function LibraryScreen() {
           if (!open) {
             setExportCourseId(undefined);
           }
-        }}
-      />
-      <DiscardDraftDialog
-        course={discardCourse}
-        onOpenChange={(open) => {
-          if (!open) {
-            setDiscardDraftId(undefined);
-          }
-        }}
-        onDiscarded={() => {
-          setDiscardDraftId(undefined);
-          refresh();
         }}
       />
     </>

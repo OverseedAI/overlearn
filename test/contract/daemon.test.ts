@@ -196,11 +196,11 @@ const importDemoCourse = async (
   return { courseId: payload["courseId"] as number, file };
 };
 
-const createIdeationCourse = async (
+const createSeedCourse = async (
   daemon: StartedContractDaemon,
   seed: string,
-): Promise<CourseResource> => {
-  const response = await authFetch(daemon, "/api/courses/ideate", {
+): Promise<Readonly<{ course: CourseResource; turn: number }>> => {
+  const response = await authFetch(daemon, "/api/courses", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ seed }),
@@ -209,9 +209,13 @@ const createIdeationCourse = async (
   expect(response.status).toBe(201);
   const payload = (await response.json()) as Record<string, unknown>;
   expect(payload).toMatchObject({ ok: true });
-  expect(payload["course"]).toMatchObject({ status: "draft" });
+  expect(payload["course"]).toMatchObject({ status: "active" });
+  expect(typeof payload["turn"]).toBe("number");
 
-  return payload["course"] as CourseResource;
+  return {
+    course: payload["course"] as CourseResource,
+    turn: payload["turn"] as number,
+  };
 };
 
 const createFakeLoginCommand = async (binDir: string): Promise<string> => {
@@ -667,7 +671,7 @@ describe(`daemon contract (${runtime.name})`, () => {
           expect.objectContaining({
             path: "next-course",
             title: "Creating your next course",
-            body: expect.stringContaining("brainstorm wizard"),
+            body: expect.stringContaining("seed prompt"),
           }),
         );
 
@@ -888,6 +892,7 @@ describe(`daemon contract (${runtime.name})`, () => {
           title: "Contract Course",
           status: "active",
         });
+        expect(await listSessions(daemon)).toEqual([]);
 
         const list = (await (
           await authFetch(daemon, "/api/courses?status=active")
@@ -1583,32 +1588,14 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
-    "ideates a draft course, accepts an edited plan, and queues the teaching greeting",
+    "creates a seed course and runs orientation with rename plus first topic entry",
     async () => {
       if (!(await ensureLocalhost())) {
         return;
       }
 
       const fakeHarness = await withFakeHarnessPath();
-      const planTopics = [
-        {
-          path: "foundations",
-          title: "Foundations",
-          summary: "Core concepts and vocabulary.",
-          children: [
-            {
-              path: "foundations/mental-models",
-              title: "Mental models",
-              summary: "How to reason about the topic.",
-            },
-          ],
-        },
-        {
-          path: "practice",
-          title: "Practice",
-          summary: "Applied exercises.",
-        },
-      ];
+      const seed = "Teach me databases from first principles.";
       const daemon = await start({
         scenario: "normal",
         extraEnv: {
@@ -1616,139 +1603,108 @@ describe(`daemon contract (${runtime.name})`, () => {
           ANTHROPIC_API_KEY: "test-anthropic",
           OPENAI_API_KEY: "test-openai",
           GEMINI_API_KEY: "test-gemini",
-          FAKE_ACP_MCP_CALL: JSON.stringify({
-            server: "overlearn-teaching",
-            tool: "propose_course_plan",
-            args: {
-              title: "Database Foundations",
-              description: "Learn how databases work from first principles.",
-              topics: planTopics,
+          FAKE_ACP_MCP_CALL: JSON.stringify([
+            {
+              server: "overlearn-teaching",
+              tool: "update_course_info",
+              args: {
+                title: "Database Foundations",
+                description: "Learn how databases work from first principles.",
+              },
             },
-          }),
+            {
+              server: "overlearn-teaching",
+              tool: "upsert_topic",
+              args: {
+                path: "foundations",
+                title: "Foundations",
+                body: "Core concepts and vocabulary.",
+                setCurrent: true,
+              },
+            },
+          ]),
         },
       });
       const sse = await createSseClient(daemon.url, daemon.token);
 
       try {
-        const draft = await createIdeationCourse(
-          daemon,
-          "Teach me databases from first principles.",
-        );
-        expect(draft.status).toBe("draft");
-
-        const activeBefore = (await (
-          await authFetch(daemon, "/api/courses?status=active")
-        ).json()) as readonly CourseResource[];
-        expect(activeBefore.map((course) => course.id)).not.toContain(draft.id);
+        const { course, turn } = await createSeedCourse(daemon, seed);
+        expect(turn).toBe(1);
+        expect(course).toMatchObject({
+          title: "New course",
+          description: seed,
+          status: "active",
+        });
 
         await sse.waitFor(
           "tool-write",
           (data) =>
             isRecord(data) &&
-            data["courseId"] === draft.id &&
-            data["tool"] === "propose_course_plan",
-          "course plan write",
+            data["courseId"] === course.id &&
+            data["tool"] === "update_course_info",
+          "course info write",
+        );
+        await sse.waitFor(
+          "tool-write",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["tool"] === "upsert_topic",
+          "first topic write",
         );
         await sse.waitFor(
           "agent-stream",
           (data) =>
             isRecord(data) &&
-            data["courseId"] === draft.id &&
+            data["courseId"] === course.id &&
             data["turn"] === 1 &&
             isRecord(data["event"]) &&
             data["event"]["type"] === "done",
-          "ideation done stream",
+          "orientation done stream",
         );
 
-        const draftState = await courseState(daemon, draft.id);
-        expect(draftState["course"]).toMatchObject({
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) => entries.some((entry) => entry["event"] === "session/prompt"),
+          "orientation prompt",
+        );
+        const prompt = promptText(
+          logs.find((entry) => entry["event"] === "session/prompt") ?? {},
+        );
+        expect(prompt).toContain("## Course orientation turn");
+        expect(prompt).toContain("update_course_info");
+        expect(prompt).toContain("setCurrent: true");
+        expect(prompt).toContain(seed);
+
+        const state = await courseState(daemon, course.id);
+        expect(state["course"]).toMatchObject({
+          status: "active",
           title: "Database Foundations",
-          status: "draft",
+          description: "Learn how databases work from first principles.",
         });
-        expect(draftState["topics"]).toContainEqual(
+        expect(state["topics"]).toContainEqual(
           expect.objectContaining({
             path: "foundations",
             title: "Foundations",
             body: "Core concepts and vocabulary.",
+            current: true,
+            state: "current",
           }),
         );
-
-        const accept = await authFetch(
-          daemon,
-          `/api/courses/${draft.id}/accept-plan`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              title: "Database Systems",
-              description: "Edited plan description.",
-              topics: [
-                {
-                  path: "foundations",
-                  title: "Renamed foundations",
-                  body: "Keep only this edited topic.",
-                },
-              ],
-            }),
-          },
-        );
-        expect(accept.status).toBe(200);
-        expect(await accept.json()).toMatchObject({
-          ok: true,
-          greetingQueued: true,
-          course: {
-            id: draft.id,
-            status: "active",
-            title: "Database Systems",
-          },
-        });
-
-        await sse.waitFor(
-          "agent-stream",
-          (data) =>
-            isRecord(data) &&
-            data["courseId"] === draft.id &&
-            data["turn"] === 2 &&
-            isRecord(data["event"]) &&
-            data["event"]["type"] === "done",
-          "greeting done stream",
-        );
-
-        const logs = await waitForLogEntries(
-          daemon.logPath,
-          (entries) =>
-            entries.filter((entry) => entry["event"] === "session/prompt")
-              .length >= 2,
-          "ideation and greeting prompts",
-        );
-        const prompts = logs.filter((entry) => entry["event"] === "session/prompt");
-        expect(promptText(prompts[0] ?? {})).toContain("## Course ideation turn");
-        expect(promptText(prompts[1] ?? {})).toContain(
-          "The learner accepted the course plan.",
-        );
-
-        const activeState = await courseState(daemon, draft.id);
-        expect(activeState["course"]).toMatchObject({
-          status: "active",
-          title: "Database Systems",
-          description: "Edited plan description.",
-        });
-        expect(activeState["topics"]).toEqual([
+        expect(state["transcript"]).toContainEqual(
           expect.objectContaining({
-            path: "foundations",
-            title: "Renamed foundations",
-            body: "Keep only this edited topic.",
+            role: "learner",
+            text: seed,
+            turn: 1,
           }),
-        ]);
+        );
 
-        const draftList = (await (
-          await authFetch(daemon, "/api/courses?status=draft")
-        ).json()) as readonly CourseResource[];
         const activeList = (await (
           await authFetch(daemon, "/api/courses?status=active")
         ).json()) as readonly CourseResource[];
-        expect(draftList.map((course) => course.id)).not.toContain(draft.id);
-        expect(activeList.map((course) => course.id)).toContain(draft.id);
+        expect(activeList.map((activeCourse) => activeCourse.id)).toContain(
+          course.id,
+        );
       } finally {
         sse.close();
         await rm(fakeHarness.binDir, { force: true, recursive: true });
@@ -1758,7 +1714,7 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
-    "discards draft ideation courses with hard delete and MCP token revocation",
+    "archives a seed-created active course instead of removing it",
     async () => {
       if (!(await ensureLocalhost())) {
         return;
@@ -1772,68 +1728,46 @@ describe(`daemon contract (${runtime.name})`, () => {
           ANTHROPIC_API_KEY: "test-anthropic",
           OPENAI_API_KEY: "test-openai",
           GEMINI_API_KEY: "test-gemini",
-          FAKE_ACP_MCP_CALL: JSON.stringify({
-            server: "overlearn-teaching",
-            tool: "propose_course_plan",
-            args: {
-              title: "Discardable Plan",
-              description: "Temporary draft.",
-              topics: [
-                {
-                  path: "temporary",
-                  title: "Temporary",
-                  summary: "Throwaway topic.",
-                },
-              ],
-            },
-          }),
         },
       });
       const sse = await createSseClient(daemon.url, daemon.token);
 
       try {
-        const draft = await createIdeationCourse(daemon, "Make a disposable plan.");
-        await sse.waitFor(
-          "tool-write",
-          (data) =>
-            isRecord(data) &&
-            data["courseId"] === draft.id &&
-            data["tool"] === "propose_course_plan",
-          "discard plan write",
+        const { course } = await createSeedCourse(
+          daemon,
+          "Make a disposable learning thread.",
         );
         await sse.waitFor(
           "agent-stream",
           (data) =>
             isRecord(data) &&
-            data["courseId"] === draft.id &&
+            data["courseId"] === course.id &&
             data["turn"] === 1 &&
             isRecord(data["event"]) &&
             data["event"]["type"] === "done",
-          "discard ideation done stream",
+          "archive orientation done stream",
         );
 
-        const logs = await waitForLogEntries(
-          daemon.logPath,
-          (entries) => entries.some((entry) => entry["event"] === "session/new"),
-          "draft session log",
-        );
-        const mcpUrl = mcpUrlFromLogs(logs);
-
-        const discard = await authFetch(daemon, `/api/courses/${draft.id}`, {
+        const archived = await authFetch(daemon, `/api/courses/${course.id}`, {
           method: "DELETE",
         });
-        expect(discard.status).toBe(200);
-        expect(await discard.json()).toMatchObject({ ok: true, deleted: true });
+        expect(archived.status).toBe(200);
+        expect(await archived.json()).toMatchObject({
+          id: course.id,
+          status: "archived",
+        });
 
-        const missing = await authFetch(daemon, `/api/courses/${draft.id}`);
-        expect(missing.status).toBe(404);
-        const draftList = (await (
-          await authFetch(daemon, "/api/courses?status=draft")
+        const archivedState = await courseState(daemon, course.id);
+        expect(archivedState["course"]).toMatchObject({
+          id: course.id,
+          status: "archived",
+        });
+        const archivedList = (await (
+          await authFetch(daemon, "/api/courses?status=archived")
         ).json()) as readonly CourseResource[];
-        expect(draftList.map((course) => course.id)).not.toContain(draft.id);
-
-        const revoked = await fetch(mcpUrl);
-        expect(revoked.status).toBe(404);
+        expect(archivedList.map((archivedCourse) => archivedCourse.id)).toContain(
+          course.id,
+        );
       } finally {
         sse.close();
         await rm(fakeHarness.binDir, { force: true, recursive: true });
@@ -1843,7 +1777,7 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
-    "lists unfinished draft ideation courses after daemon restart",
+    "lists seed-created active courses after daemon restart",
     async () => {
       if (!(await ensureLocalhost())) {
         return;
@@ -1862,19 +1796,19 @@ describe(`daemon contract (${runtime.name})`, () => {
       const sse = await createSseClient(first.url, first.token);
 
       try {
-        const draft = await createIdeationCourse(
+        const { course } = await createSeedCourse(
           first,
-          "Keep this draft across daemon restarts.",
+          "Keep this seed course across daemon restarts.",
         );
         await sse.waitFor(
           "agent-stream",
           (data) =>
             isRecord(data) &&
-            data["courseId"] === draft.id &&
+            data["courseId"] === course.id &&
             data["turn"] === 1 &&
             isRecord(data["event"]) &&
             data["event"]["type"] === "done",
-          "restart ideation done stream",
+          "restart orientation done stream",
         );
         sse.close();
         await first.stop();
@@ -1890,20 +1824,16 @@ describe(`daemon contract (${runtime.name})`, () => {
           },
         });
 
-        const drafts = (await (
-          await authFetch(second, "/api/courses?status=draft")
-        ).json()) as readonly CourseResource[];
         const active = (await (
           await authFetch(second, "/api/courses?status=active")
         ).json()) as readonly CourseResource[];
-        expect(drafts).toContainEqual(
+        expect(active).toContainEqual(
           expect.objectContaining({
-            id: draft.id,
-            status: "draft",
-            description: "Keep this draft across daemon restarts.",
+            id: course.id,
+            status: "active",
+            description: "Keep this seed course across daemon restarts.",
           }),
         );
-        expect(active.map((course) => course.id)).not.toContain(draft.id);
       } finally {
         sse.close();
         await rm(fakeHarness.binDir, { force: true, recursive: true });

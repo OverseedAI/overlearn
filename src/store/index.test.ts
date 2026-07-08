@@ -81,7 +81,7 @@ describe("store migrations", () => {
         .query("SELECT id, name FROM migrations ORDER BY id")
         .all();
       expect(migrations).toEqual([
-        { id: STORE_SCHEMA_VERSION, name: "store_schema_v2" },
+        { id: STORE_SCHEMA_VERSION, name: "store_schema_v3" },
       ]);
 
       expect(getProfile(store)).toMatchObject({

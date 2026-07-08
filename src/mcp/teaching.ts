@@ -15,7 +15,6 @@ import {
   patchCourse,
   readTopicTree,
   registerFeynmanCheck,
-  replaceTopicTree,
   upsertDemo,
   upsertGlossaryEntry,
   upsertJournalDemoPin,
@@ -28,14 +27,12 @@ import {
   type Topic,
   type TopicJournalEntry,
   type TopicStatus,
-  type TopicTreeInput,
   type TranscriptEntry,
 } from "../store";
 import {
   createMcpHttpHandler,
   textMcpResult,
   type McpJsonObject,
-  type McpJsonValue,
   type McpServerDefinition,
   type McpServerTool,
   type McpToolCallResult,
@@ -51,7 +48,7 @@ export type TeachingToolName =
   | "record_mastery"
   | "feynman_check"
   | "upsert_glossary_entry"
-  | "propose_course_plan";
+  | "update_course_info";
 
 export type ActiveTeachingTurn = Readonly<{
   turn: number;
@@ -145,22 +142,6 @@ const nullableStringSchema = (description: string): McpJsonObject =>
     type: ["string", "null"],
     description,
   });
-
-const topicPlanSchema: McpJsonObject = jsonSchema({
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    path: stringSchema("Stable slash-delimited topic path."),
-    title: stringSchema("Human-readable topic title."),
-    summary: stringSchema("Short topic summary or teaching notes."),
-    children: {
-      type: "array",
-      items: { "$ref": "#" },
-      default: [],
-    },
-  },
-  required: ["path", "title", "summary"],
-});
 
 const inputSchemas: Record<TeachingToolName, McpJsonObject> = {
   get_course_state: objectSchema({
@@ -274,17 +255,12 @@ const inputSchemas: Record<TeachingToolName, McpJsonObject> = {
     },
     ["term", "definition"],
   ),
-  propose_course_plan: objectSchema(
+  update_course_info: objectSchema(
     {
-      title: stringSchema("Draft course title."),
-      description: stringSchema("Draft course description."),
-      topics: {
-        type: "array",
-        minItems: 1,
-        items: topicPlanSchema,
-      },
+      title: stringSchema("Course title."),
+      description: nullableStringSchema("Course description."),
     },
-    ["title", "description", "topics"],
+    [],
   ),
 };
 
@@ -328,14 +304,6 @@ const assertKnownKeys = (
       throw new Error(`${tool} does not accept input field "${key}".`);
     }
   }
-};
-
-const requireRecord = (value: unknown, label: string): JsonRecord => {
-  if (!isRecord(value)) {
-    throw new Error(`${label} must be an object.`);
-  }
-
-  return value;
 };
 
 const normalizeRequiredString = (value: unknown, label: string): string => {
@@ -1051,47 +1019,6 @@ const courseStatePayload = (
   };
 };
 
-const validatePlanTopic = (
-  value: McpJsonValue,
-  label: string,
-): TopicTreeInput => {
-  const topic = requireRecord(value, label);
-  const path = normalizeTopicPath(normalizeRequiredString(topic["path"], `${label}.path`));
-  const title = normalizeRequiredString(topic["title"], `${label}.title`);
-  const summary = normalizeRequiredString(topic["summary"], `${label}.summary`);
-  const rawChildren = topic["children"];
-
-  if (rawChildren !== undefined && !Array.isArray(rawChildren)) {
-    throw new Error(`${label}.children must be an array.`);
-  }
-
-  const children = (rawChildren ?? []).map((child, index) =>
-    validatePlanTopic(child, `${label}.children[${index}]`),
-  );
-
-  return {
-    path,
-    title,
-    body: summary,
-    ...(children.length === 0 ? {} : { children }),
-  };
-};
-
-const validatePlanTopics = (args: McpJsonObject): readonly TopicTreeInput[] => {
-  const topics = args["topics"];
-  if (!Array.isArray(topics)) {
-    throw new Error("topics must be an array.");
-  }
-
-  if (topics.length === 0) {
-    throw new Error("topics cannot be empty.");
-  }
-
-  return topics.map((topic, index) =>
-    validatePlanTopic(topic, `topics[${index}]`),
-  );
-};
-
 const notifyWrite = async (
   onWrite: TeachingServerOptions["onWrite"],
   courseId: number,
@@ -1493,57 +1420,36 @@ const upsertGlossaryEntryTool = (
     },
   });
 
-const proposeCoursePlanTool = (
+const updateCourseInfoTool = (
   options: TeachingServerOptions,
 ): McpServerTool =>
   createTeachingTool(options, {
-    name: "propose_course_plan",
-    description:
-      "Replaces a draft course title, description, and topic tree transactionally.",
-    knownKeys: ["title", "description", "topics"],
+    name: "update_course_info",
+    description: "Updates the course title and/or description.",
+    knownKeys: ["title", "description"],
     call: (args) => {
       const course = getCourse(options.store, options.scope.courseId);
       if (course === undefined) {
         throw new Error(`Course does not exist: ${options.scope.courseId}`);
       }
 
-      if (course.status !== "draft") {
-        return {
-          result: errorResult(
-            `propose_course_plan is only valid for draft courses; course ${course.id} is ${course.status}.`,
-          ),
-        };
+      const title = optionalString(args, "title");
+      const description = optionalStringOrNull(args, "description");
+      if (title === undefined && description === undefined) {
+        throw new Error("update_course_info requires title or description.");
       }
 
-      const title = requireString(args, "title");
-      const description = requireBodyString(args, "description");
-      const topics = validatePlanTopics(args);
-
-      const updated = withStoreTransaction(options.store, () => {
-        const nextCourse = patchCourse(options.store, course.id, {
-          title,
-          description,
-        });
-        const nextTopics = replaceTopicTree(options.store, course.id, topics);
-
-        return {
-          course: nextCourse,
-          topics: nextTopics,
-        };
+      const updated = patchCourse(options.store, course.id, {
+        ...(title === undefined ? {} : { title }),
+        ...(description === undefined ? {} : { description }),
       });
-      const demosById = new Map(
-        listDemos(options.store, course.id).map((demo) => [demo.id, demo]),
-      );
 
       return {
         result: jsonResult({
           ok: true,
-          course: publicCourse(updated.course),
-          topics: updated.topics.map((topic) =>
-            publicTopic(options.store, course.id, topic, demosById),
-          ),
+          course: publicCourse(updated),
         }),
-        writeSummary: `replaced draft course plan with ${topics.length} root topics`,
+        writeSummary: `updated course info for ${updated.title}`,
       };
     },
   });
@@ -1561,7 +1467,7 @@ export const createTeachingMcpServer = (
     recordMasteryTool(options),
     feynmanCheckTool(options),
     upsertGlossaryEntryTool(options),
-    proposeCoursePlanTool(options),
+    updateCourseInfoTool(options),
   ],
 });
 

@@ -107,20 +107,21 @@ describe("daemon turn orchestration helpers", () => {
     expect(prompt).toContain("## Resume context required");
   });
 
-  test("adds ideation directions with propose_course_plan", () => {
+  test("adds orientation directions with course naming and first-topic entry", () => {
     const prompt = buildTurnPrompt({
       ...promptInput,
       includeResumeContext: false,
-      mode: "ideation",
+      mode: "orientation",
       turn: {
         turn: 1,
         createdAt: "2026-01-01T00:00:00.000Z",
-        events: [{ type: "ideation", text: "Teach me investing." }],
+        events: [{ type: "message", text: "Teach me investing." }],
       },
     });
 
-    expect(prompt).toContain("## Course ideation turn");
-    expect(prompt).toContain("propose_course_plan");
+    expect(prompt).toContain("## Course orientation turn");
+    expect(prompt).toContain("update_course_info");
+    expect(prompt).toContain("setCurrent: true");
     expect(prompt).toContain("Teach me investing.");
   });
 
@@ -195,7 +196,7 @@ describe("daemon turn orchestration helpers", () => {
         },
         {
           action: "mcp",
-          resource: `${teachingMcpServerName}.propose_course_plan`,
+          resource: `${teachingMcpServerName}.update_course_info`,
           reason:
             "Overlearn teaching MCP tools are pre-approved for this learning session.",
         },

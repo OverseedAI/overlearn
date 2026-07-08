@@ -323,7 +323,7 @@ const arrayValue = (
 };
 
 const parseCourseStatus = (value: unknown): CourseStatus => {
-  if (value === "draft" || value === "active" || value === "archived") {
+  if (value === "active" || value === "archived") {
     return value;
   }
 
