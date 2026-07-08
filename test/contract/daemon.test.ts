@@ -655,21 +655,44 @@ describe(`daemon contract (${runtime.name})`, () => {
           status: "active",
           sourceName: "tutorial",
         });
-        expect(state["topics"]).toContainEqual(
-          expect.objectContaining({
-            path: "dialogue-loop",
-            title: "Dialogue loop",
-            current: true,
-            body: expect.stringContaining("Your connected agent teaches"),
-          }),
+        const topics = Array.isArray(state["topics"]) ? state["topics"] : [];
+        const topicRecords = topics.filter(isRecord);
+        const dialogueLoop = topicRecords.find(
+          (topic) => topic["path"] === "dialogue-loop",
         );
-        expect(state["topics"]).toContainEqual(
-          expect.objectContaining({
-            path: "next-course",
-            title: "Creating your next course",
-            body: expect.stringContaining("brainstorm wizard"),
-          }),
+        const reviewRail = topicRecords.find(
+          (topic) => topic["path"] === "review-rail-glossary",
         );
+        const nextCourse = topicRecords.find(
+          (topic) => topic["path"] === "next-course",
+        );
+
+        expect(dialogueLoop?.["title"]).toBe("Dialogue loop");
+        expect(dialogueLoop?.["state"]).toBe("visited");
+        expect(dialogueLoop?.["current"]).toBe(false);
+        expect(typeof dialogueLoop?.["enteredAt"]).toBe("string");
+        const dialogueJournalValue = dialogueLoop?.["journal"];
+        const dialogueJournal = isRecord(dialogueJournalValue)
+          ? dialogueJournalValue
+          : {};
+        const dialogueEntries = Array.isArray(dialogueJournal["entries"])
+          ? dialogueJournal["entries"].filter(isRecord)
+          : [];
+        expect(dialogueEntries).toHaveLength(2);
+        expect(dialogueEntries[0]?.["kind"]).toBe("note");
+
+        expect(reviewRail?.["title"]).toBe("Review rail and glossary");
+        expect(reviewRail?.["state"]).toBe("current");
+        expect(reviewRail?.["current"]).toBe(true);
+
+        expect(nextCourse?.["title"]).toBe("Creating your next course");
+        expect(nextCourse?.["state"]).toBe("frontier");
+        expect(nextCourse?.["current"]).toBe(false);
+        expect(Object.hasOwn(nextCourse ?? {}, "enteredAt")).toBe(false);
+        const nextJournalValue = nextCourse?.["journal"];
+        const nextJournal = isRecord(nextJournalValue) ? nextJournalValue : {};
+        expect(nextJournal["totalCount"]).toBe(0);
+        expect(nextJournal["entries"]).toEqual([]);
 
         // Mirror the UI's start-tutorial flow: onboarding completes before the
         // course page opens, otherwise the deep-link guard serves the shell.

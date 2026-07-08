@@ -1,5 +1,7 @@
 # Feynman checks
 
+## Note
+
 A Feynman check asks you to explain an idea simply, as if you were teaching it to someone else. It is one of the fastest ways to find the edge between recognition and understanding.
 
 When a check appears, do not try to sound polished. Aim for a plain explanation:
@@ -8,6 +10,8 @@ When a check appears, do not try to sound polished. Aim for a plain explanation:
 - Why does it matter?
 - What is one concrete example?
 - What would be a common mistake?
+
+## Note
 
 The agent can compare your answer against key points and then continue teaching from the gaps. If your answer misses something important, that is useful signal. It tells Overlearn where the next turn should focus.
 

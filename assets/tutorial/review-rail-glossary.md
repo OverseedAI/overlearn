@@ -1,13 +1,17 @@
 # Review rail and glossary
 
-The review rail is the side panel that keeps course context close while you are in a teaching session. It gives you a place to scan lessons, topics, glossary terms, demos, and weak areas without losing the conversation.
+## Note
+
+The review rail is the journal view for the selected topic. It keeps mentor notes, summaries, demos, glossary terms, and weak areas close while the conversation keeps moving.
 
 Use it when you need orientation:
 
 - Check the current topic before replying.
 - Look up a term without asking the agent to pause.
-- Jump to a lesson or topic that needs review.
+- Jump to a visited topic that needs review.
 - Ask the agent to revisit weak mastery scores.
+
+## Note
 
 The glossary is deliberately small and practical. It should capture terms that would otherwise interrupt your flow: names, definitions, distinctions, or phrases you want Overlearn to reuse consistently.
 

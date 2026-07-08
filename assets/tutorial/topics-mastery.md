@@ -1,15 +1,19 @@
 # Topics and mastery
 
-Topics are the map of a course. They tell Overlearn what you are studying, what is current, and where review should point you later.
+## Note
 
-A topic has a title, a stable path, and teaching notes. The path is a durable identifier, so `dialogue-loop` or `review-rail-glossary` can be referenced by the agent, the UI, and mastery records without depending on display text.
+Topics are the map of a course, not a syllabus that must be completed in order. A topic becomes visited when you enter it. Nearby ideas can exist as frontier stubs: visible enough to click, dim enough to show that no lesson has happened there yet.
 
-Mastery scores are not grades for your worth. They are working signals. A score of 55 means "this concept deserves another pass." A score of 90 means "this is probably safe to build on." The agent may record mastery after you explain a concept, answer a check, or work through a concrete example.
+## Note
+
+The path is the durable identifier. `dialogue-loop` or `review-rail-glossary` can be referenced by the agent, UI, journal entries, and mastery records without depending on display text. The title can improve later; the path keeps the map stable.
+
+## Summary
+
+Mastery is a working signal, not a grade. A low score means "teach or review this again." A high score means "probably safe to build on." Ask the mentor to record mastery after you explain a concept, answer a check, or work through a concrete example.
 
 Use mastery scores to steer the session:
 
 - Ask "what is weakest right now?"
 - Ask "review the topics under 80."
 - Ask "record my mastery only after I explain it back."
-
-The useful habit is to keep topics small enough to review. "Overlearn" is too broad. "How the dialogue loop works" is easier to teach, test, and revisit.
