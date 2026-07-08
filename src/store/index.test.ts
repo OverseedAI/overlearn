@@ -39,6 +39,7 @@ import {
   registerFeynmanCheck,
   replaceTopicTree,
   selectVisitedTopic,
+  skipActiveFeynmanCheck,
   startSession,
   STORE_SCHEMA_VERSION,
   updateLatestActiveTranscriptCardState,
@@ -86,7 +87,7 @@ describe("store migrations", () => {
         .query("SELECT id, name FROM migrations ORDER BY id")
         .all();
       expect(migrations).toEqual([
-        { id: STORE_SCHEMA_VERSION, name: "store_schema_v4" },
+        { id: STORE_SCHEMA_VERSION, name: "store_schema_v5" },
       ]);
 
       expect(getProfile(store)).toMatchObject({
@@ -298,6 +299,27 @@ describe("store query API", () => {
       expect(getActiveFeynmanCheck(store, course.id)?.concept).toBe("rule-of-72");
       clearActiveFeynmanCheck(store, course.id);
       expect(getActiveFeynmanCheck(store, course.id)).toBeNull();
+
+      const skippedCheck = registerFeynmanCheck(store, course.id, {
+        concept: "compound-growth",
+        prompt: "Explain compounding.",
+        keyPoints: ["principal", "rate"],
+        issuedAt: "2026-01-05T01:00:00.000Z",
+      });
+      expect(skipActiveFeynmanCheck(store, course.id)?.id).toBe(skippedCheck.id);
+      expect(getActiveFeynmanCheck(store, course.id)).toBeNull();
+      expect(
+        listFeynmanChecks(store, course.id).find(
+          (check) => check.id === skippedCheck.id,
+        )?.status,
+      ).toBe("skipped");
+
+      const secondActiveCheck = registerFeynmanCheck(store, course.id, {
+        concept: "effective-rate",
+        prompt: "Explain effective annual rate.",
+        issuedAt: "2026-01-05T02:00:00.000Z",
+      });
+      expect(secondActiveCheck.status).toBe("active");
 
       const demo = upsertDemo(store, course.id, {
         topicId: firstTopic.id,

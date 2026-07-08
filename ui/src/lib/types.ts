@@ -141,8 +141,11 @@ export type TranscriptEntry = TranscriptEntryBase &
     | {
       role: "agent";
       kind: "feynman-check";
+      cardId: string;
+      state: "active" | "acted" | "skipped";
       concept: string;
       prompt: string;
+      keyPoints: string[];
     }
     | {
       role: "agent";

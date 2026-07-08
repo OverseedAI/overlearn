@@ -15,7 +15,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AppScaleControls } from "@/components/app-scale-controls";
-import { FeynmanPanel } from "@/components/feynman-panel";
 import { StudyRail, type RailTab } from "@/components/study-rail";
 import { Transcript } from "@/components/transcript";
 import { api, ApiError } from "@/lib/api";
@@ -241,7 +240,7 @@ export function CourseScreen() {
     );
   }
 
-  const { course, transcript, glossary, topics, activeFeynmanCheck } = store.state;
+  const { course, transcript, glossary, topics } = store.state;
   const flatTopics = flattenTopics(topics);
   const selectedTopic =
     flatTopics.find((topic) => topic.path === store.selectedTopicPath) ??
@@ -285,6 +284,7 @@ export function CourseScreen() {
             courseId={courseId}
             activity={store.activity}
             showTyping={busy && !store.activity}
+            cardActionsDisabled={composerDisabled}
             onLoadOlder={loadOlderTranscript}
             onPrependEntries={prependTranscript}
             onNavigateTopic={navigateTopicCard}
@@ -303,12 +303,6 @@ export function CourseScreen() {
                   Session ended. Overlearn saved your progress — reopen the app
                   to keep learning.
                 </p>
-              ) : activeFeynmanCheck ? (
-                <FeynmanPanel
-                  courseId={courseId}
-                  check={activeFeynmanCheck}
-                  disabled={composerDisabled}
-                />
               ) : (
                 <Composer
                   courseId={courseId}

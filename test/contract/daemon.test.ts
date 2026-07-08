@@ -24,7 +24,10 @@ import {
 } from "./runtime";
 import {
   flattenTopicTree,
+  getActiveFeynmanCheck,
+  listFeynmanChecks,
   listGlossary,
+  listLatestMasteryScores,
   listSessions as listStoreSessions,
   openStore,
   pageTranscript,
@@ -1879,6 +1882,288 @@ describe(`daemon contract (${runtime.name})`, () => {
         expect(secondPrompt).toContain(`"cardId": "${cardId}"`);
         expect(secondPrompt).toContain('"cardKind": "topic-proposals"');
         expect(secondPrompt).toContain("teach this another way instead");
+      } finally {
+        if (restartedSse !== undefined) {
+          restartedSse.close();
+        }
+        if (restarted !== undefined) {
+          await restarted.cleanup();
+          activeDaemons.delete(restarted);
+        }
+        store.close();
+        firstSse.close();
+      }
+    },
+    20_000,
+  );
+
+  contractTest(
+    "skips an active Feynman card when the learner types instead",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          FAKE_ACP_MCP_CALL: JSON.stringify({
+            server: "overlearn-teaching",
+            tool: "feynman_check",
+            args: {
+              concept: "rule-of-72",
+              prompt: "Explain the Rule of 72 in your own words.",
+              keyPoints: ["doubling", "rate"],
+            },
+          }),
+        },
+      });
+      const firstSse = await createSseClient(daemon.url, daemon.token);
+      const store = openStore({
+        env: { OVERLEARN_DATA_DIR: daemon.dataDir },
+      });
+      let restarted: StartedContractDaemon | undefined;
+      let restartedSse: Awaited<ReturnType<typeof createSseClient>> | undefined;
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Feynman Skip Course",
+        });
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "give me a check",
+        );
+        await firstSse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "feynman card created",
+        );
+
+        const cardRow = pageTranscript(store, course.id, { limit: 20 }).entries.find(
+          (entry) => entry.kind === "feynman-check",
+        );
+        const cardId = cardRow?.payload["cardId"];
+        if (typeof cardId !== "string") {
+          throw new Error("Missing Feynman card id.");
+        }
+        expect(cardRow?.payload["cardKind"]).toBe("feynman");
+        expect(cardRow?.payload["state"]).toBe("active");
+        expect(getActiveFeynmanCheck(store, course.id)?.status).toBe("active");
+
+        await daemon.stop();
+        restarted = await start({
+          scenario: "normal",
+          extraEnv: {
+            OVERLEARN_DATA_DIR: daemon.dataDir,
+            FAKE_ACP_LOG: daemon.logPath,
+          },
+        });
+        restartedSse = await createSseClient(restarted.url, restarted.token);
+
+        await submitCourseMessage(
+          restarted.url,
+          restarted.token,
+          course.id,
+          "wait, explain the setup first",
+        );
+        await restartedSse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "feynman skip turn done",
+        );
+
+        const skippedRow = pageTranscript(store, course.id, { limit: 20 }).entries.find(
+          (entry) => entry.payload["cardId"] === cardId,
+        );
+        expect(skippedRow?.payload["state"]).toBe("skipped");
+        expect(getActiveFeynmanCheck(store, course.id)).toBeNull();
+        expect(listFeynmanChecks(store, course.id).map((check) => check.status)).toEqual([
+          "skipped",
+        ]);
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.filter((entry) => entry["event"] === "session/prompt")
+              .length >= 2,
+          "feynman skip prompt log",
+        );
+        const prompts = logs.filter((entry) => entry["event"] === "session/prompt");
+        const secondPrompt = promptText(prompts[1] ?? {});
+        expect(secondPrompt).toContain('"type": "card-skipped"');
+        expect(secondPrompt).toContain(`"cardId": "${cardId}"`);
+        expect(secondPrompt).toContain('"cardKind": "feynman"');
+        expect(secondPrompt).toContain("wait, explain the setup first");
+      } finally {
+        if (restartedSse !== undefined) {
+          restartedSse.close();
+        }
+        if (restarted !== undefined) {
+          await restarted.cleanup();
+          activeDaemons.delete(restarted);
+        }
+        store.close();
+        firstSse.close();
+      }
+    },
+    20_000,
+  );
+
+  contractTest(
+    "answers an active Feynman card through the existing mastery path",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          FAKE_ACP_MCP_CALL: JSON.stringify({
+            server: "overlearn-teaching",
+            tool: "feynman_check",
+            args: {
+              concept: "rule-of-72",
+              prompt: "Explain the Rule of 72 in your own words.",
+              keyPoints: ["doubling", "rate"],
+            },
+          }),
+        },
+      });
+      const firstSse = await createSseClient(daemon.url, daemon.token);
+      const store = openStore({
+        env: { OVERLEARN_DATA_DIR: daemon.dataDir },
+      });
+      let restarted: StartedContractDaemon | undefined;
+      let restartedSse: Awaited<ReturnType<typeof createSseClient>> | undefined;
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Feynman Answer Course",
+        });
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "give me a check",
+        );
+        await firstSse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "feynman answer card created",
+        );
+
+        const cardRow = pageTranscript(store, course.id, { limit: 20 }).entries.find(
+          (entry) => entry.kind === "feynman-check",
+        );
+        const cardId = cardRow?.payload["cardId"];
+        if (typeof cardId !== "string") {
+          throw new Error("Missing Feynman card id.");
+        }
+        expect(cardRow?.payload["state"]).toBe("active");
+
+        await daemon.stop();
+        restarted = await start({
+          scenario: "normal",
+          extraEnv: {
+            OVERLEARN_DATA_DIR: daemon.dataDir,
+            FAKE_ACP_LOG: daemon.logPath,
+            FAKE_ACP_MCP_CALL: JSON.stringify({
+              server: "overlearn-teaching",
+              tool: "record_mastery",
+              args: {
+                concept: "rule-of-72",
+                score: 91,
+                gaps: ["minor wording"],
+              },
+            }),
+          },
+        });
+        restartedSse = await createSseClient(restarted.url, restarted.token);
+
+        const response = await authFetch(
+          restarted,
+          `/api/courses/${course.id}/feynman-answer`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              concept: "rule-of-72",
+              text: "It estimates doubling time by dividing 72 by the rate.",
+              keyPoints: ["doubling", "rate"],
+            }),
+          },
+        );
+        expect(response.status).toBe(200);
+        const payload = (await response.json()) as Record<string, unknown>;
+        expect(payload["ok"]).toBe(true);
+        expect(payload["turn"]).toBe(2);
+
+        await restartedSse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "feynman answer turn done",
+        );
+
+        const transcript = pageTranscript(store, course.id, { limit: 20 }).entries;
+        const actedRow = transcript.find((entry) => entry.payload["cardId"] === cardId);
+        expect(actedRow?.payload["state"]).toBe("acted");
+        expect(
+          transcript.some(
+            (entry) =>
+              entry.kind === "feynman-answer" &&
+              entry.content ===
+                "It estimates doubling time by dividing 72 by the rate.",
+          ),
+        ).toBe(true);
+        expect(getActiveFeynmanCheck(store, course.id)).toBeNull();
+        expect(listFeynmanChecks(store, course.id).map((check) => check.status)).toEqual([
+          "cleared",
+        ]);
+        const mastery = listLatestMasteryScores(store, course.id);
+        expect(mastery).toHaveLength(1);
+        expect(mastery[0]?.concept).toBe("rule-of-72");
+        expect(mastery[0]?.score).toBe(91);
+        expect(mastery[0]?.gaps).toBe("minor wording");
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.some(
+              (entry) =>
+                entry["event"] === "mcp/tools/call" &&
+                entry["tool"] === "record_mastery",
+            ),
+          "feynman answer mastery call",
+        );
+        const prompts = logs.filter((entry) => entry["event"] === "session/prompt");
+        const secondPrompt = promptText(prompts[1] ?? {});
+        expect(secondPrompt).toContain('"type": "feynman-answer"');
+        expect(secondPrompt).toContain(
+          "It estimates doubling time by dividing 72 by the rate.",
+        );
       } finally {
         if (restartedSse !== undefined) {
           restartedSse.close();

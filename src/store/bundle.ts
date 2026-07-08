@@ -342,7 +342,12 @@ const parseDemoBodyFormat = (value: unknown): DemoBodyFormat => {
 };
 
 const parseFeynmanStatus = (value: unknown): FeynmanCheckStatus => {
-  if (value === "active" || value === "replaced" || value === "cleared") {
+  if (
+    value === "active" ||
+    value === "replaced" ||
+    value === "cleared" ||
+    value === "skipped"
+  ) {
     return value;
   }
 

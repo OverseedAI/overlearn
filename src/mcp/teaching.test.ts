@@ -360,6 +360,10 @@ const exerciseTeachingTools = async (
       keyPoints: ["growth rate", "doubling", "estimate"],
     },
   });
+  const feynmanCardId = feynmanResult["cardId"];
+  if (typeof feynmanCardId !== "string") {
+    throw new Error("Expected feynman_check to return a cardId.");
+  }
 
   const proposalResult = parseResult(
     await withTimeout(
@@ -719,6 +723,15 @@ const exerciseTeachingTools = async (
     entryId: noteEntryId as number,
     topicId: currentTopicId as number,
     markdown: "The Rule of 72 estimates doubling time as 72 / rate.",
+  });
+  expect(
+    fixture.writes.find((event) => event.tool === "feynman_check")?.attachment,
+  ).toEqual({
+    kind: "feynman",
+    cardId: feynmanCardId,
+    concept: "rule-of-72",
+    prompt: "Explain why dividing 72 by the rate estimates doubling time.",
+    keyPoints: ["growth rate", "doubling", "estimate"],
   });
   expect(
     fixture.writes.find((event) => event.tool === "propose_topics")?.attachment,
