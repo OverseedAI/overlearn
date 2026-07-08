@@ -4,7 +4,7 @@
  * type package yet, so keep these in sync by hand.
  */
 
-export type CourseStatus = "draft" | "active" | "archived";
+export type CourseStatus = "active" | "archived";
 
 export type CourseResource = {
   id: number;
@@ -254,12 +254,4 @@ export type ServerEvents = {
   feynman: { courseId: number; activeCheck: ActiveFeynmanCheck | null };
   "tool-write": { courseId: number } & Record<string, unknown>;
   "agent-stream": AgentStreamPayload;
-};
-
-export type TopicTreeInput = {
-  path: string;
-  title: string;
-  summary?: string;
-  body?: string;
-  children?: TopicTreeInput[];
 };

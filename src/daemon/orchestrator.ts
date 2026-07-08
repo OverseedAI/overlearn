@@ -18,7 +18,7 @@ import type { TopicNodeState } from "../store";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-export type TurnPromptMode = "teaching" | "wrap-up" | "greeting" | "ideation";
+export type TurnPromptMode = "teaching" | "wrap-up" | "greeting" | "orientation";
 
 export type TurnEvent =
   | Readonly<{ type: "message"; text: string }>
@@ -31,8 +31,7 @@ export type TurnEvent =
       concept: string;
       text: string;
       keyPoints: readonly string[];
-    }>
-  | Readonly<{ type: "ideation"; text: string }>;
+    }>;
 
 export type TurnPayload = Readonly<{
   turn: number;
@@ -308,7 +307,7 @@ const teachingMcpToolNames: readonly TeachingToolName[] = [
   "record_mastery",
   "feynman_check",
   "upsert_glossary_entry",
-  "propose_course_plan",
+  "update_course_info",
 ];
 
 const teachingMcpPermissionRules = (): readonly PermissionRule[] =>
@@ -373,12 +372,14 @@ const modePreamble = (input: TurnPromptInput): string => {
     ].join("\n");
   }
 
-  if (input.mode === "ideation") {
+  if (input.mode === "orientation") {
     return [
-      "## Course ideation turn",
+      "## Course orientation turn",
       "",
-      `Call \`${teachingMcpServerName}.get_course_state\` first, brainstorm the course shape with the learner's request, then call \`${teachingMcpServerName}.propose_course_plan\` with a coherent draft title, description, and topic tree.`,
-      "After proposing the plan, briefly summarize the direction in the conversation and end the turn.",
+      `Call \`${teachingMcpServerName}.get_course_state\` first. The learner's seed is already stored as the first message and the course description.`,
+      `Ask where the learner wants to enter the territory, call \`${teachingMcpServerName}.update_course_info\` with a useful course title and refined description if helpful, and do not propose a full course plan.`,
+      `Once the learner engages enough to start, create the first topic with \`${teachingMcpServerName}.upsert_topic\` and set \`setCurrent: true\`. This is the one agent-initiated first topic entry allowed during orientation.`,
+      "End the turn after the learner-facing orientation response and any MCP writes are complete.",
     ].join("\n");
   }
 

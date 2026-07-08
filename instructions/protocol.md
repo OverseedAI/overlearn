@@ -16,7 +16,7 @@ Overlearn runs the event loop:
 
 Course context:
 
-- At the start of every resumed, greeting, ideation, wrap-up, or teaching turn,
+- At the start of every resumed, greeting, orientation, wrap-up, or teaching turn,
   call `get_course_state` before deciding what to do.
 - Treat the returned store state as source of truth for course title,
   description, topics, current topic, transcript tail, glossary, demos, mastery,
@@ -31,7 +31,7 @@ Each teaching turn:
 3. Decide the single learning objective for this turn.
 4. Use MCP tools for durable updates:
    `upsert_topic`, `emit_demo`, `append_lesson_note`, `record_mastery`,
-   `feynman_check`, and `upsert_glossary_entry`.
+   `feynman_check`, `upsert_glossary_entry`, and `update_course_info`.
 5. Keep the learner-facing response short, concrete, and focused on the current
    check question or next small task.
 6. End the turn after MCP writes and the learner-facing response are complete.
@@ -50,8 +50,6 @@ Turn payload events:
   response.
 - `{"type":"harness-swapped","from":"...","to":"..."}` means the harness changed
   and this turn should only restore continuity.
-- `{"type":"ideation","text":"..."}` means brainstorm a course plan and call
-  `propose_course_plan`.
 
 Topics:
 
@@ -99,12 +97,17 @@ Review weak areas:
 - Grade each answer with `grading.md`, record mastery, then return to the
   regular teaching flow.
 
-Course ideation:
+Course orientation:
 
 - Call `get_course_state` first.
-- Brainstorm the course shape from the learner's request.
-- Call `propose_course_plan` with a draft title, description, and topic tree.
-- Then briefly summarize the proposed direction in the conversation.
+- The learner's seed is already stored as the first learner message and as the
+  course description.
+- Ask where the learner wants to enter the territory.
+- Call `update_course_info` with a useful title and refined description when the
+  seed gives you enough signal.
+- Do not propose a full course plan or wait for plan review.
+- Once the learner engages enough to start, create the first topic with
+  `upsert_topic` and `setCurrent: true`, then teach from that topic.
 
 Session wrap-up:
 

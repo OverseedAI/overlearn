@@ -48,7 +48,7 @@ export type ProfilePatch = Readonly<{
   preferredHarness?: string | null;
 }>;
 
-export type CourseStatus = "draft" | "active" | "archived";
+export type CourseStatus = "active" | "archived";
 
 export type Course = Readonly<{
   id: number;
@@ -524,14 +524,14 @@ type FolderImportPayload = Readonly<{
 }>;
 
 const STORE_FILE_NAME = "overlearn.sqlite";
-export const STORE_SCHEMA_VERSION = 2;
+export const STORE_SCHEMA_VERSION = 3;
 const courseStatusCheckSql =
-  "status TEXT NOT NULL CHECK (status IN ('draft', 'active', 'archived'))"; // TODO(DEV-582): drop 'draft' when the ideation/wizard flow is removed.
+  "status TEXT NOT NULL CHECK (status IN ('active', 'archived'))";
 
 const migrations: readonly Migration[] = [
   {
     id: STORE_SCHEMA_VERSION,
-    name: "store_schema_v2",
+    name: "store_schema_v3",
     up: (db) => {
       db.exec(`
         CREATE TABLE profile (

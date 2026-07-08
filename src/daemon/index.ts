@@ -20,7 +20,6 @@ import {
   appendTurnEvents,
   clearActiveFeynmanCheck,
   createCourse,
-  deleteCourse,
   demoFileKey,
   endSession as endStoreSession,
   flattenTopicTree,
@@ -39,9 +38,7 @@ import {
   patchProfile,
   patchCourse,
   readTopicTree,
-  replaceTopicTree,
   startSession,
-  withStoreTransaction,
   type Course,
   type CourseStatus as StoreCourseStatus,
   type Demo,
@@ -52,7 +49,6 @@ import {
   type Store,
   type Topic,
   type TopicJournalEntry as StoreTopicJournalEntry,
-  type TopicTreeInput,
   type TranscriptEntry as StoreTranscriptEntry,
 } from "../store";
 import {
@@ -311,9 +307,8 @@ type TokenScope = Readonly<{
 
 type MessageTurnEvent = Extract<TurnEvent, { type: "message" }>;
 type FeynmanAnswerTurnEvent = Extract<TurnEvent, { type: "feynman-answer" }>;
-type IdeationTurnEvent = Extract<TurnEvent, { type: "ideation" }>;
 
-type CourseCreateDraft = {
+type CourseCreateInput = {
   title: string;
   description?: string | null;
   harnessId?: string | null;
@@ -322,7 +317,7 @@ type CourseCreateDraft = {
   status?: StoreCourseStatus;
 };
 
-type CoursePatchDraft = {
+type CoursePatchInput = {
   title?: string;
   description?: string | null;
   harnessId?: string | null;
@@ -331,7 +326,7 @@ type CoursePatchDraft = {
   status?: StoreCourseStatus;
 };
 
-type ProfilePatchDraft = {
+type ProfilePatchInput = {
   name?: string | null;
   onboardingState?: string;
   settings?: Record<string, unknown>;
@@ -998,11 +993,11 @@ const parseCourseStatus = (value: string | null): StoreCourseStatus | undefined 
     return undefined;
   }
 
-  if (value === "draft" || value === "active" || value === "archived") {
+  if (value === "active" || value === "archived") {
     return value;
   }
 
-  throw new Error("status must be draft, active, or archived.");
+  throw new Error("status must be active or archived.");
 };
 
 const courseResource = (course: Course): Record<string, unknown> => ({
@@ -1627,7 +1622,7 @@ export const runDaemon = async (
   };
 
   const patchProfileResource = (
-    patch: ProfilePatchDraft,
+    patch: ProfilePatchInput,
   ): ProfileResource => profileResource(patchProfile(store, patch), store.dataDir);
 
   const statusForCourse = (courseId: number): UiStatusPayload =>
@@ -2119,100 +2114,6 @@ export const runDaemon = async (
     return jsonResponse({ ok: true, turn: turn.turn });
   };
 
-  const parseIdeationSeed = async (request: Request): Promise<IdeationTurnEvent> => {
-    const body = await readJsonBody(request);
-    if (!isRecord(body)) {
-      throw new Error("Ideation body must be an object.");
-    }
-
-    return {
-      type: "ideation",
-      text: requiredStringField(body, "seed"),
-    };
-  };
-
-  const parsePlanTopic = (value: unknown, label: string): TopicTreeInput => {
-    if (!isRecord(value)) {
-      throw new Error(`${label} must be an object.`);
-    }
-
-    const path = requiredStringField(value, "path");
-    const title = requiredStringField(value, "title");
-    const rawBody = Object.hasOwn(value, "body")
-      ? optionalStringField(value, "body")
-      : optionalStringField(value, "summary");
-    const rawChildren = value["children"];
-    if (rawChildren !== undefined && !Array.isArray(rawChildren)) {
-      throw new Error(`${label}.children must be an array.`);
-    }
-
-    const children = (rawChildren ?? []).map((child, index) =>
-      parsePlanTopic(child, `${label}.children[${index}]`),
-    );
-
-    return {
-      path,
-      title,
-      body: rawBody ?? "",
-      ...(children.length === 0 ? {} : { children }),
-    };
-  };
-
-  const parsePlanTopics = (value: unknown): readonly TopicTreeInput[] => {
-    if (!Array.isArray(value)) {
-      throw new Error("topics must be an array.");
-    }
-
-    if (value.length === 0) {
-      throw new Error("topics cannot be empty.");
-    }
-
-    return value.map((topic, index) => parsePlanTopic(topic, `topics[${index}]`));
-  };
-
-  const handleIdeateCourse = async (request: Request): Promise<Response> => {
-    if (request.method !== "POST") {
-      return emptyResponse(405);
-    }
-
-    try {
-      const event = await parseIdeationSeed(request);
-      const course = createCourse(store, {
-        title: "Draft course",
-        description: event.text,
-        status: "draft",
-      });
-      const turn = nextTurnNumber(store, course.id);
-      const entry = appendUiTranscript(store, course.id, {
-        turn,
-        role: "learner",
-        kind: "ideation",
-        content: event.text,
-      });
-
-      sseHub.broadcast("courses", coursesPayload());
-      sseHub.broadcast("message", { courseId: course.id, entry });
-      const turnResponse = runCourseTurn(course, [event], "ideation", turn);
-      if (!turnResponse.ok) {
-        return turnResponse;
-      }
-
-      return jsonResponse(
-        {
-          ok: true,
-          course: courseResource(course),
-          turn,
-        },
-        { status: 201 },
-      );
-    } catch (error) {
-      return textResponse(
-        error instanceof Error ? error.message : "Invalid ideation request.",
-        400,
-      );
-    }
-  };
-
   const parseSubmit = async (request: Request): Promise<MessageTurnEvent> => {
     const body = await readJsonBody(request);
     if (!isRecord(body)) {
@@ -2223,126 +2124,6 @@ export const runDaemon = async (
       type: "message",
       text: requiredStringField(body, "text"),
     };
-  };
-
-  const handleAcceptPlan = async (
-    request: Request,
-    course: Course,
-  ): Promise<Response> => {
-    // The review UI keeps edits client-side and submits the final plan here,
-    // avoiding draft-only topic CRUD endpoints while preserving atomic accept.
-    if (request.method !== "POST") {
-      return emptyResponse(405);
-    }
-
-    if (course.status !== "draft") {
-      return textResponse("Course plan can only be accepted from draft.", 409);
-    }
-
-    const currentRuntime = runtimes.get(course.id);
-    if (currentRuntime?.runningTurn === true) {
-      return textResponse(
-        "Cannot accept the plan while the agent is still working.",
-        409,
-      );
-    }
-
-    const body = await readJsonBody(request);
-    if (!isRecord(body)) {
-      return textResponse("Accept-plan body must be an object.", 400);
-    }
-
-    try {
-      const title = Object.hasOwn(body, "title")
-        ? requiredStringField(body, "title")
-        : course.title;
-      let description: string | null = course.description;
-      if (Object.hasOwn(body, "description")) {
-        const parsedDescription = optionalStringField(body, "description");
-        if (parsedDescription !== undefined) {
-          description = parsedDescription;
-        }
-      }
-      const topics = Object.hasOwn(body, "topics")
-        ? parsePlanTopics(body["topics"])
-        : undefined;
-      const existingTopics = readTopicTree(store, course.id);
-      if (topics === undefined && existingTopics.length === 0) {
-        return textResponse("Draft course has no proposed plan.", 409);
-      }
-
-      const activated = withStoreTransaction(store, () => {
-        if (topics !== undefined) {
-          replaceTopicTree(store, course.id, topics);
-        }
-
-        return patchCourse(store, course.id, {
-          title,
-          description,
-          status: "active",
-        });
-      });
-
-      sseHub.broadcast("courses", coursesPayload());
-      if (runtimes.has(course.id)) {
-        broadcastSessions();
-      }
-      broadcastCourseCollections(course.id);
-
-      const greeting = runCourseTurn(
-        activated,
-        [
-          {
-            type: "message",
-            text:
-              "The learner accepted the course plan. Greet them and start with the first useful next step.",
-          },
-        ],
-        "greeting",
-      );
-      if (!greeting.ok) {
-        return greeting;
-      }
-
-      return jsonResponse({
-        ok: true,
-        course: courseResource(activated),
-        greetingQueued: true,
-      });
-    } catch (error) {
-      return textResponse(
-        error instanceof Error ? error.message : "Invalid course plan.",
-        400,
-      );
-    }
-  };
-
-  const hardDeleteDraftCourse = async (course: Course): Promise<Response> => {
-    const currentRuntime = runtimes.get(course.id);
-    if (currentRuntime?.runningTurn === true) {
-      return textResponse(
-        "Cannot discard the draft while the agent is still working.",
-        409,
-      );
-    }
-
-    if (currentRuntime !== undefined) {
-      await currentRuntime.orchestrator.endSession("draft-discarded");
-      runtimes.delete(course.id);
-    }
-
-    revokeTeachingTokensForCourse(course.id, "draft-discarded");
-    statuses.delete(course.id);
-    deleteCourse(store, course.id);
-    sseHub.broadcast("courses", coursesPayload());
-    broadcastSessions();
-    sseHub.broadcast("status", {
-      courseId: course.id,
-      status: "session-ended",
-      hasSeenWait: true,
-    });
-
-    return jsonResponse({ ok: true, deleted: true });
   };
 
   const parseNav = async (request: Request, courseId: number): Promise<TurnEvent> => {
@@ -2408,7 +2189,46 @@ export const runDaemon = async (
       }
 
       try {
-        const input: CourseCreateDraft = {
+        if (Object.hasOwn(body, "seed")) {
+          const seed = requiredStringField(body, "seed");
+          const harnessId = optionalStringField(body, "harnessId");
+          const attachedDir = optionalStringField(body, "attachedDir");
+          const sourceName = optionalStringField(body, "sourceName");
+          const course = createCourse(store, {
+            title: "New course",
+            description: seed,
+            status: "active",
+            ...(harnessId === undefined ? {} : { harnessId }),
+            ...(attachedDir === undefined ? {} : { attachedDir }),
+            ...(sourceName === undefined ? {} : { sourceName }),
+          });
+          const event: MessageTurnEvent = { type: "message", text: seed };
+          const turn = nextTurnNumber(store, course.id);
+          const entry = appendUiTranscript(store, course.id, {
+            turn,
+            role: "learner",
+            kind: "text",
+            content: seed,
+          });
+
+          sseHub.broadcast("courses", coursesPayload());
+          sseHub.broadcast("message", { courseId: course.id, entry });
+          const turnResponse = runCourseTurn(course, [event], "orientation", turn);
+          if (!turnResponse.ok) {
+            return turnResponse;
+          }
+
+          return jsonResponse(
+            {
+              ok: true,
+              course: courseResource(course),
+              turn,
+            },
+            { status: 201 },
+          );
+        }
+
+        const input: CourseCreateInput = {
           title: requiredStringField(body, "title"),
         };
         const description = optionalStringField(body, "description");
@@ -2472,7 +2292,7 @@ export const runDaemon = async (
     }
 
     try {
-      const patch: ProfilePatchDraft = {};
+      const patch: ProfilePatchInput = {};
 
       if (Object.hasOwn(body, "name")) {
         const name = optionalStringField(body, "name");
@@ -2686,7 +2506,7 @@ export const runDaemon = async (
         }
 
         try {
-          const patch: CoursePatchDraft = {};
+          const patch: CoursePatchInput = {};
 
           if (Object.hasOwn(body, "title")) {
             patch.title = requiredStringField(body, "title");
@@ -2736,10 +2556,6 @@ export const runDaemon = async (
       }
 
       if (request.method === "DELETE") {
-        if (course.status === "draft") {
-          return await hardDeleteDraftCourse(course);
-        }
-
         const archived = patchCourse(store, courseId, { status: "archived" });
         sseHub.broadcast("courses", coursesPayload());
         return jsonResponse(courseResource(archived));
@@ -2784,27 +2600,14 @@ export const runDaemon = async (
         const entry = appendUiTranscript(store, courseId, {
           turn,
           role: "learner",
-          kind: course.status === "draft" ? "ideation" : "text",
+          kind: "text",
           content: event.text,
         });
         sseHub.broadcast("message", { courseId, entry });
-        return runCourseTurn(
-          course,
-          [
-            course.status === "draft"
-              ? { type: "ideation", text: event.text }
-              : event,
-          ],
-          course.status === "draft" ? "ideation" : "teaching",
-          turn,
-        );
+        return runCourseTurn(course, [event], "teaching", turn);
       } catch (error) {
         return textResponse(error instanceof Error ? error.message : "Invalid submit request.", 400);
       }
-    }
-
-    if (action === "accept-plan" && extra === undefined) {
-      return await handleAcceptPlan(request, course);
     }
 
     if (action === "export" && extra === undefined) {
@@ -3070,10 +2873,6 @@ export const runDaemon = async (
           requestUrl.searchParams.get("refresh") === "1",
         ),
       );
-    }
-
-    if (requestUrl.pathname === "/api/courses/ideate") {
-      return await handleIdeateCourse(request);
     }
 
     if (requestUrl.pathname === "/api/courses") {
