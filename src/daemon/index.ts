@@ -2080,6 +2080,13 @@ export const runDaemon = async (
     sseHub.broadcast("message", { courseId: event.courseId, entry });
     sseHub.broadcast("tool-write", event);
     broadcastCourseCollections(event.courseId);
+
+    // Course renames must reach every title surface (topbar, library,
+    // sessions bar) immediately, not at the next turn boundary.
+    if (event.tool === "update_course_info") {
+      sseHub.broadcast("courses", coursesPayload());
+      broadcastSessions();
+    }
   };
 
   const teachingMcpHandler = createTeachingMcpHttpHandler({

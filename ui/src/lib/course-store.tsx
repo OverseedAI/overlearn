@@ -12,6 +12,7 @@ import { api, subscribeEvents } from "./api";
 import type {
   ActiveFeynmanCheck,
   AgentStreamPayload,
+  CourseResource,
   CourseState,
   GlossaryEntry,
   MasteryEntry,
@@ -50,6 +51,7 @@ export type CourseStore = {
 type Action =
   | { type: "loaded"; state: CourseState }
   | { type: "load-error"; message: string }
+  | { type: "course"; course: CourseResource }
   | { type: "status"; status: UiStatus; message?: string }
   | { type: "message"; entry: TranscriptEntry }
   | { type: "transcript"; entries: TranscriptEntry[] }
@@ -177,6 +179,8 @@ function reduce(store: CourseStore, action: Action): CourseStore {
       };
     case "load-error":
       return { ...store, loading: false, loadError: action.message };
+    case "course":
+      return withState(store, { course: action.course });
     case "status":
       return {
         ...store,
@@ -325,6 +329,14 @@ export function CourseStoreProvider({
 
     const unsubscribe = subscribeEvents(
       {
+        // The courses payload is global; pick out this course so live renames
+        // (e.g. the agent's update_course_info) reach the header title.
+        courses: (payload) => {
+          const course = payload.courses.find((entry) => entry.id === courseId);
+          if (course !== undefined) {
+            dispatch({ type: "course", course });
+          }
+        },
         status: forCourse((payload) =>
           dispatch({
             type: "status",
