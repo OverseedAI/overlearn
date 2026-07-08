@@ -65,7 +65,6 @@ import {
   type TeachingWriteEvent,
 } from "../mcp/teaching";
 import { renderMarkdown } from "./markdown";
-import { serveSpaAsset, spaAvailable } from "./spa";
 import {
   createDaemonTurnOrchestrator,
   type ActiveTeachingSessionRegistration,
@@ -75,15 +74,6 @@ import {
   type TurnPayload,
   type TurnPromptMode,
 } from "./orchestrator";
-import {
-  renderPage,
-  type ActiveFeynmanCheck,
-  type DemoEntry,
-  type GlossaryEntry,
-  type MasteryEntry,
-  type TopicNode,
-  type TranscriptEntry,
-} from "./ui";
 import { createTutorialCourse } from "./tutorial";
 
 export type DaemonEndpoint = Readonly<{
@@ -127,6 +117,97 @@ type UiStatusPayload = Readonly<{
   hasSeenWait: boolean;
   message?: string;
 }>;
+
+type DemoEntry = Readonly<{
+  file: string;
+  title?: string;
+  addedAt: string;
+}>;
+
+type GlossaryEntry = Readonly<{
+  term: string;
+  def: string;
+  lesson?: string;
+  addedAt: string;
+}>;
+
+type MasteryEntry = Readonly<{
+  concept: string;
+  score: number;
+  gaps?: string;
+  at: string;
+}>;
+
+type TopicNode = Readonly<{
+  path: string;
+  title: string;
+  body?: string;
+  lesson?: string;
+  enteredAt?: string;
+  current: boolean;
+  demos?: readonly DemoEntry[];
+  children: readonly TopicNode[];
+}>;
+
+type ActiveFeynmanCheck = Readonly<{
+  concept: string;
+  prompt: string;
+  keyPoints: readonly string[];
+  issuedAt: string;
+  replaced?: Readonly<{
+    concept: string;
+    issuedAt: string;
+    replacedAt: string;
+  }>;
+}>;
+
+type TranscriptEntry =
+  | Readonly<{
+      role: "learner" | "agent";
+      text: string;
+      at: string;
+      kind?: "text";
+      turn?: number;
+    }>
+  | Readonly<{
+      role: "agent";
+      kind: "demo";
+      file: string;
+      title?: string;
+      at: string;
+      turn?: number;
+    }>
+  | Readonly<{
+      role: "agent";
+      kind: "lesson";
+      lesson: string;
+      at: string;
+      turn?: number;
+    }>
+  | Readonly<{
+      role: "agent";
+      kind: "feynman-check";
+      concept: string;
+      prompt: string;
+      at: string;
+      turn?: number;
+    }>
+  | Readonly<{
+      role: "learner";
+      kind: "feynman-answer";
+      concept: string;
+      text: string;
+      at: string;
+      turn?: number;
+    }>
+  | Readonly<{
+      role: "system";
+      kind: "tool-call";
+      text: string;
+      at: string;
+      tool: string;
+      turn?: number;
+    }>;
 
 type HarnessSummary = Readonly<{
   id: string;
@@ -214,7 +295,6 @@ type ProfilePatchDraft = {
 };
 
 const LOCALHOST_BIND_HOST = "127.0.0.1";
-const DAEMON_AUTH_COOKIE = "overlearn_daemon_token";
 const DEFAULT_HARNESS_ID = "claude-code";
 const MAX_AGENT_STREAM_REPLAY = 200;
 const onboardingStates: readonly OnboardingState[] = [
@@ -589,28 +669,6 @@ const writeWebResponse = async (
   }
 };
 
-const parseCookieHeader = (header: string | null): ReadonlyMap<string, string> => {
-  const cookies = new Map<string, string>();
-  if (header === null || header.trim().length === 0) {
-    return cookies;
-  }
-
-  for (const part of header.split(";")) {
-    const separator = part.indexOf("=");
-    if (separator <= 0) {
-      continue;
-    }
-
-    const name = part.slice(0, separator).trim();
-    const value = part.slice(separator + 1).trim();
-    if (name.length > 0) {
-      cookies.set(name, value);
-    }
-  }
-
-  return cookies;
-};
-
 const bearerToken = (headers: Headers): string | undefined => {
   const authorization = headers.get("authorization");
   if (authorization === null) {
@@ -626,9 +684,7 @@ const bearerToken = (headers: Headers): string | undefined => {
 };
 
 const requestHasDaemonToken = (request: Request, daemonToken: string): boolean =>
-  bearerToken(request.headers) === daemonToken ||
-  parseCookieHeader(request.headers.get("cookie")).get(DAEMON_AUTH_COOKIE) ===
-    daemonToken;
+  bearerToken(request.headers) === daemonToken;
 
 const isDemoFileApiRequest = (requestUrl: URL, method: string): boolean => {
   if (method !== "GET") {
@@ -662,23 +718,11 @@ const incomingHasDaemonToken = (
   daemonToken: string,
 ): boolean => {
   const headers = headersFromIncoming(request);
-  return (
-    bearerToken(headers) === daemonToken ||
-    parseCookieHeader(headers.get("cookie")).get(DAEMON_AUTH_COOKIE) === daemonToken
-  );
+  return bearerToken(headers) === daemonToken;
 };
 
 const unauthorizedResponse = (): Response =>
   textResponse("Overlearn daemon authentication is required.", 401);
-
-const authenticatedBootstrapResponse = (token: string): Response =>
-  new Response(null, {
-    status: 303,
-    headers: {
-      location: "/",
-      "set-cookie": `${DAEMON_AUTH_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict`,
-    },
-  });
 
 const readJsonBody = async (request: Request): Promise<unknown> => {
   const text = await request.text();
@@ -2468,15 +2512,6 @@ export const runDaemon = async (
     const requestUrl = new URL(request.url);
     const method = request.method;
 
-    if (method === "GET" && requestUrl.pathname === "/") {
-      const token = requestUrl.searchParams.get("token");
-      if (token !== null) {
-        return token === daemonToken
-          ? authenticatedBootstrapResponse(daemonToken)
-          : unauthorizedResponse();
-      }
-    }
-
     if (
       requestUrl.pathname.startsWith("/api/") &&
       !requestHasDaemonToken(request, daemonToken) &&
@@ -2566,129 +2601,10 @@ export const runDaemon = async (
     }
 
     if (
-      method === "GET" &&
-      (requestUrl.pathname === "/" || requestUrl.pathname.startsWith("/assets/")) &&
-      env["OVERLEARN_LEGACY_UI"] !== "1" &&
-      spaAvailable()
+      !requestUrl.pathname.startsWith("/api") &&
+      !requestUrl.pathname.startsWith("/mcp")
     ) {
-      const spaResponse = serveSpaAsset(requestUrl.pathname);
-      if (spaResponse !== undefined) {
-        return spaResponse;
-      }
-      if (requestUrl.pathname !== "/") {
-        return textResponse("Not found.", 404);
-      }
-    }
-
-    if (method === "GET" && requestUrl.pathname === "/") {
-      const profile = readProfileResource();
-      if (profile.onboardingState !== "done") {
-        const html = renderPage(
-          "overlearn",
-          [],
-          lessonSnapshot([], [], new Set()),
-          [],
-          [],
-          [],
-          [],
-          new Set(),
-          undefined,
-          "agent-working",
-          false,
-          {
-            orchestrated: true,
-            harnesses: harnessSummaries(
-              store,
-              undefined,
-              env,
-              harnessDetectionCache,
-              false,
-            ),
-            profile,
-            dataDir: store.dataDir,
-            onboardingState: profile.onboardingState,
-          },
-        );
-
-        return new Response(html, {
-          headers: { "content-type": "text/html; charset=utf-8" },
-        });
-      }
-
-      const courseParam = requestUrl.searchParams.get("course");
-      if (courseParam !== null) {
-        const courseId = Number(courseParam);
-        if (Number.isInteger(courseId)) {
-          const view = courseView(store, courseId);
-          if (view === undefined) {
-            return textResponse("Course not found.", 404);
-          }
-
-          statuses.set(courseId, statusForCourse(courseId));
-          const html = renderPage(
-            view.course.title,
-            view.transcript,
-            view.lessons,
-            view.glossary,
-            view.topics,
-            view.unassignedDemos,
-            view.masteryScores,
-            view.demoFiles,
-            view.activeFeynmanCheck,
-            statusForCourse(courseId).status,
-            true,
-            {
-              courseId,
-              orchestrated: true,
-              harnesses: harnessSummaries(
-                store,
-                courseId,
-                env,
-                harnessDetectionCache,
-                false,
-              ),
-              profile,
-              dataDir: store.dataDir,
-              onboardingState: profile.onboardingState,
-            },
-          );
-
-          return new Response(html, {
-            headers: { "content-type": "text/html; charset=utf-8" },
-          });
-        }
-      }
-
-      const html = renderPage(
-        "Course library",
-        [],
-        lessonSnapshot([], [], new Set()),
-        [],
-        [],
-        [],
-        [],
-        new Set(),
-        undefined,
-        "agent-working",
-        false,
-        {
-          orchestrated: true,
-          harnesses: harnessSummaries(
-            store,
-            undefined,
-            env,
-            harnessDetectionCache,
-            false,
-          ),
-          profile,
-          dataDir: store.dataDir,
-          onboardingState: profile.onboardingState,
-        },
-      );
-
-      return new Response(html, {
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
+      return jsonResponse({ error: "Not found." }, { status: 404 });
     }
 
     return textResponse("Not found.", 404);

@@ -606,11 +606,10 @@ describe(`daemon contract (${runtime.name})`, () => {
         });
         expect(advanced.status).toBe(200);
 
-        // The page shell may be the SPA (title arrives via API) or the legacy
-        // server-rendered page (title inline) — assert both layers directly.
         const opened = await authFetch(daemon, `/?course=${courseId}`);
-        expect(opened.status).toBe(200);
-        await expect(opened.text()).resolves.toContain("Overlearn");
+        expect(opened.status).toBe(404);
+        expect(opened.headers.get("content-type")).toContain("application/json");
+        await expect(opened.json()).resolves.toEqual({ error: "Not found." });
 
         const openedState = await authFetch(daemon, `/api/courses/${courseId}`);
         expect(openedState.status).toBe(200);
@@ -785,8 +784,10 @@ describe(`daemon contract (${runtime.name})`, () => {
         const bootstrap = await fetch(`${daemon.url}/?token=${daemon.token}`, {
           redirect: "manual",
         });
-        expect(bootstrap.status).toBe(303);
-        expect(bootstrap.headers.get("set-cookie")).toContain("HttpOnly");
+        expect(bootstrap.status).toBe(404);
+        expect(bootstrap.headers.get("content-type")).toContain("application/json");
+        expect(bootstrap.headers.get("set-cookie")).toBeNull();
+        await expect(bootstrap.json()).resolves.toEqual({ error: "Not found." });
 
         const health = (await (
           await authFetch(daemon, "/api/health")

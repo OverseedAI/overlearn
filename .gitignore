@@ -7,7 +7,6 @@ dist/
 node_modules/
 registry/.wrangler/
 registry/wrangler.it.*.toml
-src/daemon/spa-assets.gen.ts
 src-tauri/bin/learn-*
 src-tauri/gen/
 src-tauri/target/

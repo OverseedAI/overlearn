@@ -5,14 +5,14 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "typecheck": "bun scripts/embed-ui-assets.ts --ensure && tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "bun scripts/embed-ui-assets.ts --ensure && bun test src",
+    "test": "bun test src",
     "test:contract": "bun test test/contract",
     "test:conformance": "bun test src/adapter",
     "check:version": "bun scripts/check-version-sync.ts",
-    "ui:build": "bun scripts/embed-ui-assets.ts --build",
-    "build": "bun run ui:build && bun build --compile ./src/cli/index.ts --outfile ./dist/learn",
+    "ui:build": "bun run --cwd ui build",
+    "build": "bun build --compile ./src/cli/index.ts --outfile ./dist/learn",
     "app:copy-sidecar": "bun scripts/copy-tauri-sidecar.ts",
     "app:dev": "bun run build && bun run app:copy-sidecar && tauri dev",
     "app:build": "bun run build && bun run app:copy-sidecar && tauri build --debug"
