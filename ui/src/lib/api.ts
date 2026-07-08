@@ -4,6 +4,7 @@ import type {
   CourseState,
   CourseStatus,
   HarnessSummary,
+  LiveSessionSummary,
   OnboardingState,
   ProfileResource,
   ServerEvents,
@@ -120,7 +121,7 @@ const del = <T>(path: string) => request<T>(path, { method: "DELETE" });
 
 export const api = {
   health: () =>
-    get<{ ok: boolean; version: string; activeCourseId: number | null }>(
+    get<{ ok: boolean; version: string; liveSessions: LiveSessionSummary[] }>(
       "/api/health",
     ),
 
@@ -143,16 +144,22 @@ export const api = {
   createTutorial: () => post<{ courseId: number }>("/api/tutorial"),
 
   // Harnesses
-  listHarnesses: (opts?: { courseId?: number; refresh?: boolean }) => {
+  listHarnesses: (
+    opts:
+      | { courseId: number; refresh?: boolean }
+      | { scope: "profile"; refresh?: boolean },
+  ) => {
     const params = new URLSearchParams();
-    if (opts?.courseId !== undefined) {
+    if ("courseId" in opts) {
       params.set("courseId", String(opts.courseId));
+    } else {
+      params.set("scope", opts.scope);
     }
-    if (opts?.refresh) {
+    if (opts.refresh) {
       params.set("refresh", "1");
     }
     const query = params.toString();
-    return get<HarnessSummary[]>(`/api/harnesses${query ? `?${query}` : ""}`);
+    return get<HarnessSummary[]>(`/api/harnesses?${query}`);
   },
   harnessLogin: (id: string) =>
     post<{ manual: boolean; spawned: boolean; command: string; note: string }>(

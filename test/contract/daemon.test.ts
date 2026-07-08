@@ -13,7 +13,6 @@ import {
   promptText,
   submitCourseDone,
   submitCourseMessage,
-  waitForDaemonStopped,
   waitForLogEntries,
   waitForPidStopped,
 } from "../helpers/daemon";
@@ -217,6 +216,22 @@ const mcpUrlFromLogs = (
   }
 
   return server["url"];
+};
+
+const parseLoggedMcpResult = (
+  entry: Record<string, unknown>,
+): Record<string, unknown> => {
+  const result = entry["result"];
+  if (!isRecord(result) || !Array.isArray(result["content"])) {
+    throw new Error("Missing logged MCP result content.");
+  }
+
+  const [content] = result["content"];
+  if (!isRecord(content) || typeof content["text"] !== "string") {
+    throw new Error("Missing logged MCP result text.");
+  }
+
+  return JSON.parse(content["text"]) as Record<string, unknown>;
 };
 
 afterEach(async () => {
@@ -796,7 +811,7 @@ describe(`daemon contract (${runtime.name})`, () => {
           ok: true,
           orchestrated: true,
           version: expect.any(String),
-          activeCourseId: null,
+          liveSessions: [],
         });
 
         const created = await createCourse(daemon, {
@@ -828,6 +843,22 @@ describe(`daemon contract (${runtime.name})`, () => {
           selected: true,
           version: "codex-acp 9.9.9",
         });
+
+        const implicitHarnessResponse = await authFetch(daemon, "/api/harnesses");
+        expect(implicitHarnessResponse.status).toBe(400);
+        await expect(implicitHarnessResponse.text()).resolves.toContain(
+          "Harness scope is required.",
+        );
+
+        const profileHarnessResponse = await authFetch(
+          daemon,
+          "/api/harnesses?scope=profile",
+        );
+        expect(profileHarnessResponse.status).toBe(200);
+        expect(harnessById(await profileHarnessResponse.json(), "codex"))
+          .toMatchObject({
+            selected: true,
+          });
 
         await submitCourseMessage(
           daemon.url,
@@ -1560,7 +1591,7 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
-    "rejects harness changes while a course turn is running",
+    "gates harness changes only on the switched course's running turn",
     async () => {
       if (!(await ensureLocalhost())) {
         return;
@@ -1572,6 +1603,9 @@ describe(`daemon contract (${runtime.name})`, () => {
       try {
         const course = await createCourse(daemon, {
           title: "Running Harness Course",
+        });
+        const idleCourse = await createCourse(daemon, {
+          title: "Idle Harness Course",
         });
         await submitCourseMessage(
           daemon.url,
@@ -1602,6 +1636,22 @@ describe(`daemon contract (${runtime.name})`, () => {
         await expect(response.text()).resolves.toContain(
           "Cannot change harness while a turn is running",
         );
+
+        const idleResponse = await authFetch(
+          daemon,
+          `/api/courses/${idleCourse.id}/harness`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id: "codex" }),
+          },
+        );
+        expect(idleResponse.status).toBe(200);
+        await expect(idleResponse.json()).resolves.toMatchObject({
+          ok: true,
+          harness: "codex",
+          swapped: false,
+        });
       } finally {
         sse.close();
       }
@@ -1877,7 +1927,7 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
-    "runs the final wrap-up turn, expires the MCP token, emits session-ended, and exits",
+    "wraps up one course session while keeping the daemon and other sessions alive",
     async () => {
       if (!(await ensureLocalhost())) {
         return;
@@ -1898,6 +1948,7 @@ describe(`daemon contract (${runtime.name})`, () => {
 
       try {
         const course = await createCourse(daemon, { title: "Done Course" });
+        const other = await createCourse(daemon, { title: "Still Alive Course" });
         await submitCourseMessage(
           daemon.url,
           daemon.token,
@@ -1913,6 +1964,22 @@ describe(`daemon contract (${runtime.name})`, () => {
             isRecord(data["event"]) &&
             data["event"]["type"] === "done",
           "first turn done",
+        );
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          other.id,
+          "start other before done",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === other.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "other first turn done",
         );
 
         // Streamed agent text chunks must be persisted as ONE transcript
@@ -1972,7 +2039,35 @@ describe(`daemon contract (${runtime.name})`, () => {
             data["status"] === "session-ended",
           "session-ended status",
         );
-        await waitForDaemonStopped(daemon.dataDir, daemon.pid);
+
+        const health = (await (
+          await authFetch(daemon, "/api/health")
+        ).json()) as Record<string, unknown>;
+        expect(health["ok"]).toBe(true);
+        expect(health["liveSessions"]).toEqual([
+          expect.objectContaining({
+            courseId: other.id,
+            harnessId: "claude-code",
+            state: "idle",
+          }),
+        ]);
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          other.id,
+          "keep serving the other course",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === other.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "other second turn done",
+        );
       } finally {
         sse.close();
       }
@@ -1981,33 +2076,213 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
-    "rejects starting a second course while another course owns the active session",
+    "runs two course turns concurrently while same-course turns remain serialized",
     async () => {
       if (!(await ensureLocalhost())) {
         return;
       }
 
-      const daemon = await start({ scenario: "normal" });
+      const daemon = await start({ scenario: "never" });
+      const sse = await createSseClient(daemon.url, daemon.token);
 
-      const first = await createCourse(daemon, { title: "First Course" });
-      const second = await createCourse(daemon, { title: "Second Course" });
+      try {
+        const first = await createCourse(daemon, { title: "First Course" });
+        const second = await createCourse(daemon, { title: "Second Course" });
 
-      await submitCourseMessage(
-        daemon.url,
-        daemon.token,
-        first.id,
-        "start first",
-      );
-      const response = await authFetch(daemon, `/api/courses/${second.id}/submit`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: "start second" }),
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          first.id,
+          "start first",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === first.id &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "thinking",
+          "first running turn",
+        );
+
+        const sameCourse = await authFetch(
+          daemon,
+          `/api/courses/${first.id}/submit`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: "start first again" }),
+          },
+        );
+        expect(sameCourse.status).toBe(409);
+        await expect(sameCourse.text()).resolves.toContain(
+          "A turn is already running for this course.",
+        );
+
+        const crossCourse = await authFetch(
+          daemon,
+          `/api/courses/${second.id}/submit`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: "start second" }),
+          },
+        );
+        expect(crossCourse.status).toBe(200);
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === second.id &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "thinking",
+          "second running turn",
+        );
+
+        const health = (await (
+          await authFetch(daemon, "/api/health")
+        ).json()) as Record<string, unknown>;
+        expect(health["liveSessions"]).toEqual([
+          expect.objectContaining({
+            courseId: first.id,
+            harnessId: "claude-code",
+            state: "turn-running",
+          }),
+          expect.objectContaining({
+            courseId: second.id,
+            harnessId: "claude-code",
+            state: "turn-running",
+          }),
+        ]);
+      } finally {
+        sse.close();
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
+    "keeps teaching MCP tokens scoped to their course with two live sessions",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          FAKE_ACP_MCP_CALL: JSON.stringify({
+            server: "overlearn-teaching",
+            tool: "get_course_state",
+            args: { transcriptLimit: 10 },
+          }),
+        },
       });
+      const sse = await createSseClient(daemon.url, daemon.token);
 
-      expect(response.status).toBe(409);
-      await expect(response.text()).resolves.toContain(
-        "already has the active learning session",
-      );
+      try {
+        const first = await createCourse(daemon, { title: "Isolation Alpha" });
+        const second = await createCourse(daemon, { title: "Isolation Beta" });
+
+        await Promise.all([
+          submitCourseMessage(
+            daemon.url,
+            daemon.token,
+            first.id,
+            "alpha-only prompt",
+          ),
+          submitCourseMessage(
+            daemon.url,
+            daemon.token,
+            second.id,
+            "beta-only prompt",
+          ),
+        ]);
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === first.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "first isolation turn done",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === second.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "second isolation turn done",
+        );
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.filter(
+              (entry) =>
+                entry["event"] === "mcp/tools/call" &&
+                entry["tool"] === "get_course_state",
+            ).length >= 2,
+          "scoped get_course_state calls",
+        );
+        const states = logs
+          .filter(
+            (entry) =>
+              entry["event"] === "mcp/tools/call" &&
+              entry["tool"] === "get_course_state",
+          )
+          .map(parseLoggedMcpResult);
+
+        expect(states).toContainEqual(
+          expect.objectContaining({
+            course: expect.objectContaining({
+              id: first.id,
+              title: "Isolation Alpha",
+            }),
+          }),
+        );
+        expect(states).toContainEqual(
+          expect.objectContaining({
+            course: expect.objectContaining({
+              id: second.id,
+              title: "Isolation Beta",
+            }),
+          }),
+        );
+
+        const firstState = states.find((state) => {
+          const course = state["course"];
+          return isRecord(course) && course["id"] === first.id;
+        });
+        const secondState = states.find((state) => {
+          const course = state["course"];
+          return isRecord(course) && course["id"] === second.id;
+        });
+        expect(JSON.stringify(firstState)).not.toContain("Isolation Beta");
+        expect(JSON.stringify(firstState)).not.toContain("beta-only prompt");
+        expect(JSON.stringify(secondState)).not.toContain("Isolation Alpha");
+        expect(JSON.stringify(secondState)).not.toContain("alpha-only prompt");
+
+        const health = (await (
+          await authFetch(daemon, "/api/health")
+        ).json()) as Record<string, unknown>;
+        expect(health["liveSessions"]).toEqual([
+          expect.objectContaining({
+            courseId: first.id,
+            state: "idle",
+          }),
+          expect.objectContaining({
+            courseId: second.id,
+            state: "idle",
+          }),
+        ]);
+      } finally {
+        sse.close();
+      }
     },
     15_000,
   );

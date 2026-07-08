@@ -85,7 +85,7 @@ export type CourseStatus = Readonly<{
   daemonAlive: boolean;
   waitPending: false;
   courseDir: null;
-  activeCourseId: number | null;
+  liveSessions: readonly LiveSessionSummary[];
 }>;
 
 export const REVIEW_WEAK_NAV_PATH = "overlearn:review-weak";
@@ -229,8 +229,15 @@ type HarnessSummary = Readonly<{
 
 type HarnessesPayload = Readonly<{
   courseId?: number;
+  scope?: "profile";
   harnesses: readonly HarnessSummary[];
   switched: boolean;
+}>;
+
+type LiveSessionSummary = Readonly<{
+  courseId: number;
+  harnessId: string;
+  state: "turn-running" | "idle";
 }>;
 
 type OnboardingState = "welcome" | "connect-agent" | "tutorial-offer" | "done";
@@ -256,6 +263,7 @@ type HarnessLoginSpawnInput = Readonly<{
 
 type CourseRuntime = {
   courseId: number;
+  harnessId: string;
   orchestrator: DaemonTurnOrchestrator;
   runningTurn: boolean;
 };
@@ -1314,8 +1322,7 @@ export const runDaemon = async (
   const harnessLoginSpawner =
     options.harnessLoginSpawner ?? defaultHarnessLoginSpawner;
   const allowedCorsOrigins = corsAllowedOrigins(env);
-  let runtime: CourseRuntime | undefined;
-  let activeCourseId: number | undefined;
+  const runtimes = new Map<number, CourseRuntime>();
   let port = 0;
   let shuttingDown = false;
 
@@ -1358,9 +1365,22 @@ export const runDaemon = async (
     sseHub.broadcast("status", payload);
   };
 
+  const liveSession = (courseRuntime: CourseRuntime): LiveSessionSummary => ({
+    courseId: courseRuntime.courseId,
+    harnessId: courseRuntime.orchestrator.hasActiveSession()
+      ? courseRuntime.harnessId
+      : selectedHarnessId(store, courseRuntime.courseId, env),
+    state: courseRuntime.runningTurn ? "turn-running" : "idle",
+  });
+
+  const liveSessions = (): readonly LiveSessionSummary[] =>
+    [...runtimes.values()]
+      .sort((left, right) => left.courseId - right.courseId)
+      .map(liveSession);
+
   const coursesPayload = (): Record<string, unknown> => ({
     courses: listCourses(store).map(courseResource),
-    activeCourseId: activeCourseId ?? null,
+    liveSessions: liveSessions(),
   });
 
   const harnessesPayload = (
@@ -1368,7 +1388,7 @@ export const runDaemon = async (
     switched: boolean,
     refresh = false,
   ): HarnessesPayload => ({
-    ...(courseId === undefined ? {} : { courseId }),
+    ...(courseId === undefined ? { scope: "profile" as const } : { courseId }),
     harnesses: harnessSummaries(store, courseId, env, harnessDetectionCache, refresh),
     switched,
   });
@@ -1476,6 +1496,11 @@ export const runDaemon = async (
       sessionId: session.id,
     });
 
+    const courseRuntime = runtimes.get(input.courseId);
+    if (courseRuntime !== undefined) {
+      courseRuntime.harnessId = input.harnessId;
+    }
+
     return { token, sessionId: session.id };
   };
 
@@ -1569,8 +1594,9 @@ export const runDaemon = async (
   };
 
   const ensureRuntime = (course: Course): CourseRuntime => {
-    if (runtime !== undefined && runtime.courseId === course.id) {
-      return runtime;
+    const existing = runtimes.get(course.id);
+    if (existing !== undefined) {
+      return existing;
     }
 
     const mcpBaseUrl = formatDaemonUrl(port, "");
@@ -1590,27 +1616,16 @@ export const runDaemon = async (
       unregisterTeachingSession,
     });
 
-    runtime = {
+    const courseRuntime = {
       courseId: course.id,
+      harnessId: selectedHarnessId(store, course.id, env),
       orchestrator,
       runningTurn: false,
     };
-    activeCourseId = course.id;
+    runtimes.set(course.id, courseRuntime);
+    sseHub.broadcast("courses", coursesPayload());
 
-    return runtime;
-  };
-
-  const rejectDifferentActiveCourse = (courseId: number): Response | undefined => {
-    if (activeCourseId !== undefined && activeCourseId !== courseId) {
-      // v1 keeps one active learning session explicit: callers must finish or
-      // shut down the active course before starting another course.
-      return textResponse(
-        `Course ${activeCourseId} already has the active learning session.`,
-        409,
-      );
-    }
-
-    return undefined;
+    return courseRuntime;
   };
 
   const runCourseTurn = (
@@ -1619,11 +1634,6 @@ export const runDaemon = async (
     mode: TurnPromptMode,
     existingTurn?: number,
   ): Response => {
-    const activeCourseRejection = rejectDifferentActiveCourse(course.id);
-    if (activeCourseRejection !== undefined) {
-      return activeCourseRejection;
-    }
-
     const currentRuntime = ensureRuntime(course);
     if (currentRuntime.runningTurn) {
       return textResponse("A turn is already running for this course.", 409);
@@ -1637,6 +1647,7 @@ export const runDaemon = async (
     currentRuntime.runningTurn = true;
     activeTurnByCourse.set(course.id, turn.turn);
     setStatus(course.id, mode === "wrap-up" ? "wrapping-up" : "agent-working");
+    sseHub.broadcast("courses", coursesPayload());
     appendTurnEvents(store, course.id, {
       turn: turn.turn,
       status: "pending",
@@ -1660,20 +1671,20 @@ export const runDaemon = async (
 
       if (!result.ok) {
         setStatus(course.id, "agent-failed", result.message);
+        sseHub.broadcast("courses", coursesPayload());
         return;
       }
 
       if (mode === "wrap-up") {
         await currentRuntime.orchestrator.endSession("done");
-        runtime = undefined;
+        runtimes.delete(course.id);
         setStatus(course.id, "session-ended");
-        setTimeout(() => {
-          void shutdown();
-        }, 250);
+        sseHub.broadcast("courses", coursesPayload());
         return;
       }
 
       setStatus(course.id, "waiting-for-agent");
+      sseHub.broadcast("courses", coursesPayload());
       broadcastCourseCollections(course.id);
     })().catch((error) => {
       currentRuntime.runningTurn = false;
@@ -1683,6 +1694,7 @@ export const runDaemon = async (
         "agent-failed",
         error instanceof Error ? error.message : "Agent turn failed.",
       );
+      sseHub.broadcast("courses", coursesPayload());
     });
 
     return jsonResponse({ ok: true, turn: turn.turn });
@@ -1742,13 +1754,6 @@ export const runDaemon = async (
   const handleIdeateCourse = async (request: Request): Promise<Response> => {
     if (request.method !== "POST") {
       return emptyResponse(405);
-    }
-
-    if (activeCourseId !== undefined) {
-      return textResponse(
-        `Course ${activeCourseId} already has the active learning session.`,
-        409,
-      );
     }
 
     try {
@@ -1815,7 +1820,8 @@ export const runDaemon = async (
       return textResponse("Course plan can only be accepted from draft.", 409);
     }
 
-    if (runtime?.courseId === course.id && runtime.runningTurn) {
+    const currentRuntime = runtimes.get(course.id);
+    if (currentRuntime?.runningTurn === true) {
       return textResponse(
         "Cannot accept the plan while the agent is still working.",
         409,
@@ -1890,17 +1896,17 @@ export const runDaemon = async (
   };
 
   const hardDeleteDraftCourse = async (course: Course): Promise<Response> => {
-    if (runtime?.courseId === course.id && runtime.runningTurn) {
+    const currentRuntime = runtimes.get(course.id);
+    if (currentRuntime?.runningTurn === true) {
       return textResponse(
         "Cannot discard the draft while the agent is still working.",
         409,
       );
     }
 
-    if (runtime?.courseId === course.id) {
-      await runtime.orchestrator.endSession("draft-discarded");
-      runtime = undefined;
-      activeCourseId = undefined;
+    if (currentRuntime !== undefined) {
+      await currentRuntime.orchestrator.endSession("draft-discarded");
+      runtimes.delete(course.id);
     }
 
     revokeTeachingTokensForCourse(course.id, "draft-discarded");
@@ -2068,7 +2074,7 @@ export const runDaemon = async (
       }
 
       const profile = patchProfileResource(patch);
-      sseHub.broadcast("harnesses", harnessesPayload(activeCourseId, false, true));
+      sseHub.broadcast("harnesses", harnessesPayload(undefined, false, true));
       return jsonResponse(profile);
     } catch (error) {
       return textResponse(
@@ -2173,7 +2179,7 @@ export const runDaemon = async (
 
     const [summary] = harnessSummaries(
       store,
-      activeCourseId,
+      undefined,
       env,
       harnessDetectionCache,
       true,
@@ -2421,7 +2427,8 @@ export const runDaemon = async (
         return textResponse(`Unknown harness adapter: ${id}`, 400);
       }
 
-      if (runtime?.runningTurn === true) {
+      const currentRuntime = runtimes.get(courseId);
+      if (currentRuntime?.runningTurn === true) {
         return textResponse(
           "Cannot change harness while a turn is running. Try again after the agent stops.",
           409,
@@ -2430,13 +2437,16 @@ export const runDaemon = async (
 
       const previousHarnessId = selectedHarnessId(store, courseId, env);
       patchCourse(store, courseId, { harnessId: id });
-      const currentRuntime = runtime;
+      if (currentRuntime !== undefined) {
+        currentRuntime.harnessId = id;
+      }
       const hadActiveSession =
-        currentRuntime !== undefined && currentRuntime.courseId === courseId
-          ? await currentRuntime.orchestrator.resetSession("harness-swap")
-          : false;
+        currentRuntime === undefined
+          ? false
+          : await currentRuntime.orchestrator.resetSession("harness-swap");
       const payload = harnessesPayload(courseId, hadActiveSession, true);
       sseHub.broadcast("harnesses", payload);
+      sseHub.broadcast("courses", coursesPayload());
 
       if (hadActiveSession) {
         runCourseTurn(
@@ -2454,13 +2464,7 @@ export const runDaemon = async (
     }
 
     if (action === "activate" && extra === undefined && request.method === "POST") {
-      const activeCourseRejection = rejectDifferentActiveCourse(courseId);
-      if (activeCourseRejection !== undefined) {
-        return activeCourseRejection;
-      }
-
-      ensureRuntime(course);
-      return jsonResponse({ ok: true, activeCourseId: courseId });
+      return jsonResponse({ ok: true, session: liveSession(ensureRuntime(course)) });
     }
 
     if (action === "demos" && extra !== undefined && request.method === "GET") {
@@ -2474,7 +2478,7 @@ export const runDaemon = async (
     ok: true,
     orchestrated: true,
     version: packageJson.version,
-    activeCourseId: activeCourseId ?? null,
+    liveSessions: liveSessions(),
     waitPending: false,
     hasSeenWait: true,
     dataDir: store.dataDir,
@@ -2486,10 +2490,12 @@ export const runDaemon = async (
     }
 
     shuttingDown = true;
-    if (runtime !== undefined) {
-      await runtime.orchestrator.endSession("shutdown");
-      runtime = undefined;
-    }
+    await Promise.all(
+      [...runtimes.values()].map((courseRuntime) =>
+        courseRuntime.orchestrator.endSession("shutdown"),
+      ),
+    );
+    runtimes.clear();
     tokenScopes.clear();
     await clearDaemonMetadata(env);
     sseHub.closeAll();
@@ -2554,18 +2560,42 @@ export const runDaemon = async (
 
     if (method === "GET" && requestUrl.pathname === "/api/harnesses") {
       const courseIdParam = requestUrl.searchParams.get("courseId");
+      const scope = requestUrl.searchParams.get("scope");
+      if (courseIdParam !== null && scope !== null) {
+        return textResponse("Use either courseId or scope, not both.", 400);
+      }
+
       const courseId =
         courseIdParam === null || courseIdParam.length === 0
-          ? activeCourseId
+          ? undefined
           : Number(courseIdParam);
-      const validCourseId =
-        typeof courseId === "number" && Number.isInteger(courseId)
-          ? courseId
-          : undefined;
+      if (courseId !== undefined) {
+        if (!Number.isInteger(courseId) || courseId <= 0) {
+          return textResponse("courseId must be a positive integer.", 400);
+        }
+        if (getCourse(store, courseId) === undefined) {
+          return textResponse("Course not found.", 404);
+        }
+
+        return jsonResponse(
+          harnessSummaries(
+            store,
+            courseId,
+            env,
+            harnessDetectionCache,
+            requestUrl.searchParams.get("refresh") === "1",
+          ),
+        );
+      }
+
+      if (scope !== "profile") {
+        return textResponse("Harness scope is required.", 400);
+      }
+
       return jsonResponse(
         harnessSummaries(
           store,
-          validCourseId,
+          undefined,
           env,
           harnessDetectionCache,
           requestUrl.searchParams.get("refresh") === "1",

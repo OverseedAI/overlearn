@@ -197,13 +197,20 @@ export type StatusPayload = {
   message?: string;
 };
 
+export type LiveSessionSummary = {
+  courseId: number;
+  harnessId: string;
+  state: "turn-running" | "idle";
+};
+
 export type CoursesPayload = {
   courses: CourseResource[];
-  activeCourseId: number | null;
+  liveSessions: LiveSessionSummary[];
 };
 
 export type HarnessesPayload = {
   courseId?: number;
+  scope?: "profile";
   harnesses: HarnessSummary[];
   switched: boolean;
 };
