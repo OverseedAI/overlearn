@@ -42,6 +42,7 @@ import {
   patchCourse,
   readTopicTree,
   selectVisitedTopic,
+  skipActiveFeynmanCheck,
   startSession,
   updateLatestActiveTranscriptCardState,
   withStoreTransaction,
@@ -232,8 +233,11 @@ type TranscriptEntry = TranscriptEntryBase &
     | Readonly<{
       role: "agent";
       kind: "feynman-check";
+      cardId: string;
+      state: "active" | "acted" | "skipped";
       concept: string;
       prompt: string;
+      keyPoints: readonly string[];
     }>
     | Readonly<{
       role: "agent";
@@ -1210,6 +1214,14 @@ const topicProposalCardTopics = (
 const topicProposalCardState = (value: unknown): "active" | "acted" | "skipped" =>
   value === "acted" || value === "skipped" ? value : "active";
 
+const feynmanCardState = (value: unknown): "active" | "acted" | "skipped" =>
+  value === "active" || value === "skipped" ? value : "acted";
+
+const feynmanKeyPoints = (value: unknown): readonly string[] =>
+  Array.isArray(value)
+    ? value.flatMap((entry) => (typeof entry === "string" ? [entry] : []))
+    : [];
+
 const transcriptEntryBase = (entry: StoreTranscriptEntry) => ({
   id: entry.id,
   topicId: entry.topicId,
@@ -1249,13 +1261,20 @@ const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
   }
 
   if (entry.kind === "feynman-check") {
+    const cardId = payload["cardId"];
     return {
       ...base,
       role: "agent",
       kind: "feynman-check",
+      cardId:
+        typeof cardId === "string" && cardId.length > 0
+          ? cardId
+          : `feynman-${entry.id}`,
+      state: feynmanCardState(payload["state"]),
       concept:
         typeof payload["concept"] === "string" ? payload["concept"] : "unknown",
       prompt: entry.content,
+      keyPoints: feynmanKeyPoints(payload["keyPoints"]),
     };
   }
 
@@ -1978,7 +1997,7 @@ export const runDaemon = async (
     flushPendingAgentText(event.courseId);
     const activeTurn = event.activeTurn;
     const attachment = event.attachment;
-    // Demo, journal-note, and topic-proposal writes render as rich transcript
+    // Demo, journal-note, and card writes render as rich transcript
     // cards; every other teaching write keeps its readable tool-call row.
     const entry =
       attachment?.kind === "demo"
@@ -2010,9 +2029,7 @@ export const runDaemon = async (
             })
           : attachment?.kind === "topic-proposals"
             ? withStoreTransaction(store, () => {
-                updateLatestActiveTranscriptCardState(store, event.courseId, {
-                  state: "skipped",
-                });
+                skipLatestActiveCard(event.courseId);
                 return appendUiTranscript(store, event.courseId, {
                   ...(activeTurn === undefined
                     ? {}
@@ -2025,6 +2042,25 @@ export const runDaemon = async (
                     cardKind: "topic-proposals",
                     state: "active",
                     topics: attachment.topics,
+                  },
+                });
+              })
+          : attachment?.kind === "feynman"
+            ? withStoreTransaction(store, () => {
+                skipLatestActiveTranscriptCard(event.courseId);
+                return appendUiTranscript(store, event.courseId, {
+                  ...(activeTurn === undefined
+                    ? {}
+                    : { turn: activeTurn.turn, topicId: activeTurn.topicId }),
+                  role: "agent",
+                  kind: "feynman-check",
+                  content: attachment.prompt,
+                  payload: {
+                    cardId: attachment.cardId,
+                    cardKind: "feynman",
+                    state: "active",
+                    concept: attachment.concept,
+                    keyPoints: attachment.keyPoints,
                   },
                 });
               })
@@ -2340,10 +2376,23 @@ export const runDaemon = async (
     }
   };
 
-  const skipLatestActiveCard = (
+  const skipLatestActiveTranscriptCard = (
     courseId: number,
   ): TranscriptCardStateChange | null =>
-    updateLatestActiveTranscriptCardState(store, courseId, { state: "skipped" });
+    updateLatestActiveTranscriptCardState(store, courseId, {
+      state: "skipped",
+    });
+
+  const skipLatestActiveCard = (
+    courseId: number,
+  ): TranscriptCardStateChange | null => {
+    const skipped = skipLatestActiveTranscriptCard(courseId);
+    if (skipped?.cardKind === "feynman") {
+      skipActiveFeynmanCheck(store, courseId);
+    }
+
+    return skipped;
+  };
 
   const actOnTopicProposalCard = (
     courseId: number,
@@ -2361,19 +2410,30 @@ export const runDaemon = async (
     return changed;
   };
 
+  const actOnFeynmanCard = (courseId: number): TranscriptCardStateChange | null =>
+    updateLatestActiveTranscriptCardState(store, courseId, {
+      state: "acted",
+      cardKind: "feynman",
+    });
+
   const appendLearnerTurnTranscript = (
     courseId: number,
     turn: number,
     event: TurnEvent,
     input: Parameters<typeof appendTranscriptEntry>[2],
-    afterAppend?: () => void,
+    options: Readonly<{
+      skipActiveCard?: boolean;
+      beforeAppend?: () => void;
+      afterAppend?: () => void;
+    }> = {},
   ): Readonly<{
     events: readonly TurnEvent[];
     entries: readonly TranscriptEntry[];
   }> =>
     withStoreTransaction(store, () => {
       const pending = consumePendingTopicNavigation(store, courseId);
-      const skipped = skipLatestActiveCard(courseId);
+      const skipped =
+        options.skipActiveCard === false ? null : skipLatestActiveCard(courseId);
       const topicChange =
         pending === null
           ? undefined
@@ -2383,12 +2443,13 @@ export const runDaemon = async (
               previous: pending.previous,
               revisit: true,
             });
+      options.beforeAppend?.();
       const entry = appendUiTranscript(store, courseId, {
         ...input,
         turn,
       });
 
-      afterAppend?.();
+      options.afterAppend?.();
 
       return {
         events: [
@@ -3083,7 +3144,13 @@ export const runDaemon = async (
               keyPoints: event.keyPoints,
             },
           },
-          () => clearActiveFeynmanCheck(store, courseId),
+          {
+            skipActiveCard: false,
+            beforeAppend: () => {
+              actOnFeynmanCard(courseId);
+              clearActiveFeynmanCheck(store, courseId);
+            },
+          },
         );
         broadcastTranscriptEntries(courseId, appended.entries);
         broadcastCourseCollections(courseId);

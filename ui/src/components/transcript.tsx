@@ -16,6 +16,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { DemoCard } from "@/components/demo-card";
+import { FeynmanPanel } from "@/components/feynman-panel";
 import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
 import type { AgentActivity, ToolActivity } from "@/lib/course-store";
@@ -225,10 +226,12 @@ export function TypingIndicator() {
 function Entry({
   entry,
   courseId,
+  cardActionsDisabled,
   onNavigateTopic,
 }: {
   entry: TranscriptEntry;
   courseId: number;
+  cardActionsDisabled: boolean;
   onNavigateTopic?: NavigateTopicCard | undefined;
 }) {
   const kind = "kind" in entry ? (entry.kind ?? "text") : "text";
@@ -269,14 +272,18 @@ function Entry({
   }
 
   if (kind === "feynman-check" && "concept" in entry && "prompt" in entry) {
+    if (entry.state === "skipped") {
+      return null;
+    }
+
     return (
       <EntryShell label="Agent · Feynman check">
-        <div className="rounded-lg border border-warning/40 bg-warning/5 px-4 py-3">
-          <p className="text-sm font-medium">{entry.concept}</p>
-          <div className="mt-1">
-            <Markdown text={entry.prompt} className={CHAT_TEXT_CLASS} />
-          </div>
-        </div>
+        <FeynmanPanel
+          courseId={courseId}
+          check={entry}
+          state={entry.state}
+          disabled={cardActionsDisabled}
+        />
       </EntryShell>
     );
   }
@@ -376,6 +383,7 @@ export function Transcript({
   courseId,
   activity,
   showTyping,
+  cardActionsDisabled,
   onLoadOlder,
   onPrependEntries,
   onNavigateTopic,
@@ -384,6 +392,7 @@ export function Transcript({
   courseId: number;
   activity?: AgentActivity | undefined;
   showTyping: boolean;
+  cardActionsDisabled: boolean;
   onLoadOlder?: (beforeId: number) => Promise<TranscriptPage>;
   onPrependEntries?: (entries: TranscriptEntry[]) => void;
   onNavigateTopic?: NavigateTopicCard | undefined;
@@ -505,6 +514,7 @@ export function Transcript({
             key={entry.id}
             entry={entry}
             courseId={courseId}
+            cardActionsDisabled={cardActionsDisabled}
             onNavigateTopic={onNavigateTopic}
           />
         ))}

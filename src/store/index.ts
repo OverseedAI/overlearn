@@ -236,7 +236,7 @@ export type TopicJournalEntryInput =
       createdAt?: string;
     }>;
 
-export type FeynmanCheckStatus = "active" | "replaced" | "cleared";
+export type FeynmanCheckStatus = "active" | "replaced" | "cleared" | "skipped";
 
 export type FeynmanCheck = Readonly<{
   id: number;
@@ -576,14 +576,14 @@ type FolderImportPayload = Readonly<{
 }>;
 
 const STORE_FILE_NAME = "overlearn.sqlite";
-export const STORE_SCHEMA_VERSION = 4;
+export const STORE_SCHEMA_VERSION = 5;
 const courseStatusCheckSql =
   "status TEXT NOT NULL CHECK (status IN ('active', 'archived'))";
 
 const migrations: readonly Migration[] = [
   {
     id: STORE_SCHEMA_VERSION,
-    name: "store_schema_v4",
+    name: "store_schema_v5",
     up: (db) => {
       db.exec(`
         CREATE TABLE profile (
@@ -676,7 +676,7 @@ const migrations: readonly Migration[] = [
           prompt TEXT NOT NULL,
           key_points_json TEXT NOT NULL,
           issued_at TEXT NOT NULL,
-          status TEXT NOT NULL CHECK (status IN ('active', 'replaced', 'cleared')),
+          status TEXT NOT NULL CHECK (status IN ('active', 'replaced', 'cleared', 'skipped')),
           replaced_concept TEXT,
           replaced_issued_at TEXT,
           replaced_at TEXT,
@@ -2534,6 +2534,33 @@ export const clearActiveFeynmanCheck = (
       `,
     )
     .run(nowIso(), existing.id);
+};
+
+export const skipActiveFeynmanCheck = (
+  store: Store,
+  courseId: number,
+): FeynmanCheck | null => {
+  const existing = getActiveFeynmanCheck(store, courseId);
+  if (existing === null) {
+    return null;
+  }
+
+  store.db
+    .query(
+      `
+        UPDATE feynman_checks
+        SET status = 'skipped',
+            updated_at = ?1
+        WHERE id = ?2
+      `,
+    )
+    .run(nowIso(), existing.id);
+
+  const row = store.db
+    .query("SELECT * FROM feynman_checks WHERE id = ?1")
+    .get(existing.id) as FeynmanRow | undefined;
+
+  return isMissingRow(row) ? null : feynmanCheckFromRow(row);
 };
 
 export const listFeynmanChecks = (

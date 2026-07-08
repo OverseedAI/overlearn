@@ -57,6 +57,7 @@ Turn payload events:
   using `grading.md`, then call `record_mastery` before the next teaching
   response.
 - `{"type":"card-skipped","cardId":"...","cardKind":"topic-proposals","reason":"learner-action"}`
+  or `{"type":"card-skipped","cardId":"...","cardKind":"feynman","reason":"learner-action"}`
   means the learner took another action instead of an optional card; continue
   from the learner's actual action and do not treat the stale card as pending.
 - `{"type":"harness-swapped","from":"...","to":"..."}` means the harness changed
@@ -102,10 +103,15 @@ Feynman checks:
 - Issue a Feynman check only after the concept has had at least one worked
   example.
 - Issue one before advancing past a major topic or when mastery is uncertain.
+- Treat a Feynman check as an optional card offer, not a gate: the learner can
+  answer it or ask a normal follow-up question instead.
 - Use the topic's slug or path as the Feynman concept id.
 - Use `feynman_check` with key points when specific rubric anchors matter.
 - Keep one active check at a time. A new check replaces the previous active
   check.
+- When a `card-skipped` event arrives for `cardKind: "feynman"`, treat it as
+  signal, not failure. Answer the learner's new turn and re-issue the check
+  later only when it feels natural.
 - When a `feynman-answer` event arrives, grade per `grading.md`, call
   `record_mastery`, and then continue the teaching flow.
 

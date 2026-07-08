@@ -79,6 +79,13 @@ export type TeachingWriteAttachment =
       kind: "topic-proposals";
       cardId: string;
       topics: readonly TopicProposal[];
+    }>
+  | Readonly<{
+      kind: "feynman";
+      cardId: string;
+      concept: string;
+      prompt: string;
+      keyPoints: readonly string[];
     }>;
 
 export type TeachingWriteEvent = Readonly<{
@@ -1465,10 +1472,12 @@ const feynmanCheckTool = (options: TeachingServerOptions): McpServerTool =>
         keyPoints,
         ...(topicId === undefined ? {} : { topicId }),
       });
+      const cardId = `feynman-${check.id}`;
 
       return {
         result: jsonResult({
           ok: true,
+          cardId,
           feynmanCheck: {
             id: check.id,
             concept: check.concept,
@@ -1479,6 +1488,13 @@ const feynmanCheckTool = (options: TeachingServerOptions): McpServerTool =>
           },
         }),
         writeSummary: `issued feynman check for ${concept}`,
+        writeAttachment: {
+          kind: "feynman",
+          cardId,
+          concept: check.concept,
+          prompt: check.prompt,
+          keyPoints: check.keyPoints,
+        },
       };
     },
   });

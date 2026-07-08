@@ -4,19 +4,22 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Markdown } from "@/lib/markdown";
 import { api, ApiError } from "@/lib/api";
-import type { ActiveFeynmanCheck } from "@/lib/types";
 
-/**
- * The active Feynman check replaces the composer: answering it is the
- * primary action of the moment.
- */
+type FeynmanCardCheck = {
+  concept: string;
+  prompt: string;
+  keyPoints: readonly string[];
+};
+
 export function FeynmanPanel({
   courseId,
   check,
+  state,
   disabled,
 }: {
   courseId: number;
-  check: ActiveFeynmanCheck;
+  check: FeynmanCardCheck;
+  state: "active" | "acted";
   disabled: boolean;
 }) {
   const [answer, setAnswer] = useState("");
@@ -49,38 +52,40 @@ export function FeynmanPanel({
       <div className="mt-1">
         <Markdown text={check.prompt} />
       </div>
-      <form
-        className="mt-3 flex flex-col gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
-        }}
-      >
-        <Textarea
-          name="feynman-answer"
-          aria-label="Explain it in your own words"
-          placeholder="Explain it in your own words…"
-          value={answer}
-          disabled={disabled || submitting}
-          onChange={(event) => setAnswer(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              void submit();
-            }
+      {state === "active" ? (
+        <form
+          className="mt-3 flex flex-col gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
           }}
-          className="min-h-20 resize-none bg-background"
-        />
-        <div className="flex justify-end">
-          <Button
-            type="submit"
-            size="sm"
-            disabled={disabled || submitting || answer.trim().length === 0}
-          >
-            Submit answer
-          </Button>
-        </div>
-      </form>
+        >
+          <Textarea
+            name="feynman-answer"
+            aria-label="Explain it in your own words"
+            placeholder="Explain it in your own words..."
+            value={answer}
+            disabled={disabled || submitting}
+            onChange={(event) => setAnswer(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void submit();
+              }
+            }}
+            className="min-h-20 resize-none bg-background"
+          />
+          <div className="flex justify-end">
+            <Button
+              type="submit"
+              size="sm"
+              disabled={disabled || submitting || answer.trim().length === 0}
+            >
+              Submit answer
+            </Button>
+          </div>
+        </form>
+      ) : null}
     </div>
   );
 }
