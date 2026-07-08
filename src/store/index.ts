@@ -63,6 +63,16 @@ export type Course = Readonly<{
   updatedAt: string;
 }>;
 
+export type TranscriptCardKind = "topic-proposals" | "feynman";
+export type TranscriptCardState = "active" | "acted" | "skipped";
+
+export type PendingCardSkippedEvent = Readonly<{
+  type: "card-skipped";
+  cardId: string;
+  cardKind: TranscriptCardKind;
+  reason: "learner-action";
+}>;
+
 export type TopicNavigationTopic = Readonly<{
   id: number;
   path: string;
@@ -74,6 +84,7 @@ export type PendingTopicNavigation = Readonly<{
   previous: TopicNavigationTopic | null;
   revisit: true;
   selectedAt: string;
+  cardEvents: readonly PendingCardSkippedEvent[];
 }>;
 
 export type TopicNavigationResult = Readonly<{
@@ -297,6 +308,22 @@ export type TranscriptEntry = Readonly<{
   createdAt: string;
 }>;
 
+export type TranscriptCardStateChange = Readonly<{
+  entryId: number;
+  cardId: string;
+  cardKind: TranscriptCardKind;
+  state: Exclude<TranscriptCardState, "active">;
+  payload: JsonRecord;
+}>;
+
+type ActiveTranscriptCard = Readonly<{
+  entryId: number;
+  cardId: string;
+  cardKind: TranscriptCardKind;
+  state: "active";
+  payload: JsonRecord;
+}>;
+
 export type TranscriptInput = Readonly<{
   topicId?: number | null;
   turn?: number;
@@ -353,6 +380,10 @@ export type TurnEventRecord = Readonly<{
   createdAt: string;
   events: readonly JsonRecord[];
   importedFrom: string | null;
+}>;
+
+export type SelectVisitedTopicOptions = Readonly<{
+  cardEvents?: readonly PendingCardSkippedEvent[];
 }>;
 
 export type ImportCourseFolderResult = Readonly<{
@@ -818,6 +849,50 @@ const parseStringArray = (text: string): readonly string[] => {
 
   return value.filter((item): item is string => typeof item === "string");
 };
+
+const transcriptCardKindFromValue = (
+  value: unknown,
+): TranscriptCardKind | undefined =>
+  value === "topic-proposals" || value === "feynman" ? value : undefined;
+
+const transcriptCardStateFromValue = (
+  value: unknown,
+): TranscriptCardState | undefined =>
+  value === "active" || value === "acted" || value === "skipped"
+    ? value
+    : undefined;
+
+const pendingCardSkippedEventFromValue = (
+  value: unknown,
+): PendingCardSkippedEvent | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const type = value["type"];
+  const cardId = value["cardId"];
+  const cardKind = transcriptCardKindFromValue(value["cardKind"]);
+  if (type !== "card-skipped" || typeof cardId !== "string" || cardKind === undefined) {
+    return undefined;
+  }
+
+  return {
+    type: "card-skipped",
+    cardId,
+    cardKind,
+    reason: "learner-action",
+  };
+};
+
+const pendingCardSkippedEventsFromValue = (
+  value: unknown,
+): readonly PendingCardSkippedEvent[] =>
+  Array.isArray(value)
+    ? value.flatMap((entry) => {
+        const parsed = pendingCardSkippedEventFromValue(entry);
+        return parsed === undefined ? [] : [parsed];
+      })
+    : [];
 
 const toNumber = (value: number | bigint): number =>
   typeof value === "bigint" ? Number(value) : value;
@@ -1561,6 +1636,7 @@ const pendingTopicNavigationFromJson = (
     previous,
     revisit: true,
     selectedAt,
+    cardEvents: pendingCardSkippedEventsFromValue(value["cardEvents"]),
   };
 };
 
@@ -1671,6 +1747,7 @@ export const selectVisitedTopic = (
   store: Store,
   courseId: number,
   path: string,
+  options: SelectVisitedTopicOptions = {},
 ): TopicNavigationResult =>
   withStoreTransaction(store, () => {
     requireCourse(store, courseId);
@@ -1713,6 +1790,7 @@ export const selectVisitedTopic = (
       previous,
       revisit: true,
       selectedAt: timestamp,
+      cardEvents: options.cardEvents ?? [],
     } as const;
     setPendingTopicNavigationJson(
       store,
@@ -2862,6 +2940,96 @@ export const appendTranscriptEntry = (
 
   return transcriptEntryFromRow(row);
 };
+
+const transcriptCardFromRow = (
+  row: TranscriptRow,
+): ActiveTranscriptCard | null => {
+  const payload = parseJsonRecord(row.payload_json);
+  const cardId = payload["cardId"];
+  const cardKind = transcriptCardKindFromValue(payload["cardKind"]);
+  const state = transcriptCardStateFromValue(payload["state"]);
+
+  if (
+    typeof cardId !== "string" ||
+    cardId.length === 0 ||
+    cardKind === undefined ||
+    state !== "active"
+  ) {
+    return null;
+  }
+
+  return {
+    entryId: toNumber(row.id),
+    cardId,
+    cardKind,
+    state: "active",
+    payload,
+  };
+};
+
+const latestActiveTranscriptCard = (
+  store: Store,
+  courseId: number,
+): ActiveTranscriptCard | null => {
+  requireCourse(store, courseId);
+  const rows = store.db
+    .query(
+      `
+        SELECT *
+        FROM transcript
+        WHERE course_id = ?1
+        ORDER BY id DESC
+      `,
+    )
+    .all(courseId) as readonly TranscriptRow[];
+
+  for (const row of rows) {
+    const card = transcriptCardFromRow(row);
+    if (card !== null) {
+      return card;
+    }
+  }
+
+  return null;
+};
+
+export const updateLatestActiveTranscriptCardState = (
+  store: Store,
+  courseId: number,
+  input: Readonly<{
+    state: Exclude<TranscriptCardState, "active">;
+    cardId?: string;
+    cardKind?: TranscriptCardKind;
+  }>,
+): TranscriptCardStateChange | null =>
+  withStoreTransaction(store, () => {
+    const active = latestActiveTranscriptCard(store, courseId);
+    if (active === null) {
+      return null;
+    }
+
+    if (input.cardId !== undefined && active.cardId !== input.cardId) {
+      return null;
+    }
+
+    if (input.cardKind !== undefined && active.cardKind !== input.cardKind) {
+      return null;
+    }
+
+    const payload = {
+      ...active.payload,
+      state: input.state,
+    };
+    store.db
+      .query("UPDATE transcript SET payload_json = ?1 WHERE id = ?2")
+      .run(stringifyJson(payload), active.entryId);
+
+    return {
+      ...active,
+      state: input.state,
+      payload,
+    };
+  });
 
 export const pageTranscript = (
   store: Store,

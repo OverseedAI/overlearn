@@ -6,6 +6,7 @@ import {
   CircleAlert,
   FileText,
   Loader2,
+  Sparkles,
   Wrench,
   X,
 } from "lucide-react";
@@ -18,9 +19,15 @@ import { DemoCard } from "@/components/demo-card";
 import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
 import type { AgentActivity, ToolActivity } from "@/lib/course-store";
-import type { TranscriptEntry, TranscriptPage } from "@/lib/types";
+import type {
+  TopicProposalCardTopic,
+  TranscriptEntry,
+  TranscriptPage,
+} from "@/lib/types";
 
 const CHAT_TEXT_CLASS = "text-[15pt] leading-[1.55]";
+
+type NavigateTopicCard = (path: string, cardId: string) => void | Promise<void>;
 
 function EntryShell({
   label,
@@ -80,6 +87,74 @@ function TopicChangeDivider({ text }: { text: string }) {
       />
       <span className="h-px flex-1 bg-border" aria-hidden="true" />
     </div>
+  );
+}
+
+function TopicProposalCards({
+  cardId,
+  state,
+  topics,
+  onNavigateTopic,
+}: {
+  cardId: string;
+  state: "active" | "acted" | "skipped";
+  topics: TopicProposalCardTopic[];
+  onNavigateTopic?: NavigateTopicCard | undefined;
+}) {
+  const [pendingPath, setPendingPath] = useState<string | undefined>();
+
+  if (state === "skipped") {
+    return null;
+  }
+
+  const active = state === "active";
+  const choose = async (topic: TopicProposalCardTopic) => {
+    if (!active || pendingPath !== undefined || onNavigateTopic === undefined) {
+      return;
+    }
+
+    setPendingPath(topic.path);
+    try {
+      await onNavigateTopic(topic.path, cardId);
+    } finally {
+      setPendingPath(undefined);
+    }
+  };
+
+  return (
+    <EntryShell label={active ? "Agent · Topic options" : "Agent · Topic chosen"}>
+      <div className="grid gap-2 sm:grid-cols-3">
+        {topics.map((topic) => (
+          <button
+            key={topic.path}
+            type="button"
+            disabled={
+              !active || pendingPath !== undefined || onNavigateTopic === undefined
+            }
+            onClick={() => void choose(topic)}
+            className={cn(
+              "min-h-32 rounded-lg border bg-card p-3 text-left transition-colors",
+              "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+              active
+                ? "hover:border-primary/60 hover:bg-accent"
+                : "border-muted bg-muted/30 text-muted-foreground",
+            )}
+          >
+            <span className="mb-2 flex items-center gap-2 text-sm font-medium">
+              {pendingPath === topic.path ? (
+                <Loader2 className="size-4 shrink-0 animate-spin" />
+              ) : (
+                <Sparkles className="size-4 shrink-0 text-primary" />
+              )}
+              <span className="line-clamp-2">{topic.title}</span>
+            </span>
+            <span className="block text-sm leading-snug text-muted-foreground">
+              {topic.blurb}
+            </span>
+          </button>
+        ))}
+      </div>
+    </EntryShell>
   );
 }
 
@@ -150,9 +225,11 @@ export function TypingIndicator() {
 function Entry({
   entry,
   courseId,
+  onNavigateTopic,
 }: {
   entry: TranscriptEntry;
   courseId: number;
+  onNavigateTopic?: NavigateTopicCard | undefined;
 }) {
   const kind = "kind" in entry ? (entry.kind ?? "text") : "text";
 
@@ -201,6 +278,22 @@ function Entry({
           </div>
         </div>
       </EntryShell>
+    );
+  }
+
+  if (
+    kind === "topic-proposals" &&
+    "cardId" in entry &&
+    "state" in entry &&
+    "topics" in entry
+  ) {
+    return (
+      <TopicProposalCards
+        cardId={entry.cardId}
+        state={entry.state}
+        topics={entry.topics}
+        onNavigateTopic={onNavigateTopic}
+      />
     );
   }
 
@@ -285,6 +378,7 @@ export function Transcript({
   showTyping,
   onLoadOlder,
   onPrependEntries,
+  onNavigateTopic,
 }: {
   entries: TranscriptEntry[];
   courseId: number;
@@ -292,6 +386,7 @@ export function Transcript({
   showTyping: boolean;
   onLoadOlder?: (beforeId: number) => Promise<TranscriptPage>;
   onPrependEntries?: (entries: TranscriptEntry[]) => void;
+  onNavigateTopic?: NavigateTopicCard | undefined;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
@@ -410,6 +505,7 @@ export function Transcript({
             key={entry.id}
             entry={entry}
             courseId={courseId}
+            onNavigateTopic={onNavigateTopic}
           />
         ))}
         {activity ? <LiveActivity activity={activity} /> : null}

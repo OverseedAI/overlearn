@@ -41,6 +41,7 @@ import {
   selectVisitedTopic,
   startSession,
   STORE_SCHEMA_VERSION,
+  updateLatestActiveTranscriptCardState,
   upsertDemo,
   upsertGlossaryEntry,
   upsertJournalDemoPin,
@@ -529,6 +530,55 @@ describe("store query API", () => {
       second.close();
       await rm(dir, { force: true, recursive: true });
     }
+  });
+
+  test("updates only the latest active transcript card payload", async () => {
+    await withTempStore((store) => {
+      const course = createCourse(store, { title: "Cards" });
+      appendTranscriptEntry(store, course.id, {
+        turn: 1,
+        role: "agent",
+        kind: "topic-proposals",
+        content: "first proposal",
+        payload: {
+          cardId: "card-1",
+          cardKind: "topic-proposals",
+          state: "active",
+          topics: [],
+        },
+      });
+      appendTranscriptEntry(store, course.id, {
+        turn: 2,
+        role: "agent",
+        kind: "topic-proposals",
+        content: "second proposal",
+        payload: {
+          cardId: "card-2",
+          cardKind: "topic-proposals",
+          state: "active",
+          topics: [],
+        },
+      });
+
+      const missing = updateLatestActiveTranscriptCardState(store, course.id, {
+        state: "acted",
+        cardId: "card-1",
+        cardKind: "topic-proposals",
+      });
+      expect(missing).toBeNull();
+
+      const acted = updateLatestActiveTranscriptCardState(store, course.id, {
+        state: "acted",
+        cardId: "card-2",
+        cardKind: "topic-proposals",
+      });
+      expect(acted?.cardId).toBe("card-2");
+      expect(acted?.state).toBe("acted");
+
+      const entries = pageTranscript(store, course.id, { limit: 10 }).entries;
+      expect(entries[0]?.payload["state"]).toBe("active");
+      expect(entries[1]?.payload["state"]).toBe("acted");
+    });
   });
 
   test("transaction rolls back a forced mid-write failure", async () => {

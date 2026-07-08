@@ -40,6 +40,7 @@ const proxyPath = fileURLToPath(new URL("./proxy.ts", import.meta.url));
 const expectedToolNames: readonly TeachingToolName[] = [
   "get_course_state",
   "upsert_topic",
+  "propose_topics",
   "emit_demo",
   "append_lesson_note",
   "record_mastery",
@@ -360,6 +361,53 @@ const exerciseTeachingTools = async (
     },
   });
 
+  const proposalResult = parseResult(
+    await withTimeout(
+      client.callTool("propose_topics", {
+        topics: [
+          {
+            path: "finance/rule-of-72",
+            title: "Rule of 72 again",
+            blurb: "A re-proposal should not disturb the visited topic.",
+          },
+          {
+            path: "finance/compound-interest",
+            title: "Compound interest",
+            blurb: "Connect the estimate to exact compounding math.",
+          },
+        ],
+      }),
+      3_000,
+      "propose_topics",
+    ),
+  );
+  const proposalCardId = proposalResult["cardId"];
+  if (typeof proposalCardId !== "string") {
+    throw new Error("Expected propose_topics to return a cardId.");
+  }
+  expect(proposalResult).toMatchObject({ ok: true });
+  expect(asArray(proposalResult["topics"], "proposal topics")).toHaveLength(2);
+  expect(
+    readTopicTree(fixture.store, fixture.teachingCourse.id)[0]?.children.find(
+      (topic) => topic.path === "finance/rule-of-72",
+    ),
+  ).toMatchObject({
+    path: "finance/rule-of-72",
+    isCurrent: true,
+    state: "current",
+  });
+  expect(
+    readTopicTree(fixture.store, fixture.teachingCourse.id)[0]?.children.find(
+      (topic) => topic.path === "finance/compound-interest",
+    ),
+  ).toMatchObject({
+    path: "finance/compound-interest",
+    body: "",
+    enteredAt: null,
+    isCurrent: false,
+    state: "frontier",
+  });
+
   const noteResult = parseResult(
     await withTimeout(
       client.callTool("append_lesson_note", {
@@ -637,6 +685,7 @@ const exerciseTeachingTools = async (
     "upsert_glossary_entry",
     "record_mastery",
     "feynman_check",
+    "propose_topics",
     "append_lesson_note",
     "append_lesson_note",
     "emit_demo",
@@ -671,6 +720,24 @@ const exerciseTeachingTools = async (
     topicId: currentTopicId as number,
     markdown: "The Rule of 72 estimates doubling time as 72 / rate.",
   });
+  expect(
+    fixture.writes.find((event) => event.tool === "propose_topics")?.attachment,
+  ).toEqual({
+    kind: "topic-proposals",
+    cardId: proposalCardId,
+    topics: [
+      {
+        path: "finance/rule-of-72",
+        title: "Rule of 72 again",
+        blurb: "A re-proposal should not disturb the visited topic.",
+      },
+      {
+        path: "finance/compound-interest",
+        title: "Compound interest",
+        blurb: "Connect the estimate to exact compounding math.",
+      },
+    ],
+  });
 
   expect(getCourse(fixture.store, fixture.teachingCourse.id)).toMatchObject({
     title: "Practical Finance Renamed",
@@ -683,6 +750,7 @@ const exerciseTeachingTools = async (
   ]);
   expect(persistedTopics[0]?.children.map((topic) => topic.path)).toEqual([
     "finance/rule-of-72",
+    "finance/compound-interest",
     "finance/tangent",
   ]);
   expect(persistedTopics[0]?.children[0]).toMatchObject({
@@ -690,7 +758,9 @@ const exerciseTeachingTools = async (
     isCurrent: false,
     state: "visited",
   });
-  expect(persistedTopics[0]?.children[1]).toMatchObject({
+  expect(
+    persistedTopics[0]?.children.find((topic) => topic.path === "finance/tangent"),
+  ).toMatchObject({
     path: "finance/tangent",
     isCurrent: false,
     enteredAt: null,
@@ -865,6 +935,112 @@ describe("teaching MCP server", () => {
         courseId: fixture.teachingCourse.id,
         activeTurn,
       });
+    });
+  });
+
+  test("propose_topics creates frontier stubs without resetting visited topics", async () => {
+    await withFixture(async (fixture) => {
+      upsertTopic(fixture.store, fixture.teachingCourse.id, {
+        path: "finance/rule-of-72",
+        title: "Rule of 72",
+        body: "Estimate doubling time from a growth rate.",
+      });
+      upsertTopic(fixture.store, fixture.teachingCourse.id, {
+        path: "finance/current",
+        title: "Current finance topic",
+        body: "The learner is here now.",
+      });
+
+      const definition = createTeachingMcpServer({
+        store: fixture.store,
+        scope: {
+          courseId: fixture.teachingCourse.id,
+          getActiveTurn: () => undefined,
+        },
+        onWrite: (event) => {
+          fixture.writes.push(event);
+        },
+      });
+      const tool = definition.tools.find(
+        (candidate) => candidate.name === "propose_topics",
+      );
+      if (tool === undefined) {
+        throw new Error("Missing propose_topics tool.");
+      }
+
+      const properties = asRecord(tool.inputSchema["properties"], "schema props");
+      const topicsSchema = asRecord(properties["topics"], "topics schema");
+      expect(topicsSchema["minItems"]).toBe(1);
+      expect(topicsSchema["maxItems"]).toBe(3);
+
+      const result = parseResult(
+        await tool.call({
+          topics: [
+            {
+              path: "finance/rule-of-72",
+              title: "Rule of 72 again",
+              blurb: "A re-proposal should leave the visited topic alone.",
+            },
+            {
+              path: "finance/compound-interest",
+              title: "Compound interest",
+              blurb: "Connect the estimate to exact compounding math.",
+            },
+          ],
+        }),
+      );
+      const cardId = result["cardId"];
+      if (typeof cardId !== "string") {
+        throw new Error("Expected propose_topics to return a cardId.");
+      }
+      expect(result).toMatchObject({ ok: true });
+      expect(asArray(result["topics"], "proposed topics")).toHaveLength(2);
+
+      const finance = readTopicTree(fixture.store, fixture.teachingCourse.id)[0];
+      const children = finance?.children ?? [];
+      expect(
+        children.find((topic) => topic.path === "finance/rule-of-72"),
+      ).toMatchObject({
+        path: "finance/rule-of-72",
+        title: "Rule of 72",
+        body: "Estimate doubling time from a growth rate.",
+        isCurrent: false,
+        state: "visited",
+      });
+      expect(
+        children.find((topic) => topic.path === "finance/compound-interest"),
+      ).toMatchObject({
+        path: "finance/compound-interest",
+        title: "Compound interest",
+        body: "",
+        enteredAt: null,
+        isCurrent: false,
+        state: "frontier",
+      });
+
+      expect(fixture.writes).toEqual([
+        {
+          courseId: fixture.teachingCourse.id,
+          tool: "propose_topics",
+          summary: "proposed 2 topics",
+          attachment: {
+            kind: "topic-proposals",
+            cardId,
+            topics: [
+              {
+                path: "finance/rule-of-72",
+                title: "Rule of 72 again",
+                blurb: "A re-proposal should leave the visited topic alone.",
+              },
+              {
+                path: "finance/compound-interest",
+                title: "Compound interest",
+                blurb: "Connect the estimate to exact compounding math.",
+              },
+            ],
+          },
+        },
+      ]);
     });
   });
 });
