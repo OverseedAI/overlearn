@@ -5,8 +5,11 @@ import nextCourseBody from "../../assets/tutorial/next-course.md" with { type: "
 import reviewRailGlossaryBody from "../../assets/tutorial/review-rail-glossary.md" with { type: "text" };
 import topicsMasteryBody from "../../assets/tutorial/topics-mastery.md" with { type: "text" };
 import {
+  appendJournalEntry,
   createCourse,
+  flattenTopicTree,
   listCourses,
+  readTopicTree,
   replaceTopicTree,
   withStoreTransaction,
   type Course,
@@ -82,12 +85,15 @@ const tutorialTopicSources: readonly TutorialTopicSource[] = [
   },
 ];
 
+const tutorialSeededAt = "2026-01-01T00:00:00.000Z";
+
 export const tutorialTopics: readonly TopicTreeInput[] =
   tutorialTopicSources.map((topic, index) => ({
     path: topic.path,
     title: topic.title,
     body: topic.body.trim(),
     position: index,
+    enteredAt: tutorialSeededAt,
     isCurrent: index === 0,
   }));
 
@@ -121,6 +127,15 @@ export const createTutorialCourse = (store: Store): Course =>
       },
     });
     replaceTopicTree(store, course.id, tutorialTopics);
+    // TODO(DEV-585): rewrite the tutorial content for emergent navigation.
+    for (const topic of flattenTopicTree(readTopicTree(store, course.id))) {
+      appendJournalEntry(store, course.id, {
+        topicId: topic.id,
+        kind: "note",
+        bodyMarkdown: topic.body,
+        createdAt: tutorialSeededAt,
+      });
+    }
 
     return course;
   });

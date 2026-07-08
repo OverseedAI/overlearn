@@ -127,7 +127,7 @@ type DemoEntry = Readonly<{
 type GlossaryEntry = Readonly<{
   term: string;
   def: string;
-  lesson?: string;
+  topicId: number | null;
   addedAt: string;
 }>;
 
@@ -142,9 +142,9 @@ type TopicNode = Readonly<{
   path: string;
   title: string;
   body?: string;
-  lesson?: string;
   enteredAt?: string;
   current: boolean;
+  state: Topic["state"];
   demos?: readonly DemoEntry[];
   children: readonly TopicNode[];
 }>;
@@ -888,7 +888,7 @@ const uiDemo = (demo: Demo): DemoEntry => ({
 const uiGlossaryEntry = (entry: StoreGlossaryEntry): GlossaryEntry => ({
   term: entry.term,
   def: entry.definition,
-  ...(entry.lessonId === null ? {} : { lesson: entry.lessonId }),
+  topicId: entry.topicId,
   addedAt: entry.addedAt,
 });
 
@@ -920,9 +920,9 @@ const uiTopic = (
   path: topic.path,
   title: topic.title,
   ...(topic.body.length === 0 ? {} : { body: topic.body }),
-  ...(topic.lessonId === null ? {} : { lesson: topic.lessonId }),
   ...(topic.enteredAt === null ? {} : { enteredAt: topic.enteredAt }),
   current: topic.isCurrent,
+  state: topic.state,
   demos: groupedDemos.get(topic.id) ?? [],
   children: topic.children.map((child) => uiTopic(child, groupedDemos)),
 });
@@ -1925,6 +1925,7 @@ export const runDaemon = async (
     const path = requiredStringField(body, "path");
     if (path === REVIEW_WEAK_NAV_PATH) {
       const weakest = flattenTopicTree(readTopicTree(store, courseId))
+        .filter((topic) => topic.state !== "frontier")
         .flatMap((topic) => {
           const score = listLatestMasteryScores(store, courseId).find(
             (entry) => entry.concept === topic.path || entry.concept === topic.path.split("/").at(-1),

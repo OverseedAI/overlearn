@@ -8,7 +8,6 @@ import {
   latestMasteryForTopic,
   listDemos,
   listGlossary,
-  listLessons,
   listTopicsDueForReview,
   pageTranscript,
   patchCourse,
@@ -17,7 +16,6 @@ import {
   replaceTopicTree,
   upsertDemo,
   upsertGlossaryEntry,
-  upsertLesson,
   upsertTopic,
   withStoreTransaction,
   type Course,
@@ -184,7 +182,6 @@ const inputSchemas: Record<TeachingToolName, McpJsonObject> = {
         enum: ["active", "archived"],
         description: "Topic lifecycle status.",
       },
-      lessonId: nullableStringSchema("Optional backing lesson id."),
       masteryConcept: nullableStringSchema(
         "Optional concept id used for mastery lookup.",
       ),
@@ -255,7 +252,9 @@ const inputSchemas: Record<TeachingToolName, McpJsonObject> = {
     {
       term: stringSchema("Glossary term."),
       definition: stringSchema("Glossary definition."),
-      lessonId: nullableStringSchema("Optional lesson id reference."),
+      topicPath: stringSchema(
+        "Optional topic path for this glossary entry. Defaults to the current topic.",
+      ),
     },
     ["term", "definition"],
   ),
@@ -843,6 +842,7 @@ const publicTopic = (
     body: topic.body,
     status: topic.status,
     position: topic.position,
+    state: topic.state,
     current: topic.isCurrent,
     mastery:
       latestMastery === null
@@ -859,6 +859,7 @@ const publicTopic = (
 
 const publicTranscriptEntry = (entry: TranscriptEntry): McpJsonObject => ({
   id: entry.id,
+  topicId: entry.topicId,
   turn: entry.turn,
   role: entry.role,
   kind: entry.kind,
@@ -920,7 +921,7 @@ const courseStatePayload = (
     glossary: listGlossary(store, courseId).map((entry) => ({
       term: entry.term,
       definition: entry.definition,
-      lessonId: entry.lessonId,
+      topicId: entry.topicId,
     })),
     activeFeynmanCheck:
       activeFeynman === null
@@ -939,10 +940,6 @@ const courseStatePayload = (
       file: demoFileKey(demo),
       format: demo.bodyFormat,
       addedAt: demo.addedAt,
-    })),
-    lessons: listLessons(store, courseId).map((lesson) => ({
-      id: lesson.lessonId,
-      updatedAt: lesson.updatedAt,
     })),
     transcriptTail: readTranscriptTail(store, courseId, transcriptLimit),
   };
@@ -1077,12 +1074,11 @@ const upsertTopicTool = (options: TeachingServerOptions): McpServerTool =>
       "body",
       "parentPath",
       "parent",
-      "position",
-      "setCurrent",
-      "status",
-      "lessonId",
-      "masteryConcept",
-    ],
+    "position",
+    "setCurrent",
+    "status",
+    "masteryConcept",
+  ],
     call: (args) => {
       const requestedPath = normalizeTopicPath(requireString(args, "path"));
       const parentPath = resolveParentPath(args);
@@ -1092,7 +1088,6 @@ const upsertTopicTool = (options: TeachingServerOptions): McpServerTool =>
       const position = optionalInteger(args, "position", { min: 0 });
       const setCurrent = optionalBoolean(args, "setCurrent");
       const status = optionalTopicStatus(args, "status");
-      const lessonId = optionalStringOrNull(args, "lessonId");
       const masteryConcept = optionalStringOrNull(args, "masteryConcept");
       const courseId = options.scope.courseId;
 
@@ -1117,7 +1112,6 @@ const upsertTopicTool = (options: TeachingServerOptions): McpServerTool =>
           ...(title === undefined ? {} : { title }),
           ...(body === undefined ? {} : { body }),
           ...(status === undefined ? {} : { status }),
-          ...(lessonId === undefined ? {} : { lessonId }),
           ...(masteryConcept === undefined ? {} : { masteryConcept }),
           isCurrent: setCurrent === true,
         });
@@ -1202,26 +1196,15 @@ const upsertLessonTool = (options: TeachingServerOptions): McpServerTool =>
   createTeachingTool(options, {
     name: "upsert_lesson",
     description:
-      "Writes or updates a durable lesson (markdown) shown in the learner's study rail.",
+      "Unavailable in store schema v2. Topic journals replace durable lesson documents.",
     knownKeys: ["lessonId", "body"],
     call: (args) => {
-      const lessonId = requireString(args, "lessonId");
-      const body = requireBodyString(args, "body");
-      const lesson = upsertLesson(options.store, options.scope.courseId, {
-        lessonId,
-        bodyMarkdown: body,
-      });
+      void args;
 
       return {
-        result: jsonResult({
-          ok: true,
-          lesson: {
-            id: lesson.lessonId,
-            updatedAt: lesson.updatedAt,
-          },
-        }),
-        writeSummary: `wrote lesson ${lesson.lessonId}`,
-        writeAttachment: { kind: "lesson", lessonId: lesson.lessonId },
+        result: errorResult(
+          "upsert_lesson is unavailable in store schema v2; topic journal entries replace lessons.",
+        ),
       };
     },
   });
@@ -1310,18 +1293,22 @@ const upsertGlossaryEntryTool = (
   createTeachingTool(options, {
     name: "upsert_glossary_entry",
     description: "Creates or updates a glossary entry scoped to the course.",
-    knownKeys: ["term", "definition", "lessonId"],
+    knownKeys: ["term", "definition", "topicPath"],
     call: (args) => {
       const term = requireString(args, "term");
       const definition = requireString(args, "definition");
-      const lessonId = optionalStringOrNull(args, "lessonId");
+      const topicPath = optionalString(args, "topicPath");
+      const topicId =
+        topicPath === undefined
+          ? findCurrentTopicId(options.store, options.scope.courseId)
+          : resolveTopicId(options.store, options.scope.courseId, topicPath);
       const entry = upsertGlossaryEntry(
         options.store,
         options.scope.courseId,
         {
           term,
           definition,
-          ...(lessonId === undefined ? {} : { lessonId }),
+          topicId: topicId ?? null,
         },
       );
 
@@ -1332,7 +1319,7 @@ const upsertGlossaryEntryTool = (
             id: entry.id,
             term: entry.term,
             definition: entry.definition,
-            lessonId: entry.lessonId,
+            topicId: entry.topicId,
           },
         }),
         writeSummary: `upserted glossary entry ${term}`,
