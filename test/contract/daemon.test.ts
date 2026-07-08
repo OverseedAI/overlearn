@@ -762,11 +762,22 @@ describe(`daemon contract (${runtime.name})`, () => {
           FAKE_ACP_MCP_CALL: JSON.stringify([
             {
               server: "overlearn-teaching",
+              tool: "upsert_topic",
+              args: {
+                path: "compound-growth",
+                title: "Compound growth",
+                body: "Exponential growth through repeated reinvestment.",
+                setCurrent: true,
+              },
+            },
+            {
+              server: "overlearn-teaching",
               tool: "record_mastery",
               args: {
                 concept: "compound-growth",
                 score: 84,
                 gaps: "none",
+                topicPath: "compound-growth",
               },
             },
             {
@@ -777,14 +788,7 @@ describe(`daemon contract (${runtime.name})`, () => {
                 body: "<h1>Compound growth</h1><script>document.title='demo';</script>",
                 format: "html",
                 fileName: "compound-growth.html",
-              },
-            },
-            {
-              server: "overlearn-teaching",
-              tool: "upsert_lesson",
-              args: {
-                lessonId: "compound-growth",
-                body: '# Compound growth\n\n:::demo compound-growth.html "Compound growth"',
+                topicPath: "compound-growth",
               },
             },
           ]),
@@ -903,13 +907,16 @@ describe(`daemon contract (${runtime.name})`, () => {
           "turn done stream",
         );
 
-        await sse.waitFor(
-          "lesson",
-          (data) => isRecord(data) && data["courseId"] === createdId,
-          "lesson changed event",
-        );
-
         const state = await courseState(daemon, createdId);
+        expect(state["topics"]).toContainEqual(
+          expect.objectContaining({
+            path: "compound-growth",
+            title: "Compound growth",
+            body: "Exponential growth through repeated reinvestment.",
+            current: true,
+            state: "current",
+          }),
+        );
         expect(state["mastery"]).toContainEqual(
           expect.objectContaining({
             concept: "compound-growth",
@@ -929,23 +936,6 @@ describe(`daemon contract (${runtime.name})`, () => {
             kind: "demo",
             file: "compound-growth.html",
             title: "Compound growth",
-          }),
-        );
-        expect(state["transcript"]).toContainEqual(
-          expect.objectContaining({
-            role: "agent",
-            kind: "lesson",
-            lesson: "compound-growth",
-          }),
-        );
-
-        const lessons = state["lessons"];
-        expect(isRecord(lessons)).toBe(true);
-        const renderedLessons = isRecord(lessons) ? lessons["lessons"] : [];
-        expect(renderedLessons).toContainEqual(
-          expect.objectContaining({
-            id: "compound-growth",
-            html: expect.stringContaining('data-demo-file="compound-growth.html"'),
           }),
         );
 

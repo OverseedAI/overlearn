@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 
 import {
+  appendJournalEntry,
   appendMasteryEvent,
   appendTranscriptEntry,
   clearActiveFeynmanCheck,
@@ -16,12 +18,12 @@ import {
   getStorePath,
   importCourseFolder,
   latestMasteryForTopic,
+  listJournalEntries,
   listCourses,
   listDemos,
   listFeynmanChecks,
   listGlossary,
   listLatestMasteryScores,
-  listLessons,
   listSessions,
   listTopicsDueForReview,
   listTurnEvents,
@@ -33,9 +35,9 @@ import {
   registerFeynmanCheck,
   replaceTopicTree,
   startSession,
+  STORE_SCHEMA_VERSION,
   upsertDemo,
   upsertGlossaryEntry,
-  upsertLesson,
   upsertTopic,
   withStoreTransaction,
   type Store,
@@ -76,7 +78,9 @@ describe("store migrations", () => {
       const migrations = store.db
         .query("SELECT id, name FROM migrations ORDER BY id")
         .all();
-      expect(migrations).toEqual([{ id: 1, name: "initial_store" }]);
+      expect(migrations).toEqual([
+        { id: STORE_SCHEMA_VERSION, name: "store_schema_v2" },
+      ]);
 
       expect(getProfile(store)).toMatchObject({
         name: null,
@@ -96,7 +100,7 @@ describe("store migrations", () => {
     const first = openStore({ databasePath });
     const course = createCourse(first, {
       title: "Reopen Course",
-      status: "draft",
+      status: "active",
     });
     first.close();
 
@@ -111,11 +115,55 @@ describe("store migrations", () => {
         {
           id: course.id,
           title: "Reopen Course",
-          status: "draft",
+          status: "active",
         },
       ]);
     } finally {
       second.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("wipes an old-version database on open with a clear warning", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "overlearn-wipe-"));
+    const databasePath = join(dir, "store.sqlite");
+    const old = new Database(databasePath, { create: true, strict: true });
+    old.exec(`
+      CREATE TABLE migrations (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+      INSERT INTO migrations (id, name, applied_at)
+      VALUES (1, 'initial_store', '2026-01-01T00:00:00.000Z');
+      CREATE TABLE lessons (
+        id INTEGER PRIMARY KEY,
+        body_markdown TEXT NOT NULL
+      );
+      INSERT INTO lessons (id, body_markdown) VALUES (1, 'legacy');
+    `);
+    old.close();
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => {
+      warnings.push(String(message));
+    };
+
+    const store = openStore({ databasePath });
+    try {
+      expect(warnings).toEqual([
+        `Overlearn store schema changed to v${STORE_SCHEMA_VERSION}; wiping old database and recreating.`,
+      ]);
+      expect(
+        store.db
+          .query("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'lessons'")
+          .all(),
+      ).toEqual([]);
+      expect(getProfile(store).onboardingState).toBe("new");
+    } finally {
+      console.warn = originalWarn;
+      store.close();
       await rm(dir, { force: true, recursive: true });
     }
   });
@@ -140,21 +188,15 @@ describe("store query API", () => {
       const course = createCourse(store, {
         title: "Finance",
         description: "Mental math",
-        status: "draft",
+        status: "active",
         harnessId: "codex",
       });
-      const activeCourse = patchCourse(store, course.id, { status: "active" });
+      const activeCourse = patchCourse(store, course.id, { description: "Mental math." });
       expect(activeCourse.status).toBe("active");
-
-      upsertLesson(store, course.id, {
-        lessonId: "01-rule-of-72",
-        bodyMarkdown: "# Rule of 72\n",
-      });
 
       const firstTopic = upsertTopic(store, course.id, {
         path: "finance/rule-of-72",
         title: "Rule of 72",
-        lessonId: "01-rule-of-72",
         body: "Estimate doubling time.",
       });
       const secondTopic = upsertTopic(store, course.id, {
@@ -169,9 +211,14 @@ describe("store query API", () => {
       expect(tree).toMatchObject([
         {
           path: "finance",
+          state: "frontier",
           children: [
-            { path: "finance/rule-of-72", isCurrent: false },
-            { path: "finance/rates", isCurrent: true },
+            {
+              path: "finance/rule-of-72",
+              isCurrent: false,
+              state: "visited",
+            },
+            { path: "finance/rates", isCurrent: true, state: "current" },
           ],
         },
       ]);
@@ -192,9 +239,15 @@ describe("store query API", () => {
         score: 85,
         ts: "2026-01-03T00:00:00.000Z",
       });
+      appendMasteryEvent(store, course.id, {
+        concept: "finance/rates",
+        score: 50,
+        ts: "2026-01-03T12:00:00.000Z",
+      });
 
       expect(listLatestMasteryScores(store, course.id)).toMatchObject([
         { concept: "finance", score: 40 },
+        { concept: "finance/rates", score: 50 },
         { concept: "rule-of-72", score: 85 },
       ]);
       expect(
@@ -206,22 +259,26 @@ describe("store query API", () => {
           masteryThreshold: 80,
           limit: 3,
         }).map((entry) => entry.topic.path),
-      ).toEqual(["finance"]);
+      ).toEqual(["finance/rates"]);
 
       expect(
         upsertGlossaryEntry(store, course.id, {
           term: "Doubling time",
           definition: "Time for a quantity to double.",
-          lessonId: "01-rule-of-72",
+          topicId: firstTopic.id,
           addedAt: "2026-01-04T00:00:00.000Z",
         }),
-      ).toMatchObject({ term: "Doubling time" });
+      ).toMatchObject({ term: "Doubling time", topicId: firstTopic.id });
       expect(
         upsertGlossaryEntry(store, course.id, {
           term: "doubling time",
           definition: "Updated.",
         }),
-      ).toMatchObject({ term: "doubling time", definition: "Updated." });
+      ).toMatchObject({
+        term: "doubling time",
+        definition: "Updated.",
+        topicId: firstTopic.id,
+      });
       expect(listGlossary(store, course.id)).toHaveLength(1);
 
       const activeCheck = registerFeynmanCheck(store, course.id, {
@@ -235,7 +292,7 @@ describe("store query API", () => {
       clearActiveFeynmanCheck(store, course.id);
       expect(getActiveFeynmanCheck(store, course.id)).toBeNull();
 
-      upsertDemo(store, course.id, {
+      const demo = upsertDemo(store, course.id, {
         topicId: firstTopic.id,
         fileName: "growth.html",
         title: "Growth curve",
@@ -250,6 +307,70 @@ describe("store query API", () => {
           bodyFormat: "html",
         },
       ]);
+
+      appendJournalEntry(store, course.id, {
+        topicId: firstTopic.id,
+        kind: "note",
+        bodyMarkdown: "# Rule of 72\n",
+        turn: 1,
+        createdAt: "2026-01-06T00:01:00.000Z",
+      });
+      appendJournalEntry(store, course.id, {
+        topicId: firstTopic.id,
+        kind: "demo",
+        demoId: demo.id,
+        turn: 1,
+        createdAt: "2026-01-06T00:02:00.000Z",
+      });
+      appendJournalEntry(store, course.id, {
+        topicId: firstTopic.id,
+        kind: "summary",
+        bodyMarkdown: "Divide 72 by the percent rate.",
+        turn: 2,
+        createdAt: "2026-01-06T00:03:00.000Z",
+      });
+      expect(listJournalEntries(store, course.id, firstTopic.id)).toMatchObject([
+        {
+          kind: "note",
+          bodyMarkdown: "# Rule of 72\n",
+          demoId: null,
+          turn: 1,
+        },
+        {
+          kind: "demo",
+          bodyMarkdown: null,
+          demoId: demo.id,
+          turn: 1,
+        },
+        {
+          kind: "summary",
+          bodyMarkdown: "Divide 72 by the percent rate.",
+          demoId: null,
+          turn: 2,
+        },
+      ]);
+      expect(() =>
+        store.db
+          .query(
+            `
+              INSERT INTO topic_journal_entries (
+                course_id,
+                topic_id,
+                kind,
+                body_markdown,
+                demo_id,
+                created_at
+              )
+              VALUES (?1, ?2, 'demo', ?3, NULL, ?4)
+            `,
+          )
+          .run(
+            course.id,
+            firstTopic.id,
+            "demo bodies are invalid",
+            "2026-01-06T00:04:00.000Z",
+          ),
+      ).toThrow();
 
       appendTranscriptEntry(store, course.id, {
         role: "learner",
@@ -270,6 +391,7 @@ describe("store query API", () => {
       });
       const transcriptPage = pageTranscript(store, course.id, { limit: 1 });
       expect(transcriptPage.entries).toHaveLength(1);
+      expect(transcriptPage.entries[0]?.topicId).toBe(secondTopic.id);
       expect(transcriptPage.nextAfterId).not.toBeNull();
       expect(
         pageTranscript(store, course.id, {
@@ -317,11 +439,12 @@ describe("store query API", () => {
           topic.path,
           topic.position,
           topic.isCurrent,
+          topic.state,
         ]),
       ).toEqual([
-        ["a", 0, false],
-        ["a/b", 0, true],
-        ["a/c", 1, false],
+        ["a", 0, false, "frontier"],
+        ["a/b", 0, true, "current"],
+        ["a/c", 1, false, "frontier"],
       ]);
     });
   });
@@ -492,7 +615,9 @@ describe("folder importer", () => {
 
       const result = await importCourseFolder(store, fixture);
 
-      expect(result.warnings).toEqual([]);
+      expect(result.warnings).toEqual([
+        "Skipped legacy lessons/ data; topic journals replace lessons.",
+      ]);
       expect(result.course).toMatchObject({
         title: "Rule of 72",
         description: "Mental compound-interest math.",
@@ -502,13 +627,6 @@ describe("folder importer", () => {
         manifestExtra: { preservedUnknown: { yes: true } },
       });
 
-      expect(listLessons(store, result.course.id)).toMatchObject([
-        {
-          lessonId: "01-rule-of-72",
-          bodyMarkdown: "# Rule of 72\n\nDivide 72 by the growth rate.\n",
-        },
-      ]);
-
       const topics = readTopicTree(store, result.course.id);
       expect(topics).toMatchObject([
         {
@@ -516,9 +634,9 @@ describe("folder importer", () => {
           children: [
             {
               path: "finance/rule-of-72",
-              lessonId: "01-rule-of-72",
               enteredAt: "2026-01-02T00:00:00.000Z",
               isCurrent: true,
+              state: "current",
             },
           ],
         },
@@ -528,7 +646,7 @@ describe("folder importer", () => {
         {
           term: "Doubling time",
           definition: "How long until a quantity doubles.",
-          lessonId: "01-rule-of-72",
+          topicId: null,
         },
       ]);
       expect(listLatestMasteryScores(store, result.course.id)).toMatchObject([

@@ -25,7 +25,6 @@ import {
   listFeynmanChecks,
   listGlossary,
   listLatestMasteryScores,
-  listLessons,
   openStore,
   readTopicTree,
   type Course,
@@ -151,7 +150,7 @@ const withFixture = async (
     const draftCourse = createCourse(store, {
       title: "Draft Finance",
       description: "Draft description",
-      status: "draft",
+      status: "active",
       harnessId: "codex",
       attachedDir: "/tmp/finance",
     });
@@ -268,15 +267,16 @@ const exerciseDraftTools = async (
     path: "finance/rule-of-72",
     title: "Rule of 72",
     current: true,
+    state: "current",
     position: 2,
   });
+  const currentTopicId = asRecord(topicResult["topic"], "topic")["id"];
 
   const glossaryResult = parseResult(
     await withTimeout(
       client.callTool("upsert_glossary_entry", {
         term: "Doubling time",
         definition: "The time required for a quantity to double.",
-        lessonId: "lesson-1",
       }),
       3_000,
       "upsert_glossary_entry",
@@ -287,7 +287,7 @@ const exerciseDraftTools = async (
     glossaryEntry: {
       term: "Doubling time",
       definition: "The time required for a quantity to double.",
-      lessonId: "lesson-1",
+      topicId: currentTopicId,
     },
   });
 
@@ -352,20 +352,18 @@ const exerciseDraftTools = async (
     },
   });
 
-  const lessonResult = parseResult(
-    await withTimeout(
-      client.callTool("upsert_lesson", {
-        lessonId: "rule-of-72",
-        body: '# Rule of 72\n\nDivide 72 by the growth rate.\n\n:::demo growth.html "Growth table"',
-      }),
-      3_000,
-      "upsert_lesson",
-    ),
+  const lessonResult = await withTimeout(
+    client.callTool("upsert_lesson", {
+      lessonId: "rule-of-72",
+      body: '# Rule of 72\n\nDivide 72 by the growth rate.\n\n:::demo growth.html "Growth table"',
+    }),
+    3_000,
+    "upsert_lesson",
   );
-  expect(lessonResult).toMatchObject({
-    ok: true,
-    lesson: { id: "rule-of-72" },
-  });
+  expect(lessonResult.isError).toBe(true);
+  expect(parseResult(lessonResult)["error"]).toContain(
+    "topic journal entries replace lessons",
+  );
 
   const state = parseResult(
     await withTimeout(
@@ -379,7 +377,7 @@ const exerciseDraftTools = async (
     course: {
       id: fixture.draftCourse.id,
       title: "Draft Finance",
-      status: "draft",
+      status: "active",
       attachedDir: "/tmp/finance",
       harness: "codex",
     },
@@ -393,9 +391,7 @@ const exerciseDraftTools = async (
   expect(asArray(state["glossary"], "glossary")).toEqual([
     expect.objectContaining({ term: "Doubling time" }),
   ]);
-  expect(asArray(state["lessons"], "lessons")).toEqual([
-    expect.objectContaining({ id: "rule-of-72" }),
-  ]);
+  expect(state["lessons"]).toBeUndefined();
 
   const rootTopics = asArray(state["topics"], "topics");
   expect(rootTopics).toHaveLength(1);
@@ -404,43 +400,29 @@ const exerciseDraftTools = async (
     children: [
       expect.objectContaining({
         path: "finance/rule-of-72",
+        state: "current",
         mastery: expect.objectContaining({ score: 82 }),
       }),
     ],
   });
 
-  const planResult = parseResult(
-    await withTimeout(
-      client.callTool("propose_course_plan", {
-        title: "Planned Finance",
-        description: "A sharper plan.",
-        topics: [
-          {
-            path: "basics",
-            title: "Basics",
-            summary: "Core mental math.",
-            children: [
-              {
-                path: "basics/rule-of-72",
-                title: "Rule of 72",
-                summary: "Estimate doubling time.",
-              },
-            ],
-          },
-        ],
-      }),
-      3_000,
-      "propose_course_plan",
-    ),
-  );
-  expect(planResult).toMatchObject({
-    ok: true,
-    course: {
+  const planResult = await withTimeout(
+    client.callTool("propose_course_plan", {
       title: "Planned Finance",
       description: "A sharper plan.",
-      status: "draft",
-    },
-  });
+      topics: [
+        {
+          path: "basics",
+          title: "Basics",
+          summary: "Core mental math.",
+        },
+      ],
+    }),
+    3_000,
+    "propose_course_plan",
+  );
+  expect(planResult.isError).toBe(true);
+  expect(parseResult(planResult)["error"]).toContain("only valid for draft courses");
 
   expect(fixture.writes.map((event) => event.tool)).toEqual([
     "upsert_topic",
@@ -448,8 +430,6 @@ const exerciseDraftTools = async (
     "record_mastery",
     "feynman_check",
     "emit_demo",
-    "upsert_lesson",
-    "propose_course_plan",
   ]);
   expect(
     fixture.writes.every((event) => event.courseId === fixture.draftCourse.id),
@@ -463,21 +443,16 @@ const exerciseDraftTools = async (
     file: `demo-${demoId}.html`,
     title: "Growth table",
   });
-  expect(
-    fixture.writes.find((event) => event.tool === "upsert_lesson")?.attachment,
-  ).toEqual({
-    kind: "lesson",
-    lessonId: "rule-of-72",
-  });
+  expect(fixture.writes.find((event) => event.tool === "upsert_lesson")).toBeUndefined();
 
   expect(getCourse(fixture.store, fixture.draftCourse.id)).toMatchObject({
-    title: "Planned Finance",
-    description: "A sharper plan.",
+    title: "Draft Finance",
+    description: "Draft description",
   });
   expect(readTopicTree(fixture.store, fixture.draftCourse.id)).toMatchObject([
     {
-      path: "basics",
-      children: [{ path: "basics/rule-of-72" }],
+      path: "finance",
+      children: [{ path: "finance/rule-of-72" }],
     },
   ]);
   expect(listGlossary(fixture.store, fixture.draftCourse.id)).toHaveLength(1);
@@ -488,9 +463,6 @@ const exerciseDraftTools = async (
     1,
   );
   expect(listDemos(fixture.store, fixture.draftCourse.id)).toHaveLength(1);
-  expect(listLessons(fixture.store, fixture.draftCourse.id)).toMatchObject([
-    { lessonId: "rule-of-72" },
-  ]);
 };
 
 const exerciseActiveScope = async (

@@ -9,6 +9,7 @@ import {
 } from "node:path";
 
 import {
+  appendJournalEntry,
   appendMasteryEvent,
   appendTranscriptEntry,
   appendTurnEvents,
@@ -19,24 +20,22 @@ import {
   listDemos,
   listFeynmanChecks,
   listGlossary,
-  listLessons,
+  listJournalEntries,
   listMasteryEvents,
   listTurnEvents,
   pageTranscript,
   readTopicTree,
   replaceTopicTree,
-  upsertLesson,
   withStoreTransaction,
   type Course,
   type CourseInput,
   type CourseStatus,
   type DemoBodyFormat,
   type FeynmanCheckStatus,
-  type GlossaryInput,
   type JsonRecord,
-  type LessonInput,
   type Store,
   type Topic,
+  type TopicJournalEntryKind,
   type TopicStatus,
   type TopicTreeInput,
   type TranscriptInput,
@@ -73,21 +72,12 @@ type BundleCourse = Readonly<{
   updatedAt: string;
 }>;
 
-type BundleLesson = Readonly<{
-  lessonId: string;
-  bodyFile: string;
-  body: string;
-  position: number;
-  sourceMtimeMs: number | null;
-}>;
-
 type BundleTopic = Readonly<{
   path: string;
   title: string;
   bodyFile: string;
   body: string;
   status: TopicStatus;
-  lessonId: string | null;
   enteredAt: string | null;
   isCurrent: boolean;
   masteryConcept: string | null;
@@ -98,8 +88,17 @@ type BundleTopic = Readonly<{
 type BundleGlossary = Readonly<{
   term: string;
   definition: string;
-  lessonId: string | null;
+  topicPath: string | null;
   addedAt: string;
+}>;
+
+type BundleJournalEntry = Readonly<{
+  topicPath: string;
+  kind: TopicJournalEntryKind;
+  bodyMarkdown: string | null;
+  demoFile: string | null;
+  turn: number | null;
+  createdAt: string;
 }>;
 
 type BundleMastery = Readonly<{
@@ -146,8 +145,8 @@ type BundleManifest = Readonly<{
   formatVersion: typeof BUNDLE_FORMAT_VERSION;
   exportedAt: string;
   course: BundleCourse;
-  lessons: readonly BundleLesson[];
   topics: readonly BundleTopic[];
+  journals: readonly BundleJournalEntry[];
   glossary: readonly BundleGlossary[];
   mastery: readonly BundleMastery[];
   feynmanChecks: readonly BundleFeynmanCheck[];
@@ -158,6 +157,7 @@ type BundleManifest = Readonly<{
 
 type ImportedBundleDemo = Readonly<{
   fileName: string | null;
+  file: string;
   title: string | null;
   body: string;
   bodyFormat: DemoBodyFormat;
@@ -176,21 +176,26 @@ type ImportedBundleMastery = Readonly<{
   topicPath: string | null;
 }>;
 
+type ImportedBundleJournalEntry = BundleJournalEntry;
+
+type ImportedBundleGlossary = BundleGlossary;
+
 type ImportedBundlePayload = Readonly<{
   course: CourseInput;
-  lessons: readonly LessonInput[];
   topics: readonly TopicTreeInput[];
-  glossary: readonly GlossaryInput[];
+  journals: readonly ImportedBundleJournalEntry[];
+  glossary: readonly ImportedBundleGlossary[];
   mastery: readonly ImportedBundleMastery[];
   feynmanChecks: readonly ImportedBundleFeynman[];
   demos: readonly ImportedBundleDemo[];
-  transcript: readonly TranscriptInput[];
+  transcript: readonly ImportedTranscriptInput[];
   turnEvents: readonly BundleTurnEvent[];
 }>;
 
 type ImportedTranscriptInput = TranscriptInput &
   Readonly<{
     payload: JsonRecord;
+    topicPath: string | null;
   }>;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -380,7 +385,6 @@ const bundleTopicFromTopic = (
     bodyFile,
     body: topic.body,
     status: topic.status,
-    lessonId: topic.lessonId,
     enteredAt: topic.enteredAt,
     isCurrent: topic.isCurrent,
     masteryConcept: topic.masteryConcept,
@@ -478,29 +482,15 @@ export const exportCourseBundle = async (
     const bundleTopics = topics.map((topic) => bundleTopicFromTopic(topic, topicIndex));
     await writeTopicBodies(exportDir, bundleTopics);
 
-    const lessons: BundleLesson[] = [];
-    for (const [index, lesson] of listLessons(store, courseId).entries()) {
-      const bodyFile = relativeBundlePath(
-        "lessons",
-        numberedName(index, lesson.lessonId, ".md"),
-      );
-      await writeBundleText(exportDir, bodyFile, lesson.bodyMarkdown);
-      lessons.push({
-        lessonId: lesson.lessonId,
-        bodyFile,
-        body: lesson.bodyMarkdown,
-        position: lesson.position,
-        sourceMtimeMs: lesson.sourceMtimeMs,
-      });
-    }
-
     const demos: BundleDemo[] = [];
+    const demoFilesById = new Map<number, string>();
     for (const [index, demo] of listDemos(store, courseId).entries()) {
       const file = relativeBundlePath(
         "demos",
         demoExportName(index, demo.fileName, demo.title, demo.bodyFormat),
       );
       await writeBundleText(exportDir, file, demo.body);
+      demoFilesById.set(demo.id, file);
       demos.push({
         fileName: demo.fileName,
         file,
@@ -511,6 +501,18 @@ export const exportCourseBundle = async (
         position: demo.position,
       });
     }
+
+    const journals = flattenTopicTree(topics).flatMap((topic) =>
+      listJournalEntries(store, courseId, topic.id).map((entry) => ({
+        topicPath: topic.path,
+        kind: entry.kind,
+        bodyMarkdown: entry.bodyMarkdown,
+        demoFile:
+          entry.demoId === null ? null : demoFilesById.get(entry.demoId) ?? null,
+        turn: entry.turn,
+        createdAt: entry.createdAt,
+      })),
+    );
 
     const transcript = transcriptEntriesForCourse(store, courseId);
     const transcriptFile = relativeBundlePath("transcript.jsonl");
@@ -526,6 +528,8 @@ export const exportCourseBundle = async (
               kind: entry.kind,
               content: entry.content,
               payload: entry.payload,
+              topicPath:
+                entry.topicId === null ? null : topicPaths.get(entry.topicId) ?? null,
               ts: entry.ts,
               createdAt: entry.createdAt,
             }),
@@ -540,12 +544,12 @@ export const exportCourseBundle = async (
       formatVersion: BUNDLE_FORMAT_VERSION,
       exportedAt: nowIso(),
       course: courseForManifest(course),
-      lessons,
       topics: bundleTopics,
+      journals,
       glossary: listGlossary(store, courseId).map((entry) => ({
         term: entry.term,
         definition: entry.definition,
-        lessonId: entry.lessonId,
+        topicPath: entry.topicId === null ? null : topicPaths.get(entry.topicId) ?? null,
         addedAt: entry.addedAt,
       })),
       mastery: listMasteryEvents(store, courseId).map((entry) => ({
@@ -630,41 +634,6 @@ const parseBundleCourse = (value: unknown): CourseInput => {
   };
 };
 
-const parseBundleLesson = async (
-  root: string,
-  value: unknown,
-  index: number,
-  warnings: string[],
-): Promise<LessonInput | undefined> => {
-  if (!isRecord(value)) {
-    warnings.push("Skipped invalid bundle lesson.");
-    return undefined;
-  }
-
-  const lessonId = optionalStringValue(value, "lessonId");
-  if (lessonId === null) {
-    warnings.push("Skipped bundle lesson without lessonId.");
-    return undefined;
-  }
-
-  const bodyFile = optionalStringValue(value, "bodyFile");
-  const body = await readBodyWithFallback(
-    root,
-    bodyFile,
-    optionalStringValue(value, "body") ?? "",
-    warnings,
-    "lesson body",
-  );
-
-  return {
-    lessonId,
-    bodyMarkdown: body,
-    position: numberValue(value, "position", index),
-    sourceMtimeMs:
-      typeof value["sourceMtimeMs"] === "number" ? value["sourceMtimeMs"] : null,
-  };
-};
-
 const parseBundleTopic = async (
   root: string,
   value: unknown,
@@ -704,7 +673,6 @@ const parseBundleTopic = async (
     title,
     body,
     status: parseTopicStatus(value["status"]),
-    lessonId: optionalStringValue(value, "lessonId"),
     enteredAt: optionalStringValue(value, "enteredAt"),
     isCurrent: value["isCurrent"] === true,
     masteryConcept: optionalStringValue(value, "masteryConcept"),
@@ -716,7 +684,7 @@ const parseBundleTopic = async (
 const parseBundleGlossary = (
   value: unknown,
   warnings: string[],
-): GlossaryInput | undefined => {
+): ImportedBundleGlossary | undefined => {
   if (!isRecord(value)) {
     warnings.push("Skipped invalid bundle glossary entry.");
     return undefined;
@@ -733,8 +701,60 @@ const parseBundleGlossary = (
   return {
     term,
     definition,
-    lessonId: optionalStringValue(value, "lessonId"),
+    topicPath: optionalStringValue(value, "topicPath"),
     addedAt,
+  };
+};
+
+const parseJournalKind = (
+  value: unknown,
+): TopicJournalEntryKind | undefined => {
+  if (value === "note" || value === "demo" || value === "summary") {
+    return value;
+  }
+
+  return undefined;
+};
+
+const parseBundleJournalEntry = (
+  value: unknown,
+  warnings: string[],
+): ImportedBundleJournalEntry | undefined => {
+  if (!isRecord(value)) {
+    warnings.push("Skipped invalid bundle journal entry.");
+    return undefined;
+  }
+
+  const topicPath = optionalStringValue(value, "topicPath");
+  const kind = parseJournalKind(value["kind"]);
+  const createdAt = optionalStringValue(value, "createdAt");
+  if (topicPath === null || kind === undefined || createdAt === null) {
+    warnings.push("Skipped bundle journal entry without topicPath, kind, or createdAt.");
+    return undefined;
+  }
+
+  const bodyMarkdown = optionalStringValue(value, "bodyMarkdown");
+  const demoFile = optionalStringValue(value, "demoFile");
+  if (kind === "demo") {
+    if (demoFile === null || bodyMarkdown !== null) {
+      warnings.push("Skipped bundle demo journal entry with invalid payload.");
+      return undefined;
+    }
+  } else if (bodyMarkdown === null || demoFile !== null) {
+    warnings.push("Skipped bundle text journal entry with invalid payload.");
+    return undefined;
+  }
+
+  return {
+    topicPath,
+    kind,
+    bodyMarkdown,
+    demoFile,
+    turn:
+      typeof value["turn"] === "number" && Number.isInteger(value["turn"])
+        ? value["turn"]
+        : null,
+    createdAt,
   };
 };
 
@@ -827,6 +847,7 @@ const parseBundleDemo = async (
 
   return {
     fileName: optionalStringValue(value, "fileName"),
+    file,
     title: optionalStringValue(value, "title"),
     body,
     bodyFormat,
@@ -864,6 +885,7 @@ const parseTranscriptLine = (
       kind: optionalStringValue(value, "kind") ?? "text",
       content,
       payload: jsonRecord(value["payload"]),
+      topicPath: optionalStringValue(value, "topicPath"),
       ts,
     };
   } catch (error) {
@@ -876,7 +898,7 @@ const parseBundleTranscript = async (
   root: string,
   manifest: Record<string, unknown>,
   warnings: string[],
-): Promise<readonly TranscriptInput[]> => {
+): Promise<readonly ImportedTranscriptInput[]> => {
   const transcript = manifest["transcript"];
   if (!isRecord(transcript)) {
     return [];
@@ -940,25 +962,29 @@ const readBundlePayload = async (
   manifest: Record<string, unknown>,
 ): Promise<Readonly<{ payload: ImportedBundlePayload; warnings: readonly string[] }>> => {
   const warnings: string[] = [];
-  const lessons: LessonInput[] = [];
   const topics: TopicTreeInput[] = [];
-  const glossary: GlossaryInput[] = [];
+  const journals: ImportedBundleJournalEntry[] = [];
+  const glossary: ImportedBundleGlossary[] = [];
   const mastery: ImportedBundleMastery[] = [];
   const feynmanChecks: ImportedBundleFeynman[] = [];
   const demos: ImportedBundleDemo[] = [];
   const turnEvents: BundleTurnEvent[] = [];
 
-  for (const [index, lesson] of arrayValue(manifest, "lessons").entries()) {
-    const parsed = await parseBundleLesson(dir, lesson, index, warnings);
-    if (parsed !== undefined) {
-      lessons.push(parsed);
-    }
+  if (arrayValue(manifest, "lessons").length > 0) {
+    warnings.push("Skipped bundle lessons; topic journals replace lessons.");
   }
 
   for (const [index, topic] of arrayValue(manifest, "topics").entries()) {
     const parsed = await parseBundleTopic(dir, topic, index, warnings);
     if (parsed !== undefined) {
       topics.push(parsed);
+    }
+  }
+
+  for (const entry of arrayValue(manifest, "journals")) {
+    const parsed = parseBundleJournalEntry(entry, warnings);
+    if (parsed !== undefined) {
+      journals.push(parsed);
     }
   }
 
@@ -1001,8 +1027,8 @@ const readBundlePayload = async (
     warnings,
     payload: {
       course: parseBundleCourse(manifest["course"]),
-      lessons,
       topics,
+      journals,
       glossary,
       mastery,
       feynmanChecks,
@@ -1016,7 +1042,8 @@ const readBundlePayload = async (
 const insertGlossaryEntry = (
   store: Store,
   courseId: number,
-  input: GlossaryInput,
+  input: ImportedBundleGlossary,
+  topicId: number | null,
 ): void => {
   const termKey = input.term.toLocaleLowerCase();
   const timestamp = nowIso();
@@ -1028,7 +1055,7 @@ const insertGlossaryEntry = (
           term,
           term_key,
           definition,
-          lesson_id,
+          topic_id,
           added_at,
           created_at,
           updated_at
@@ -1041,7 +1068,7 @@ const insertGlossaryEntry = (
       input.term,
       termKey,
       input.definition,
-      input.lessonId ?? null,
+      topicId,
       input.addedAt ?? timestamp,
       timestamp,
     );
@@ -1052,9 +1079,9 @@ const insertDemo = (
   courseId: number,
   input: ImportedBundleDemo,
   topicId: number | null,
-): void => {
+): number => {
   const timestamp = nowIso();
-  store.db
+  const result = store.db
     .query(
       `
         INSERT INTO demos (
@@ -1083,6 +1110,8 @@ const insertDemo = (
       input.position,
       timestamp,
     );
+
+  return Number(result.lastInsertRowid);
 };
 
 const insertFeynmanCheck = (
@@ -1141,18 +1170,17 @@ const importBundleDirectory = async (
   manifest: Record<string, unknown>,
 ): Promise<ImportCoursePathResult> => {
   const { payload, warnings } = await readBundlePayload(dir, manifest);
+  const importWarnings = [...warnings];
   const course = withStoreTransaction(store, () => {
     const importedCourse = createCourse(store, payload.course);
-
-    payload.lessons.forEach((lesson) => {
-      upsertLesson(store, importedCourse.id, lesson);
-    });
 
     replaceTopicTree(store, importedCourse.id, payload.topics);
     const topicMap = topicsByPath(store, importedCourse.id);
 
     payload.glossary.forEach((entry) => {
-      insertGlossaryEntry(store, importedCourse.id, entry);
+      const topicId =
+        entry.topicPath === null ? null : topicMap.get(entry.topicPath)?.id ?? null;
+      insertGlossaryEntry(store, importedCourse.id, entry, topicId);
     });
 
     payload.mastery.forEach((entry) => {
@@ -1167,10 +1195,48 @@ const importBundleDirectory = async (
       });
     });
 
+    const demoIdsByBundleFile = new Map<string, number>();
     payload.demos.forEach((demo) => {
       const topicId =
         demo.topicPath === null ? null : topicMap.get(demo.topicPath)?.id ?? null;
-      insertDemo(store, importedCourse.id, demo, topicId);
+      const demoId = insertDemo(store, importedCourse.id, demo, topicId);
+      demoIdsByBundleFile.set(demo.file, demoId);
+    });
+
+    payload.journals.forEach((entry) => {
+      const topic = topicMap.get(entry.topicPath);
+      if (topic === undefined) {
+        importWarnings.push(`Skipped journal entry for missing topic ${entry.topicPath}.`);
+        return;
+      }
+
+      if (entry.kind === "demo") {
+        const demoId =
+          entry.demoFile === null ? undefined : demoIdsByBundleFile.get(entry.demoFile);
+        if (demoId === undefined) {
+          importWarnings.push(
+            `Skipped demo journal entry for missing demo ${entry.demoFile ?? "unknown"}.`,
+          );
+          return;
+        }
+
+        appendJournalEntry(store, importedCourse.id, {
+          topicId: topic.id,
+          kind: "demo",
+          demoId,
+          turn: entry.turn,
+          createdAt: entry.createdAt,
+        });
+        return;
+      }
+
+      appendJournalEntry(store, importedCourse.id, {
+        topicId: topic.id,
+        kind: entry.kind,
+        bodyMarkdown: entry.bodyMarkdown ?? "",
+        turn: entry.turn,
+        createdAt: entry.createdAt,
+      });
     });
 
     payload.feynmanChecks.forEach((check) => {
@@ -1180,7 +1246,12 @@ const importBundleDirectory = async (
     });
 
     payload.transcript.forEach((entry) => {
-      appendTranscriptEntry(store, importedCourse.id, entry);
+      const topicId =
+        entry.topicPath === null ? null : topicMap.get(entry.topicPath)?.id ?? null;
+      appendTranscriptEntry(store, importedCourse.id, {
+        ...entry,
+        topicId,
+      });
     });
 
     payload.turnEvents.forEach((entry) => {
@@ -1195,7 +1266,7 @@ const importBundleDirectory = async (
     return imported;
   });
 
-  return { course, warnings, source: "bundle" };
+  return { course, warnings: importWarnings, source: "bundle" };
 };
 
 const readManifest = async (dir: string): Promise<unknown | undefined> => {

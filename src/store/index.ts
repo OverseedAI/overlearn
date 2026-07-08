@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -106,6 +106,7 @@ export type LessonInput = Readonly<{
 }>;
 
 export type TopicStatus = "active" | "archived";
+export type TopicNodeState = "frontier" | "visited" | "current";
 
 export type Topic = Readonly<{
   id: number;
@@ -116,9 +117,9 @@ export type Topic = Readonly<{
   title: string;
   body: string;
   status: TopicStatus;
-  lessonId: string | null;
   enteredAt: string | null;
   isCurrent: boolean;
+  state: TopicNodeState;
   masteryConcept: string | null;
   createdAt: string;
   updatedAt: string;
@@ -130,7 +131,6 @@ export type TopicInput = Readonly<{
   title?: string;
   body?: string;
   status?: TopicStatus;
-  lessonId?: string | null;
   enteredAt?: string | null;
   isCurrent?: boolean;
   masteryConcept?: string | null;
@@ -141,7 +141,6 @@ export type TopicTreeInput = Readonly<{
   title: string;
   body?: string;
   status?: TopicStatus;
-  lessonId?: string | null;
   enteredAt?: string | null;
   isCurrent?: boolean;
   masteryConcept?: string | null;
@@ -184,7 +183,7 @@ export type GlossaryEntry = Readonly<{
   courseId: number;
   term: string;
   definition: string;
-  lessonId: string | null;
+  topicId: number | null;
   addedAt: string;
   createdAt: string;
   updatedAt: string;
@@ -193,9 +192,38 @@ export type GlossaryEntry = Readonly<{
 export type GlossaryInput = Readonly<{
   term: string;
   definition: string;
-  lessonId?: string | null;
+  topicId?: number | null;
   addedAt?: string;
 }>;
+
+export type TopicJournalEntryKind = "note" | "demo" | "summary";
+
+export type TopicJournalEntry = Readonly<{
+  id: number;
+  courseId: number;
+  topicId: number;
+  kind: TopicJournalEntryKind;
+  bodyMarkdown: string | null;
+  demoId: number | null;
+  turn: number | null;
+  createdAt: string;
+}>;
+
+export type TopicJournalEntryInput =
+  | Readonly<{
+      topicId: number;
+      kind: "note" | "summary";
+      bodyMarkdown: string;
+      turn?: number | null;
+      createdAt?: string;
+    }>
+  | Readonly<{
+      topicId: number;
+      kind: "demo";
+      demoId: number;
+      turn?: number | null;
+      createdAt?: string;
+    }>;
 
 export type FeynmanCheckStatus = "active" | "replaced" | "cleared";
 
@@ -259,6 +287,7 @@ export type TranscriptRole = "learner" | "agent" | "system";
 export type TranscriptEntry = Readonly<{
   id: number;
   courseId: number;
+  topicId: number | null;
   turn: number;
   role: TranscriptRole;
   kind: string;
@@ -269,6 +298,7 @@ export type TranscriptEntry = Readonly<{
 }>;
 
 export type TranscriptInput = Readonly<{
+  topicId?: number | null;
   turn?: number;
   role: TranscriptRole;
   kind?: string;
@@ -367,7 +397,6 @@ type TopicRow = Readonly<{
   title: string;
   body: string;
   status: TopicStatus;
-  lesson_id: string | null;
   entered_at: string | null;
   is_current: number;
   mastery_concept: string | null;
@@ -391,10 +420,21 @@ type GlossaryRow = Readonly<{
   course_id: number;
   term: string;
   definition: string;
-  lesson_id: string | null;
+  topic_id: number | null;
   added_at: string;
   created_at: string;
   updated_at: string;
+}>;
+
+type TopicJournalEntryRow = Readonly<{
+  id: number;
+  course_id: number;
+  topic_id: number;
+  kind: TopicJournalEntryKind;
+  body_markdown: string | null;
+  demo_id: number | null;
+  turn: number | null;
+  created_at: string;
 }>;
 
 type FeynmanRow = Readonly<{
@@ -430,6 +470,7 @@ type DemoRow = Readonly<{
 type TranscriptRow = Readonly<{
   id: number;
   course_id: number;
+  topic_id: number | null;
   turn: number;
   role: TranscriptRole;
   kind: string;
@@ -469,7 +510,6 @@ type TopicBuilder = {
   title: string;
   body: string;
   status: TopicStatus;
-  lessonId: string | null;
   enteredAt: string | null;
   isCurrent: boolean;
   masteryConcept: string | null;
@@ -493,7 +533,6 @@ type ImportedFeynmanReplacement = Readonly<{
 
 type FolderImportPayload = Readonly<{
   course: CourseInput;
-  lessons: readonly LessonInput[];
   topics: readonly TopicTreeInput[];
   demos: readonly FolderDemoEntry[];
   glossary: readonly GlossaryInput[];
@@ -505,11 +544,14 @@ type FolderImportPayload = Readonly<{
 }>;
 
 const STORE_FILE_NAME = "overlearn.sqlite";
+export const STORE_SCHEMA_VERSION = 2;
+const courseStatusCheckSql =
+  "status TEXT NOT NULL CHECK (status IN ('draft', 'active', 'archived'))"; // TODO(DEV-582): drop 'draft' when the ideation/wizard flow is removed.
 
 const migrations: readonly Migration[] = [
   {
-    id: 1,
-    name: "initial_store",
+    id: STORE_SCHEMA_VERSION,
+    name: "store_schema_v2",
     up: (db) => {
       db.exec(`
         CREATE TABLE profile (
@@ -528,7 +570,7 @@ const migrations: readonly Migration[] = [
           description TEXT,
           harness_id TEXT,
           attached_dir TEXT,
-          status TEXT NOT NULL CHECK (status IN ('draft', 'active', 'archived')),
+          ${courseStatusCheckSql},
           source_name TEXT,
           manifest_extra_json TEXT NOT NULL DEFAULT '{}',
           created_at TEXT NOT NULL,
@@ -536,21 +578,6 @@ const migrations: readonly Migration[] = [
         );
 
         CREATE INDEX courses_status_idx ON courses(status);
-
-        CREATE TABLE lessons (
-          id INTEGER PRIMARY KEY,
-          course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-          lesson_id TEXT NOT NULL,
-          body_markdown TEXT NOT NULL,
-          position INTEGER NOT NULL DEFAULT 0,
-          source_mtime_ms REAL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          UNIQUE(course_id, lesson_id)
-        );
-
-        CREATE INDEX lessons_course_position_idx
-          ON lessons(course_id, position, lesson_id);
 
         CREATE TABLE topics (
           id INTEGER PRIMARY KEY,
@@ -561,7 +588,6 @@ const migrations: readonly Migration[] = [
           title TEXT NOT NULL,
           body TEXT NOT NULL DEFAULT '',
           status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
-          lesson_id TEXT,
           entered_at TEXT,
           is_current INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
           mastery_concept TEXT,
@@ -600,7 +626,7 @@ const migrations: readonly Migration[] = [
           term TEXT NOT NULL,
           term_key TEXT NOT NULL,
           definition TEXT NOT NULL,
-          lesson_id TEXT,
+          topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
           added_at TEXT NOT NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -649,9 +675,36 @@ const migrations: readonly Migration[] = [
         CREATE INDEX demos_course_topic_position_idx
           ON demos(course_id, topic_id, position, id);
 
+        CREATE TABLE topic_journal_entries (
+          id INTEGER PRIMARY KEY,
+          course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+          topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL CHECK (kind IN ('note', 'demo', 'summary')),
+          body_markdown TEXT,
+          demo_id INTEGER REFERENCES demos(id) ON DELETE CASCADE,
+          turn INTEGER,
+          created_at TEXT NOT NULL,
+          CHECK (
+            (
+              kind = 'demo'
+              AND demo_id IS NOT NULL
+              AND body_markdown IS NULL
+            )
+            OR (
+              kind IN ('note', 'summary')
+              AND demo_id IS NULL
+              AND body_markdown IS NOT NULL
+            )
+          )
+        );
+
+        CREATE INDEX topic_journal_entries_topic_idx
+          ON topic_journal_entries(topic_id, id);
+
         CREATE TABLE transcript (
           id INTEGER PRIMARY KEY,
           course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+          topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
           turn INTEGER NOT NULL,
           role TEXT NOT NULL CHECK (role IN ('learner', 'agent', 'system')),
           kind TEXT NOT NULL,
@@ -777,13 +830,68 @@ const migrationTableSql = `
   )
 `;
 
+const quoteSqlIdentifier = (value: string): string =>
+  `"${value.replaceAll('"', '""')}"`;
+
+const userSchemaObjects = (
+  db: Database,
+): readonly { type: "table" | "view" | "trigger"; name: string }[] =>
+  db
+    .query(
+      `
+        SELECT type, name
+        FROM sqlite_schema
+        WHERE type IN ('table', 'view', 'trigger')
+          AND name NOT LIKE 'sqlite_%'
+        ORDER BY
+          CASE type
+            WHEN 'trigger' THEN 0
+            WHEN 'view' THEN 1
+            ELSE 2
+          END,
+          name
+      `,
+    )
+    .all() as readonly { type: "table" | "view" | "trigger"; name: string }[];
+
+const wipeDatabase = (db: Database): void => {
+  const objects = userSchemaObjects(db);
+  if (objects.length === 0) {
+    return;
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const object of objects) {
+      const objectName = quoteSqlIdentifier(object.name);
+      if (object.type === "trigger") {
+        db.exec(`DROP TRIGGER IF EXISTS ${objectName}`);
+      } else if (object.type === "view") {
+        db.exec(`DROP VIEW IF EXISTS ${objectName}`);
+      } else {
+        db.exec(`DROP TABLE IF EXISTS ${objectName}`);
+      }
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+};
+
 const applyMigrations = (db: Database): void => {
+  const hadUserSchema = userSchemaObjects(db).some(
+    (object) => object.name !== "migrations",
+  );
   db.exec(migrationTableSql);
 
-  const appliedRows = db
+  let appliedRows = db
     .query("SELECT id FROM migrations ORDER BY id")
     .all() as readonly { id: number }[];
-  const applied = new Set(appliedRows.map((row) => row.id));
+  let applied = new Set(appliedRows.map((row) => row.id));
   const latestKnown = migrations.at(-1)?.id ?? 0;
   const unknown = appliedRows.find((row) => row.id > latestKnown);
 
@@ -791,6 +899,20 @@ const applyMigrations = (db: Database): void => {
     throw new Error(
       `Database migration ${unknown.id} is newer than this Overlearn build supports.`,
     );
+  }
+
+  if (
+    latestKnown > 0 &&
+    ((appliedRows.length > 0 && !applied.has(latestKnown)) ||
+      (appliedRows.length === 0 && hadUserSchema))
+  ) {
+    console.warn(
+      `Overlearn store schema changed to v${latestKnown}; wiping old database and recreating.`,
+    );
+    wipeDatabase(db);
+    db.exec(migrationTableSql);
+    appliedRows = [];
+    applied = new Set();
   }
 
   for (const migration of migrations) {
@@ -925,6 +1047,16 @@ const lessonFromRow = (row: LessonRow): Lesson => ({
   updatedAt: row.updated_at,
 });
 
+export const deriveTopicNodeState = (
+  topic: Readonly<{ enteredAt: string | null; isCurrent: boolean }>,
+): TopicNodeState => {
+  if (topic.isCurrent) {
+    return "current";
+  }
+
+  return topic.enteredAt === null ? "frontier" : "visited";
+};
+
 const topicBuilderFromRow = (row: TopicRow): TopicBuilder => ({
   id: toNumber(row.id),
   courseId: toNumber(row.course_id),
@@ -934,7 +1066,6 @@ const topicBuilderFromRow = (row: TopicRow): TopicBuilder => ({
   title: row.title,
   body: row.body,
   status: row.status,
-  lessonId: row.lesson_id,
   enteredAt: row.entered_at,
   isCurrent: row.is_current === 1,
   masteryConcept: row.mastery_concept,
@@ -952,9 +1083,9 @@ const topicFromBuilder = (builder: TopicBuilder): Topic => ({
   title: builder.title,
   body: builder.body,
   status: builder.status,
-  lessonId: builder.lessonId,
   enteredAt: builder.enteredAt,
   isCurrent: builder.isCurrent,
+  state: deriveTopicNodeState(builder),
   masteryConcept: builder.masteryConcept,
   createdAt: builder.createdAt,
   updatedAt: builder.updatedAt,
@@ -979,10 +1110,23 @@ const glossaryEntryFromRow = (row: GlossaryRow): GlossaryEntry => ({
   courseId: toNumber(row.course_id),
   term: row.term,
   definition: row.definition,
-  lessonId: row.lesson_id,
+  topicId: row.topic_id === null ? null : toNumber(row.topic_id),
   addedAt: row.added_at,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+});
+
+const journalEntryFromRow = (
+  row: TopicJournalEntryRow,
+): TopicJournalEntry => ({
+  id: toNumber(row.id),
+  courseId: toNumber(row.course_id),
+  topicId: toNumber(row.topic_id),
+  kind: row.kind,
+  bodyMarkdown: row.body_markdown,
+  demoId: row.demo_id === null ? null : toNumber(row.demo_id),
+  turn: row.turn === null ? null : toNumber(row.turn),
+  createdAt: row.created_at,
 });
 
 const feynmanCheckFromRow = (row: FeynmanRow): FeynmanCheck => ({
@@ -1018,6 +1162,7 @@ const demoFromRow = (row: DemoRow): Demo => ({
 const transcriptEntryFromRow = (row: TranscriptRow): TranscriptEntry => ({
   id: toNumber(row.id),
   courseId: toNumber(row.course_id),
+  topicId: row.topic_id === null ? null : toNumber(row.topic_id),
   turn: toNumber(row.turn),
   role: row.role,
   kind: row.kind,
@@ -1240,60 +1385,15 @@ export const upsertLesson = (
   input: LessonInput,
 ): Lesson => {
   requireCourse(store, courseId);
-
-  const lessonId = normalizeText(input.lessonId, "Lesson id");
-  const createdAt = input.createdAt ?? nowIso();
-  const updatedAt = input.updatedAt ?? createdAt;
-
-  store.db
-    .query(
-      `
-        INSERT INTO lessons (
-          course_id,
-          lesson_id,
-          body_markdown,
-          position,
-          source_mtime_ms,
-          created_at,
-          updated_at
-        )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ON CONFLICT(course_id, lesson_id) DO UPDATE SET
-          body_markdown = excluded.body_markdown,
-          position = excluded.position,
-          source_mtime_ms = excluded.source_mtime_ms,
-          updated_at = excluded.updated_at
-      `,
-    )
-    .run(
-      courseId,
-      lessonId,
-      input.bodyMarkdown,
-      input.position ?? 0,
-      input.sourceMtimeMs ?? null,
-      createdAt,
-      updatedAt,
-    );
-
-  const row = store.db
-    .query("SELECT * FROM lessons WHERE course_id = ?1 AND lesson_id = ?2")
-    .get(courseId, lessonId) as LessonRow | undefined;
-
-  if (isMissingRow(row)) {
-    throw new Error(`Unable to upsert lesson: ${lessonId}`);
-  }
-
-  return lessonFromRow(row);
+  void input;
+  throw new Error(
+    "Lessons have been replaced by topic journal entries in store schema v2.",
+  );
 };
 
 export const listLessons = (store: Store, courseId: number): readonly Lesson[] => {
-  const rows = store.db
-    .query(
-      "SELECT * FROM lessons WHERE course_id = ?1 ORDER BY position, lesson_id",
-    )
-    .all(courseId) as readonly LessonRow[];
-
-  return rows.map(lessonFromRow);
+  requireCourse(store, courseId);
+  return [];
 };
 
 const topicRowsForCourse = (
@@ -1409,14 +1509,13 @@ const insertTopicRow = (
           title,
           body,
           status,
-          lesson_id,
           entered_at,
           is_current,
           mastery_concept,
           created_at,
           updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
       `,
     )
     .run(
@@ -1427,7 +1526,6 @@ const insertTopicRow = (
       normalizeText(input.title, "Topic title"),
       input.body ?? "",
       input.status ?? "active",
-      nullableText(input.lessonId),
       nullableText(input.enteredAt),
       input.isCurrent === true ? 1 : 0,
       nullableText(input.masteryConcept),
@@ -1508,7 +1606,6 @@ export const upsertTopic = (
           title,
           body: isTarget ? input.body ?? "" : "",
           status: isTarget ? input.status ?? "active" : "active",
-          lessonId: isTarget ? input.lessonId ?? null : null,
           enteredAt:
             isTarget && input.isCurrent !== false
               ? input.enteredAt ?? timestamp
@@ -1538,12 +1635,11 @@ export const upsertTopic = (
                 title = ?1,
                 body = ?2,
                 status = ?3,
-                lesson_id = ?4,
-                entered_at = ?5,
-                is_current = ?6,
-                mastery_concept = ?7,
-                updated_at = ?8
-              WHERE id = ?9
+                entered_at = ?4,
+                is_current = ?5,
+                mastery_concept = ?6,
+                updated_at = ?7
+              WHERE id = ?8
             `,
           )
           .run(
@@ -1552,9 +1648,6 @@ export const upsertTopic = (
               : normalizeText(input.title, "Topic title"),
             input.body ?? existing.body,
             input.status ?? existing.status,
-            input.lessonId === undefined
-              ? existing.lesson_id
-              : nullableText(input.lessonId),
             input.enteredAt === undefined
               ? input.isCurrent === false
                 ? existing.entered_at
@@ -1756,6 +1849,10 @@ export const listTopicsDueForReview = (
 
   const due: TopicReviewDue[] = [];
   for (const topic of flattenTopicTree(readTopicTree(store, courseId))) {
+    if (topic.state === "frontier") {
+      continue;
+    }
+
     const latestScore = latestMasteryForTopic(store, courseId, topic.path);
     if (latestScore === null) {
       if (includeUnscored) {
@@ -1823,7 +1920,7 @@ export const upsertGlossaryEntry = (
             term,
             term_key,
             definition,
-            lesson_id,
+            topic_id,
             added_at,
             created_at,
             updated_at
@@ -1836,7 +1933,7 @@ export const upsertGlossaryEntry = (
         term,
         termKey,
         definition,
-        nullableText(input.lessonId),
+        input.topicId ?? null,
         addedAt,
         nowIso(),
       );
@@ -1859,7 +1956,7 @@ export const upsertGlossaryEntry = (
         SET term = ?1,
             term_key = ?2,
             definition = ?3,
-            lesson_id = ?4,
+            topic_id = ?4,
             updated_at = ?5
         WHERE id = ?6
       `,
@@ -1868,9 +1965,7 @@ export const upsertGlossaryEntry = (
       term,
       termKey,
       definition,
-      input.lessonId === undefined
-        ? existing.lesson_id
-        : nullableText(input.lessonId),
+      input.topicId === undefined ? existing.topic_id : input.topicId,
       nowIso(),
       existing.id,
     );
@@ -1903,7 +1998,7 @@ const insertGlossaryEntry = (
           term,
           term_key,
           definition,
-          lesson_id,
+          topic_id,
           added_at,
           created_at,
           updated_at
@@ -1916,7 +2011,7 @@ const insertGlossaryEntry = (
       term,
       term.toLocaleLowerCase(),
       definition,
-      nullableText(input.lessonId),
+      input.topicId ?? null,
       input.addedAt ?? nowIso(),
       nowIso(),
     );
@@ -2243,6 +2338,127 @@ export const listDemos = (store: Store, courseId: number): readonly Demo[] => {
   return rows.map(demoFromRow);
 };
 
+const requireTopicId = (
+  store: Store,
+  courseId: number,
+  topicId: number,
+): void => {
+  const row = store.db
+    .query("SELECT id FROM topics WHERE course_id = ?1 AND id = ?2")
+    .get(courseId, topicId) as { id: number } | undefined;
+  if (isMissingRow(row)) {
+    throw new Error(`Topic does not exist in course ${courseId}: ${topicId}`);
+  }
+};
+
+const requireDemoId = (
+  store: Store,
+  courseId: number,
+  demoId: number,
+): void => {
+  const row = store.db
+    .query("SELECT id FROM demos WHERE course_id = ?1 AND id = ?2")
+    .get(courseId, demoId) as { id: number } | undefined;
+  if (isMissingRow(row)) {
+    throw new Error(`Demo does not exist in course ${courseId}: ${demoId}`);
+  }
+};
+
+export const appendJournalEntry = (
+  store: Store,
+  courseId: number,
+  input: TopicJournalEntryInput,
+): TopicJournalEntry => {
+  requireCourse(store, courseId);
+  requireTopicId(store, courseId, input.topicId);
+
+  const createdAt = input.createdAt ?? nowIso();
+  const bodyMarkdown =
+    input.kind === "demo" ? null : input.bodyMarkdown;
+  const demoId = input.kind === "demo" ? input.demoId : null;
+
+  if (input.kind === "demo") {
+    requireDemoId(store, courseId, input.demoId);
+  }
+
+  const result = store.db
+    .query(
+      `
+        INSERT INTO topic_journal_entries (
+          course_id,
+          topic_id,
+          kind,
+          body_markdown,
+          demo_id,
+          turn,
+          created_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+      `,
+    )
+    .run(
+      courseId,
+      input.topicId,
+      input.kind,
+      bodyMarkdown,
+      demoId,
+      input.turn ?? null,
+      createdAt,
+    );
+
+  const row = store.db
+    .query("SELECT * FROM topic_journal_entries WHERE id = ?1")
+    .get(toNumber(result.lastInsertRowid)) as TopicJournalEntryRow | undefined;
+
+  if (isMissingRow(row)) {
+    throw new Error("Unable to append journal entry.");
+  }
+
+  return journalEntryFromRow(row);
+};
+
+export const listJournalEntries = (
+  store: Store,
+  courseId: number,
+  topicId: number,
+): readonly TopicJournalEntry[] => {
+  requireCourse(store, courseId);
+  requireTopicId(store, courseId, topicId);
+
+  const rows = store.db
+    .query(
+      `
+        SELECT *
+        FROM topic_journal_entries
+        WHERE course_id = ?1
+          AND topic_id = ?2
+        ORDER BY id
+      `,
+    )
+    .all(courseId, topicId) as readonly TopicJournalEntryRow[];
+
+  return rows.map(journalEntryFromRow);
+};
+
+const currentTopicIdForCourse = (
+  store: Store,
+  courseId: number,
+): number | null => {
+  const row = store.db
+    .query(
+      `
+        SELECT id
+        FROM topics
+        WHERE course_id = ?1
+          AND is_current = 1
+        LIMIT 1
+      `,
+    )
+    .get(courseId) as { id: number } | undefined;
+
+  return isMissingRow(row) ? null : toNumber(row.id);
+};
+
 const nextTranscriptTurn = (store: Store, courseId: number): number => {
   const row = store.db
     .query(
@@ -2262,6 +2478,13 @@ export const appendTranscriptEntry = (
   const turn = input.turn ?? nextTranscriptTurn(store, courseId);
   const kind = input.kind ?? "text";
   const ts = input.ts ?? nowIso();
+  const topicId =
+    input.topicId === undefined
+      ? currentTopicIdForCourse(store, courseId)
+      : input.topicId;
+  if (topicId !== null) {
+    requireTopicId(store, courseId, topicId);
+  }
   const payload = input.payload ?? {
     role: input.role,
     kind,
@@ -2273,6 +2496,7 @@ export const appendTranscriptEntry = (
       `
         INSERT INTO transcript (
           course_id,
+          topic_id,
           turn,
           role,
           kind,
@@ -2281,11 +2505,12 @@ export const appendTranscriptEntry = (
           ts,
           created_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
       `,
     )
     .run(
       courseId,
+      topicId,
       turn,
       input.role,
       kind,
@@ -2573,39 +2798,15 @@ const importCourseInput = (
   };
 };
 
-const importLessons = async (
+const warnSkippedLegacyLessons = async (
   dir: string,
   warnings: string[],
-): Promise<readonly LessonInput[]> => {
+): Promise<void> => {
   const lessonsDir = join(dir, "lessons");
   const names = await readDirectoryNames(lessonsDir, warnings);
-  const lessons: LessonInput[] = [];
-
-  for (const [index, fileName] of names.entries()) {
-    if (
-      fileName !== basename(fileName) ||
-      !fileName.endsWith(".md") ||
-      fileName.length <= ".md".length
-    ) {
-      continue;
-    }
-
-    const lessonPath = join(lessonsDir, fileName);
-    const body = await readOptionalText(lessonPath, warnings);
-    if (body === undefined) {
-      continue;
-    }
-
-    const fileStat = await stat(lessonPath).catch(() => undefined);
-    lessons.push({
-      lessonId: fileName.slice(0, -".md".length),
-      bodyMarkdown: body,
-      position: index,
-      sourceMtimeMs: fileStat?.mtimeMs ?? null,
-    });
+  if (names.some((name) => name.endsWith(".md"))) {
+    warnings.push("Skipped legacy lessons/ data; topic journals replace lessons.");
   }
-
-  return lessons;
 };
 
 const importDemoEntry = (
@@ -2699,7 +2900,6 @@ const importTopicTree = (
     return {
       path,
       title,
-      lessonId: stringField(node, "lesson"),
       enteredAt: stringField(node, "enteredAt"),
       isCurrent,
       position,
@@ -2764,7 +2964,6 @@ const importGlossary = (
       {
         term,
         definition,
-        lessonId: stringField(entry, "lesson"),
         addedAt,
       },
     ];
@@ -3015,7 +3214,7 @@ const readCourseFolder = async (
   const absoluteDir = resolve(dir);
   const manifest = await readOptionalJson(join(absoluteDir, "course.json"), warnings);
   const course = importCourseInput(absoluteDir, manifest, warnings);
-  const lessons = await importLessons(absoluteDir, warnings);
+  await warnSkippedLegacyLessons(absoluteDir, warnings);
   const topicImport = importTopicTree(
     isRecord(manifest) ? manifest["topics"] : undefined,
     warnings,
@@ -3052,7 +3251,6 @@ const readCourseFolder = async (
     warnings,
     payload: {
       course,
-      lessons,
       topics: topicImport.topics,
       demos: demosWithBody,
       glossary,
@@ -3075,10 +3273,6 @@ export const importCourseFolder = async (
 
   const course = withStoreTransaction(store, () => {
     const importedCourse = createCourse(store, payload.course);
-
-    payload.lessons.forEach((lesson) => {
-      upsertLesson(store, importedCourse.id, lesson);
-    });
 
     replaceTopicTree(store, importedCourse.id, payload.topics);
 

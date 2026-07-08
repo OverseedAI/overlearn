@@ -55,7 +55,7 @@ export type DemoEntry = {
 export type GlossaryEntry = {
   term: string;
   def: string;
-  lesson?: string;
+  topicId: number | null;
   addedAt: string;
 };
 
@@ -70,9 +70,9 @@ export type TopicNode = {
   path: string;
   title: string;
   body?: string;
-  lesson?: string;
   enteredAt?: string;
   current: boolean;
+  state: "frontier" | "visited" | "current";
   demos?: DemoEntry[];
   children: TopicNode[];
 };

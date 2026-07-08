@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  appendJournalEntry,
   appendMasteryEvent,
   appendTranscriptEntry,
   appendTurnEvents,
@@ -14,7 +15,7 @@ import {
   listDemos,
   listFeynmanChecks,
   listGlossary,
-  listLessons,
+  listJournalEntries,
   listMasteryEvents,
   listTurnEvents,
   openStore,
@@ -24,7 +25,6 @@ import {
   replaceTopicTree,
   upsertDemo,
   upsertGlossaryEntry,
-  upsertLesson,
   type Store,
   type Topic,
 } from "./index";
@@ -71,9 +71,9 @@ const topicSnapshot = (topic: Topic): unknown => ({
   title: topic.title,
   body: topic.body,
   status: topic.status,
-  lessonId: topic.lessonId,
   enteredAt: topic.enteredAt,
   isCurrent: topic.isCurrent,
+  state: topic.state,
   masteryConcept: topic.masteryConcept,
   position: topic.position,
   children: topic.children.map(topicSnapshot),
@@ -94,7 +94,10 @@ const courseSnapshot = (store: Store, courseId: number) => {
   }
 
   const topics = readTopicTree(store, courseId);
+  const flatTopics = flattenTopicTree(topics);
   const topicPaths = topicPathById(store, courseId);
+  const demos = listDemos(store, courseId);
+  const demoFileNameById = new Map(demos.map((demo) => [demo.id, demo.fileName]));
 
   return {
     course: {
@@ -106,17 +109,22 @@ const courseSnapshot = (store: Store, courseId: number) => {
       sourceName: course.sourceName,
       manifestExtra: course.manifestExtra,
     },
-    lessons: listLessons(store, courseId).map((lesson) => ({
-      lessonId: lesson.lessonId,
-      bodyMarkdown: lesson.bodyMarkdown,
-      position: lesson.position,
-      sourceMtimeMs: lesson.sourceMtimeMs,
-    })),
     topics: topics.map(topicSnapshot),
+    journals: flatTopics.flatMap((topic) =>
+      listJournalEntries(store, courseId, topic.id).map((entry) => ({
+        topicPath: topic.path,
+        kind: entry.kind,
+        bodyMarkdown: entry.bodyMarkdown,
+        demoFileName:
+          entry.demoId === null ? null : demoFileNameById.get(entry.demoId) ?? null,
+        turn: entry.turn,
+        createdAt: entry.createdAt,
+      })),
+    ),
     glossary: listGlossary(store, courseId).map((entry) => ({
       term: entry.term,
       definition: entry.definition,
-      lessonId: entry.lessonId,
+      topicPath: entry.topicId === null ? null : topicPaths.get(entry.topicId) ?? null,
       addedAt: entry.addedAt,
     })),
     mastery: listMasteryEvents(store, courseId).map((entry) => ({
@@ -137,7 +145,7 @@ const courseSnapshot = (store: Store, courseId: number) => {
       replacedIssuedAt: check.replacedIssuedAt,
       replacedAt: check.replacedAt,
     })),
-    demos: listDemos(store, courseId)
+    demos: demos
       .map((demo) => ({
         fileName: demo.fileName,
         title: demo.title,
@@ -170,6 +178,7 @@ const courseSnapshot = (store: Store, courseId: number) => {
       kind: entry.kind,
       content: entry.content,
       payload: entry.payload,
+      topicPath: entry.topicId === null ? null : topicPaths.get(entry.topicId) ?? null,
       ts: entry.ts,
     })),
     turnEvents: listTurnEvents(store, courseId).map((entry) => ({
@@ -197,12 +206,6 @@ describe("course bundle export/import", () => {
         updatedAt: "2026-01-01T00:00:00.000Z",
       });
 
-      upsertLesson(store, course.id, {
-        lessonId: "01-rule-of-72",
-        bodyMarkdown: "# Rule of 72\n\nDivide 72 by the growth rate.\n",
-        position: 0,
-        sourceMtimeMs: 123,
-      });
       replaceTopicTree(store, course.id, [
         {
           path: "finance",
@@ -215,7 +218,6 @@ describe("course bundle export/import", () => {
               path: "finance/rule-of-72",
               title: "Rule of 72",
               body: "Estimate doubling time.",
-              lessonId: "01-rule-of-72",
               enteredAt: "2026-01-02T00:00:00.000Z",
               isCurrent: true,
               masteryConcept: "rule-of-72",
@@ -245,7 +247,7 @@ describe("course bundle export/import", () => {
       upsertGlossaryEntry(store, course.id, {
         term: "Doubling time",
         definition: "How long until a quantity doubles.",
-        lessonId: "01-rule-of-72",
+        topicId: ruleTopic.id,
         addedAt: "2026-01-05T00:00:00.000Z",
       });
       registerFeynmanCheck(store, course.id, {
@@ -266,7 +268,7 @@ describe("course bundle export/import", () => {
         "compound-growth",
       );
 
-      upsertDemo(store, course.id, {
+      const growthDemo = upsertDemo(store, course.id, {
         topicId: ruleTopic.id,
         fileName: "growth.html",
         title: "Growth curve",
@@ -274,6 +276,20 @@ describe("course bundle export/import", () => {
         bodyFormat: "html",
         addedAt: "2026-01-08T00:00:00.000Z",
         position: 0,
+      });
+      appendJournalEntry(store, course.id, {
+        topicId: ruleTopic.id,
+        kind: "note",
+        bodyMarkdown: "# Rule of 72\n\nDivide 72 by the growth rate.\n",
+        turn: 1,
+        createdAt: "2026-01-08T00:01:00.000Z",
+      });
+      appendJournalEntry(store, course.id, {
+        topicId: ruleTopic.id,
+        kind: "demo",
+        demoId: growthDemo.id,
+        turn: 1,
+        createdAt: "2026-01-08T00:02:00.000Z",
       });
       upsertDemo(store, course.id, {
         fileName: "loose.md",
@@ -324,6 +340,21 @@ describe("course bundle export/import", () => {
         await readFile(join(exported.path, "course.json"), "utf8"),
       ) as Record<string, unknown>;
       expect(manifest["format"]).toBe(BUNDLE_FORMAT);
+      expect(manifest["lessons"]).toBeUndefined();
+      expect(manifest["journals"]).toEqual([
+        expect.objectContaining({
+          topicPath: "finance/rule-of-72",
+          kind: "note",
+          bodyMarkdown: "# Rule of 72\n\nDivide 72 by the growth rate.\n",
+          demoFile: null,
+        }),
+        expect.objectContaining({
+          topicPath: "finance/rule-of-72",
+          kind: "demo",
+          bodyMarkdown: null,
+          demoFile: "demos/002-growth.html",
+        }),
+      ]);
       expect(await readdir(join(exported.path, "topics"))).toContain(
         "001-finance.md",
       );
