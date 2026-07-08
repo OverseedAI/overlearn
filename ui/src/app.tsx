@@ -3,6 +3,7 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AppSidebar } from "@/components/app-sidebar";
+import { SessionStatusBar } from "@/components/session-status-bar";
 import { AppScaleProvider } from "@/lib/app-scale";
 import { CourseStoreProvider } from "@/lib/course-store";
 import { ProfileProvider, useProfile } from "@/lib/profile";
@@ -69,7 +70,12 @@ function AppContent() {
     <SidebarProvider>
       <AppSidebar route={route} />
       <SidebarInset className="isolate min-w-0">
-        <ScreenFor route={route} />
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col">
+            <ScreenFor route={route} />
+          </div>
+          <SessionStatusBar />
+        </div>
       </SidebarInset>
     </SidebarProvider>
   );

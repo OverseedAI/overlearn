@@ -48,6 +48,15 @@ type CourseResource = Readonly<{
   sourceName?: string | null;
 }>;
 
+type SessionSummary = Readonly<{
+  courseId: number;
+  courseTitle: string;
+  harnessId: string;
+  state: "turn-running" | "idle";
+  lastActivityAt: string;
+  startedAt: string;
+}>;
+
 const ensureLocalhost = async (): Promise<boolean> => {
   if (await canBindLocalhost()) {
     return true;
@@ -121,6 +130,34 @@ const createCourse = async (
 
   expect(response.status).toBe(201);
   return (await response.json()) as CourseResource;
+};
+
+const listSessions = async (
+  daemon: StartedContractDaemon,
+): Promise<readonly SessionSummary[]> => {
+  const response = await authFetch(daemon, "/api/sessions");
+
+  expect(response.status).toBe(200);
+  const payload = (await response.json()) as unknown;
+  expect(Array.isArray(payload)).toBe(true);
+
+  return payload as readonly SessionSummary[];
+};
+
+const findSession = (
+  sessions: readonly SessionSummary[],
+  courseId: number,
+): SessionSummary | undefined =>
+  sessions.find((session) => session.courseId === courseId);
+
+const expectValidSessionTimestamps = (session: SessionSummary): void => {
+  const lastActivityAt = session.lastActivityAt;
+  const startedAt = session.startedAt;
+
+  expect(typeof lastActivityAt).toBe("string");
+  expect(typeof startedAt).toBe("string");
+  expect(Number.isNaN(Date.parse(lastActivityAt))).toBe(false);
+  expect(Number.isNaN(Date.parse(startedAt))).toBe(false);
 };
 
 const importDemoCourse = async (
@@ -994,6 +1031,137 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
+    "exposes live sessions by API and sessions SSE with current course titles",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({ scenario: "normal" });
+      const sse = await createSseClient(daemon.url, daemon.token);
+
+      try {
+        const unauthenticated = await fetch(`${daemon.url}/api/sessions`);
+        expect(unauthenticated.status).toBe(401);
+        expect(await listSessions(daemon)).toEqual([]);
+
+        const course = await createCourse(daemon, { title: "Session Course" });
+        expect(await listSessions(daemon)).toEqual([]);
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "start session visibility",
+        );
+
+        await sse.waitFor(
+          "sessions",
+          (data) => {
+            if (!Array.isArray(data)) {
+              return false;
+            }
+            const session = findSession(data as readonly SessionSummary[], course.id);
+            return (
+              session?.courseTitle === "Session Course" &&
+              session.harnessId === "claude-code" &&
+              session.state === "idle"
+            );
+          },
+          "created sessions payload",
+        );
+
+        const runningEvent = await sse.waitFor(
+          "sessions",
+          (data) => {
+            if (!Array.isArray(data)) {
+              return false;
+            }
+            const session = findSession(data as readonly SessionSummary[], course.id);
+            return (
+              session?.courseTitle === "Session Course" &&
+              session.harnessId === "claude-code" &&
+              session.state === "turn-running"
+            );
+          },
+          "running sessions payload",
+        );
+        const runningPayload = runningEvent.data as readonly SessionSummary[];
+        const runningSession = findSession(runningPayload, course.id);
+        if (runningSession === undefined) {
+          throw new Error("Missing running session.");
+        }
+        expectValidSessionTimestamps(runningSession);
+
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "session visibility turn done",
+        );
+
+        const idleEvent = await sse.waitFor(
+          "sessions",
+          (data) => {
+            if (!Array.isArray(data)) {
+              return false;
+            }
+            const session = findSession(data as readonly SessionSummary[], course.id);
+            return session?.state === "idle";
+          },
+          "idle sessions payload",
+        );
+        const idlePayload = idleEvent.data as readonly SessionSummary[];
+        const idleSession = findSession(idlePayload, course.id);
+        if (idleSession === undefined) {
+          throw new Error("Missing idle session.");
+        }
+        expect(idleSession.courseTitle).toBe("Session Course");
+        expectValidSessionTimestamps(idleSession);
+
+        const sessions = await listSessions(daemon);
+        const apiSession = findSession(sessions, course.id);
+        if (apiSession === undefined) {
+          throw new Error("Missing API session.");
+        }
+        expect(apiSession).toMatchObject({
+          courseId: course.id,
+          courseTitle: "Session Course",
+          harnessId: "claude-code",
+          state: "idle",
+        });
+        expectValidSessionTimestamps(apiSession);
+
+        const renamed = await authFetch(daemon, `/api/courses/${course.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "Renamed Session Course" }),
+        });
+        expect(renamed.status).toBe(200);
+
+        await sse.waitFor(
+          "sessions",
+          (data) => {
+            if (!Array.isArray(data)) {
+              return false;
+            }
+            const session = findSession(data as readonly SessionSummary[], course.id);
+            return session?.courseTitle === "Renamed Session Course";
+          },
+          "renamed sessions payload",
+        );
+      } finally {
+        sse.close();
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
     "pages transcript history before a cursor",
     async () => {
       if (!(await ensureLocalhost())) {
@@ -1815,10 +1983,35 @@ describe(`daemon contract (${runtime.name})`, () => {
           (data) => harnessPayloadHasSelected(data, "codex", true),
           "first client selected codex",
         );
+        await firstClient.waitFor(
+          "sessions",
+          (data) => {
+            if (!Array.isArray(data)) {
+              return false;
+            }
+            const session = findSession(data as readonly SessionSummary[], course.id);
+            return session?.harnessId === "codex" && session.state === "idle";
+          },
+          "swap idle sessions payload",
+        );
         await secondClient.waitFor(
           "harnesses",
           (data) => harnessPayloadHasSelected(data, "codex", true),
           "second client selected codex",
+        );
+        await firstClient.waitFor(
+          "sessions",
+          (data) => {
+            if (!Array.isArray(data)) {
+              return false;
+            }
+            const session = findSession(data as readonly SessionSummary[], course.id);
+            return (
+              session?.harnessId === "codex" &&
+              session.state === "turn-running"
+            );
+          },
+          "swap greeting running sessions payload",
         );
         await firstClient.waitFor(
           "agent-stream",
@@ -2251,6 +2444,15 @@ describe(`daemon contract (${runtime.name})`, () => {
             data["message"].includes("crashed"),
           "agent crashed status",
         );
+        await sse.waitFor(
+          "sessions",
+          (data) =>
+            Array.isArray(data) &&
+            findSession(data as readonly SessionSummary[], course.id) ===
+              undefined,
+          "agent crashed sessions removal",
+        );
+        expect(await listSessions(daemon)).toEqual([]);
 
         const entries = await waitForLogEntries(
           daemon.logPath,
@@ -2389,6 +2591,16 @@ describe(`daemon contract (${runtime.name})`, () => {
             data["status"] === "session-ended",
           "session-ended status",
         );
+        await sse.waitFor(
+          "sessions",
+          (data) =>
+            Array.isArray(data) &&
+            findSession(data as readonly SessionSummary[], course.id) ===
+              undefined &&
+            findSession(data as readonly SessionSummary[], other.id) !==
+              undefined,
+          "wrap-up sessions removal",
+        );
 
         const health = (await (
           await authFetch(daemon, "/api/health")
@@ -2478,6 +2690,20 @@ describe(`daemon contract (${runtime.name})`, () => {
             ),
           "ttl session idle",
         );
+        await sse.waitFor(
+          "sessions",
+          (data) => {
+            if (!Array.isArray(data)) {
+              return false;
+            }
+            const session = findSession(data as readonly SessionSummary[], course.id);
+            return (
+              session?.courseTitle === "Idle TTL Course" &&
+              session.state === "idle"
+            );
+          },
+          "ttl session idle payload",
+        );
 
         sse.close();
         expirySse = await createSseClient(daemon.url, daemon.token);
@@ -2495,6 +2721,17 @@ describe(`daemon contract (${runtime.name})`, () => {
           "ttl idle snapshot",
         );
         await expirySse.waitFor(
+          "sessions",
+          (data) => {
+            if (!Array.isArray(data)) {
+              return false;
+            }
+            const session = findSession(data as readonly SessionSummary[], course.id);
+            return session?.state === "idle";
+          },
+          "ttl idle sessions snapshot",
+        );
+        await expirySse.waitFor(
           "courses",
           (data) =>
             isRecord(data) &&
@@ -2505,11 +2742,20 @@ describe(`daemon contract (${runtime.name})`, () => {
             ),
           "ttl expiry courses broadcast",
         );
+        await expirySse.waitFor(
+          "sessions",
+          (data) =>
+            Array.isArray(data) &&
+            findSession(data as readonly SessionSummary[], course.id) ===
+              undefined,
+          "ttl expiry sessions broadcast",
+        );
 
         const expiredHealth = (await (
           await authFetch(daemon, "/api/health")
         ).json()) as Record<string, unknown>;
         expect(expiredHealth["liveSessions"]).toEqual([]);
+        expect(await listSessions(daemon)).toEqual([]);
 
         await submitCourseMessage(
           daemon.url,

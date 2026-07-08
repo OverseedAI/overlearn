@@ -241,7 +241,7 @@ export function CourseScreen() {
   const composerDisabled = busy || ended;
 
   return (
-    <div className="flex h-dvh min-w-0 flex-col">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <AppHeader
         title={course.title}
         afterTitle={<StatusDot status={store.status} />}

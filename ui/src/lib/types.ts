@@ -208,6 +208,12 @@ export type LiveSessionSummary = {
   state: "turn-running" | "idle";
 };
 
+export type SessionSummary = LiveSessionSummary & {
+  courseTitle: string;
+  lastActivityAt: string;
+  startedAt: string;
+};
+
 export type CoursesPayload = {
   courses: CourseResource[];
   liveSessions: LiveSessionSummary[];
@@ -224,6 +230,7 @@ export type HarnessesPayload = {
 export type ServerEvents = {
   status: StatusPayload;
   courses: CoursesPayload;
+  sessions: SessionSummary[];
   harnesses: HarnessesPayload;
   message: { courseId: number; entry: TranscriptEntry };
   transcript: { courseId: number; entries: TranscriptEntry[] };
