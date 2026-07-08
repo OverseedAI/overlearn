@@ -1,9 +1,10 @@
 # Demo Guidelines
 
 Demos are interactive HTML pages the learner opens inline (sandboxed iframe) in
-the conversation or inside a lesson. Use them whenever a concept is easier to
-see or manipulate than to read: simulations, parameter sliders, step-through
-algorithms, geometry, timing behavior.
+the conversation and, when tied to a topic, as journal pins in the study rail.
+Use them whenever a concept is easier to see or manipulate than to read:
+simulations, parameter sliders, step-through algorithms, geometry, timing
+behavior.
 
 Authoring:
 
@@ -15,11 +16,11 @@ Authoring:
 - Prefer tiny demos that isolate one idea over kitchen-sink dashboards.
 - Make demos inspectable and resettable: expose the controls that matter, add a
   reset control when state can drift, and label units and axes.
-- Tie each demo to the current lesson objective, and attach it to the relevant
-  topic with `topicPath`.
+- Tie each demo to the current teaching objective. Omit `topicPath` for the
+  current topic, and pass `topicPath` only for an intentional tangent.
 
 Surfacing:
 
 - Emitting a demo drops an inline demo card into the conversation.
-- Reference a demo inside a lesson with a `:::demo <file.html> "Title"` line so
-  it renders as an embedded card in the study rail.
+- Do not add manual journal references for demos; use `emit_demo` and let the
+  protocol's journal pin contract handle study-rail surfacing.
