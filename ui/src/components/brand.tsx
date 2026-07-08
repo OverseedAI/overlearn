@@ -37,7 +37,9 @@ export function OverlearnWordmark({ className }: { className?: string }) {
       )}
     >
       over
-      <SproutMark className="mx-[-0.03em] h-[1.08em] w-auto self-end text-success" />
+      {/* Negative margins collapse the sprout's advance to roughly an "l";
+          the leaves overhang the neighboring letters above x-height. */}
+      <SproutMark className="mx-[-0.24em] h-[1.08em] w-auto text-success" />
       earn
     </span>
   );
