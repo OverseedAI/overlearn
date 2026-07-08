@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  BookOpenText,
   Check,
   ChevronRight,
   CircleAlert,
+  FileText,
   Loader2,
   Wrench,
   X,
@@ -136,11 +136,9 @@ export function TypingIndicator() {
 function Entry({
   entry,
   courseId,
-  onOpenLesson,
 }: {
   entry: TranscriptEntry;
   courseId: number;
-  onOpenLesson: (lessonId: string) => void;
 }) {
   const kind = "kind" in entry ? (entry.kind ?? "text") : "text";
 
@@ -161,25 +159,16 @@ function Entry({
     );
   }
 
-  if (kind === "lesson" && "lesson" in entry) {
+  if (kind === "journal-note" && "markdown" in entry) {
     return (
-      <EntryShell label="Agent · Lesson">
-        <button
-          type="button"
-          onClick={() => onOpenLesson(entry.lesson)}
-          className="flex w-full items-center gap-3 rounded-lg border bg-card px-4 py-3 text-left transition-colors hover:bg-accent"
-        >
-          <BookOpenText className="size-4 shrink-0 text-primary" />
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-sm font-medium">
-              {entry.lesson}
-            </span>
-            <span className="block text-sm text-muted-foreground">
-              Lesson updated — open in the study rail
-            </span>
-          </span>
-          <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-        </button>
+      <EntryShell label="Agent · Study note">
+        <div className="rounded-lg border bg-card px-4 py-3">
+          <p className="mb-2 flex items-center gap-2 text-sm font-medium">
+            <FileText className="size-4 shrink-0 text-primary" />
+            Journal note
+          </p>
+          <Markdown text={entry.markdown} className="text-sm" />
+        </div>
       </EntryShell>
     );
   }
@@ -225,7 +214,7 @@ function Entry({
  * Older daemons persisted a row per generic harness tool call, with the raw
  * ACP call id when the harness sent no name ("call_abc123 completed").
  * These are working noise, not learning record — hide them. Teaching writes
- * ("recorded mastery …", "wrote lesson …") keep their readable rows.
+ * ("recorded mastery …", "upserted glossary …") keep their readable rows.
  */
 function isLegacyToolCallNoise(entry: TranscriptEntry): boolean {
   return (
@@ -276,7 +265,6 @@ export function Transcript({
   courseId,
   activity,
   showTyping,
-  onOpenLesson,
   onLoadOlder,
   onPrependEntries,
 }: {
@@ -284,7 +272,6 @@ export function Transcript({
   courseId: number;
   activity?: AgentActivity | undefined;
   showTyping: boolean;
-  onOpenLesson: (lessonId: string) => void;
   onLoadOlder?: (beforeId: number) => Promise<TranscriptPage>;
   onPrependEntries?: (entries: TranscriptEntry[]) => void;
 }) {
@@ -405,7 +392,6 @@ export function Transcript({
             key={entry.id}
             entry={entry}
             courseId={courseId}
-            onOpenLesson={onOpenLesson}
           />
         ))}
         {activity ? <LiveActivity activity={activity} /> : null}

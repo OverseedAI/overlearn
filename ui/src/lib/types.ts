@@ -52,6 +52,30 @@ export type DemoEntry = {
   addedAt: string;
 };
 
+export type JournalDemoRef = {
+  id: number;
+  file: string;
+  title: string | null;
+  fileName: string | null;
+};
+
+export type TopicJournalEntry = {
+  id: number;
+  kind: "note" | "demo" | "summary";
+  topicId: number;
+  bodyMarkdown?: string;
+  demoId?: number | null;
+  demo?: JournalDemoRef | null;
+  turn: number | null;
+  createdAt: string;
+};
+
+export type JournalSnapshot = {
+  entries: TopicJournalEntry[];
+  totalCount: number;
+  limit: number | null;
+};
+
 export type GlossaryEntry = {
   term: string;
   def: string;
@@ -67,6 +91,7 @@ export type MasteryEntry = {
 };
 
 export type TopicNode = {
+  id: number;
   path: string;
   title: string;
   body?: string;
@@ -74,6 +99,7 @@ export type TopicNode = {
   current: boolean;
   state: "frontier" | "visited" | "current";
   demos?: DemoEntry[];
+  journal: JournalSnapshot;
   children: TopicNode[];
 };
 
@@ -105,7 +131,7 @@ export type TranscriptEntry = TranscriptEntryBase &
       file: string;
       title?: string;
     }
-    | { role: "agent"; kind: "lesson"; lesson: string }
+    | { role: "agent"; kind: "journal-note"; markdown: string }
     | {
       role: "agent";
       kind: "feynman-check";
@@ -132,17 +158,6 @@ export type TranscriptPage = {
   nextBeforeId: number | null;
 };
 
-export type RenderedLesson = {
-  id: string;
-  html: string;
-  modifiedAtMs: number;
-};
-
-export type LessonSnapshot = {
-  lessons: RenderedLesson[];
-  selectedLessonId: string | undefined;
-};
-
 export type CourseDemo = {
   id: number;
   topicId: number | null;
@@ -155,7 +170,6 @@ export type CourseDemo = {
 
 export type CourseState = {
   course: CourseResource;
-  lessons: LessonSnapshot;
   topics: TopicNode[];
   glossary: GlossaryEntry[];
   mastery: MasteryEntry[];
@@ -233,7 +247,6 @@ export type ServerEvents = {
   feynman: { courseId: number; activeCheck: ActiveFeynmanCheck | null };
   "tool-write": { courseId: number } & Record<string, unknown>;
   "agent-stream": AgentStreamPayload;
-  lesson: { courseId: number } & Record<string, unknown>;
 };
 
 export type TopicTreeInput = {

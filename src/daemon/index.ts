@@ -32,7 +32,7 @@ import {
   listDemos,
   listGlossary,
   listLatestMasteryScores,
-  listLessons,
+  listJournalEntries,
   openStore,
   pageTranscript,
   pageTranscriptBefore,
@@ -47,11 +47,11 @@ import {
   type Demo,
   type FeynmanCheck,
   type GlossaryEntry as StoreGlossaryEntry,
-  type Lesson,
   type MasteryEvent,
   type Profile,
   type Store,
   type Topic,
+  type TopicJournalEntry as StoreTopicJournalEntry,
   type TopicTreeInput,
   type TranscriptEntry as StoreTranscriptEntry,
 } from "../store";
@@ -128,6 +128,30 @@ type DemoEntry = Readonly<{
   addedAt: string;
 }>;
 
+type JournalDemoRef = Readonly<{
+  id: number;
+  file: string;
+  title: string | null;
+  fileName: string | null;
+}>;
+
+type JournalEntry = Readonly<{
+  id: number;
+  kind: StoreTopicJournalEntry["kind"];
+  topicId: number;
+  bodyMarkdown?: string;
+  demoId?: number | null;
+  demo?: JournalDemoRef | null;
+  turn: number | null;
+  createdAt: string;
+}>;
+
+type JournalSnapshot = Readonly<{
+  entries: readonly JournalEntry[];
+  totalCount: number;
+  limit: number | null;
+}>;
+
 type GlossaryEntry = Readonly<{
   term: string;
   def: string;
@@ -143,6 +167,7 @@ type MasteryEntry = Readonly<{
 }>;
 
 type TopicNode = Readonly<{
+  id: number;
   path: string;
   title: string;
   body?: string;
@@ -150,6 +175,7 @@ type TopicNode = Readonly<{
   current: boolean;
   state: Topic["state"];
   demos?: readonly DemoEntry[];
+  journal: JournalSnapshot;
   children: readonly TopicNode[];
 }>;
 
@@ -187,8 +213,8 @@ type TranscriptEntry = TranscriptEntryBase &
     }>
     | Readonly<{
       role: "agent";
-      kind: "lesson";
-      lesson: string;
+      kind: "journal-note";
+      markdown: string;
     }>
     | Readonly<{
       role: "agent";
@@ -989,6 +1015,62 @@ const uiDemo = (demo: Demo): DemoEntry => ({
   addedAt: demo.addedAt,
 });
 
+const journalEntriesPerTopicLimit = 5;
+
+const uiJournalEntry = (
+  entry: StoreTopicJournalEntry,
+  demosById: ReadonlyMap<number, Demo>,
+): JournalEntry => {
+  if (entry.kind === "demo") {
+    const demo = entry.demoId === null ? undefined : demosById.get(entry.demoId);
+
+    return {
+      id: entry.id,
+      kind: entry.kind,
+      topicId: entry.topicId,
+      demoId: entry.demoId,
+      demo:
+        demo === undefined
+          ? null
+          : {
+              id: demo.id,
+              file: demoFileKey(demo),
+              title: demo.title,
+              fileName: demo.fileName,
+            },
+      turn: entry.turn,
+      createdAt: entry.createdAt,
+    };
+  }
+
+  return {
+    id: entry.id,
+    kind: entry.kind,
+    topicId: entry.topicId,
+    bodyMarkdown: entry.bodyMarkdown ?? "",
+    turn: entry.turn,
+    createdAt: entry.createdAt,
+  };
+};
+
+const uiJournalSnapshot = (
+  store: Store,
+  courseId: number,
+  topic: Topic,
+  demosById: ReadonlyMap<number, Demo>,
+): JournalSnapshot => {
+  const entries = listJournalEntries(store, courseId, topic.id);
+  const visibleEntries = topic.isCurrent
+    ? entries
+    : entries.slice(-journalEntriesPerTopicLimit);
+
+  return {
+    entries: visibleEntries.map((entry) => uiJournalEntry(entry, demosById)),
+    totalCount: entries.length,
+    limit: topic.isCurrent ? null : journalEntriesPerTopicLimit,
+  };
+};
+
 const uiGlossaryEntry = (entry: StoreGlossaryEntry): GlossaryEntry => ({
   term: entry.term,
   def: entry.definition,
@@ -1018,9 +1100,13 @@ const demosByTopicId = (
 };
 
 const uiTopic = (
+  store: Store,
+  courseId: number,
   topic: Topic,
   groupedDemos: ReadonlyMap<number | null, readonly DemoEntry[]>,
+  demosById: ReadonlyMap<number, Demo>,
 ): TopicNode => ({
+  id: topic.id,
   path: topic.path,
   title: topic.title,
   ...(topic.body.length === 0 ? {} : { body: topic.body }),
@@ -1028,7 +1114,10 @@ const uiTopic = (
   current: topic.isCurrent,
   state: topic.state,
   demos: groupedDemos.get(topic.id) ?? [],
-  children: topic.children.map((child) => uiTopic(child, groupedDemos)),
+  journal: uiJournalSnapshot(store, courseId, topic, demosById),
+  children: topic.children.map((child) =>
+    uiTopic(store, courseId, child, groupedDemos, demosById),
+  ),
 });
 
 const activeFeynman = (check: FeynmanCheck | null): ActiveFeynmanCheck | undefined =>
@@ -1082,14 +1171,15 @@ const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
     };
   }
 
-  if (entry.kind === "lesson") {
+  if (entry.kind === "journal-note") {
+    const markdown = payload["markdown"];
     return {
       ...base,
       role: "agent",
-      kind: "lesson",
-      lesson:
-        typeof payload["lessonId"] === "string" && payload["lessonId"].length > 0
-          ? payload["lessonId"]
+      kind: "journal-note",
+      markdown:
+        typeof markdown === "string" && markdown.length > 0
+          ? markdown
           : entry.content,
     };
   }
@@ -1171,35 +1261,6 @@ const readTranscriptBefore = (
   };
 };
 
-const lessonSnapshot = (
-  lessons: readonly Lesson[],
-  glossary: readonly GlossaryEntry[],
-  demoFiles: ReadonlySet<string>,
-) => {
-  const rendered = lessons.map((lesson) => ({
-    id: lesson.lessonId,
-    html: renderMarkdown(lesson.bodyMarkdown, { glossary, demoFiles }),
-    modifiedAtMs:
-      lesson.sourceMtimeMs ??
-      Date.parse(lesson.updatedAt) ??
-      Date.parse(lesson.createdAt),
-  }));
-  const selected = rendered.reduce<
-    { id: string; modifiedAtMs: number } | undefined
-  >((latest, lesson) => {
-    if (latest === undefined || lesson.modifiedAtMs >= latest.modifiedAtMs) {
-      return { id: lesson.id, modifiedAtMs: lesson.modifiedAtMs };
-    }
-
-    return latest;
-  }, undefined);
-
-  return {
-    lessons: rendered,
-    selectedLessonId: selected?.id,
-  };
-};
-
 const courseView = (store: Store, courseId: number) => {
   const course = getCourse(store, courseId);
   if (course === undefined) {
@@ -1208,20 +1269,18 @@ const courseView = (store: Store, courseId: number) => {
 
   const demos = listDemos(store, courseId);
   const groupedDemos = demosByTopicId(demos);
-  const demoFiles = new Set(demos.map(demoFileKey));
+  const demosById = new Map(demos.map((demo) => [demo.id, demo]));
   const glossary = listGlossary(store, courseId).map(uiGlossaryEntry);
 
   return {
     course,
     transcript: readTranscriptTail(store, courseId),
-    lessons: lessonSnapshot(listLessons(store, courseId), glossary, demoFiles),
     glossary,
     topics: readTopicTree(store, courseId).map((topic) =>
-      uiTopic(topic, groupedDemos),
+      uiTopic(store, courseId, topic, groupedDemos, demosById),
     ),
     unassignedDemos: groupedDemos.get(null) ?? [],
     masteryScores: listLatestMasteryScores(store, courseId).map(uiMasteryEntry),
-    demoFiles,
     activeFeynmanCheck: activeFeynman(getActiveFeynmanCheck(store, courseId)),
   };
 };
@@ -1234,7 +1293,6 @@ const courseState = (store: Store, courseId: number): Record<string, unknown> | 
 
   return {
     course: courseResource(view.course),
-    lessons: view.lessons,
     topics: view.topics,
     glossary: view.glossary,
     mastery: view.masteryScores,
@@ -1694,7 +1752,7 @@ export const runDaemon = async (
     flushPendingAgentText(event.courseId);
     const activeTurn = event.activeTurn;
     const attachment = event.attachment;
-    // Demo and lesson writes render as rich transcript cards; every other
+    // Demo and journal-note writes render as rich transcript cards; every other
     // teaching write keeps its readable tool-call row.
     const entry =
       attachment?.kind === "demo"
@@ -1710,15 +1768,19 @@ export const runDaemon = async (
               ...(attachment.title === undefined ? {} : { title: attachment.title }),
             },
           })
-        : attachment?.kind === "lesson"
+        : attachment?.kind === "journal-note"
           ? appendUiTranscript(store, event.courseId, {
               ...(activeTurn === undefined
-                ? {}
-                : { turn: activeTurn.turn, topicId: activeTurn.topicId }),
+                ? { topicId: attachment.topicId }
+                : { turn: activeTurn.turn, topicId: attachment.topicId }),
               role: "agent",
-              kind: "lesson",
-              content: attachment.lessonId,
-              payload: { lessonId: attachment.lessonId },
+              kind: "journal-note",
+              content: attachment.markdown,
+              payload: {
+                entryId: attachment.entryId,
+                topicId: attachment.topicId,
+                markdown: attachment.markdown,
+              },
             })
           : appendUiTranscript(store, event.courseId, {
               ...(activeTurn === undefined
@@ -1735,9 +1797,6 @@ export const runDaemon = async (
 
     sseHub.broadcast("message", { courseId: event.courseId, entry });
     sseHub.broadcast("tool-write", event);
-    if (attachment?.kind === "lesson") {
-      sseHub.broadcast("lesson", { courseId: event.courseId });
-    }
     broadcastCourseCollections(event.courseId);
   };
 
@@ -1852,7 +1911,7 @@ export const runDaemon = async (
 
     // Generic harness tool calls are working noise, not part of the learning
     // record — the live activity stream shows them in flight, and meaningful
-    // writes (lessons, mastery, glossary) get readable rows via
+    // writes (mastery, glossary, etc.) get readable rows via
     // onTeachingWrite. Only agent text is persisted from the raw stream.
   };
 

@@ -1,38 +1,119 @@
+import { ExternalLink, FileText } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { LessonHtml } from "@/components/lesson-html";
-import type { GlossaryEntry, LessonSnapshot } from "@/lib/types";
+import { api } from "@/lib/api";
+import { Markdown } from "@/lib/markdown";
+import type { GlossaryEntry, TopicJournalEntry, TopicNode } from "@/lib/types";
 
-export type RailTab = "lesson" | "glossary";
+export type RailTab = "journal" | "glossary";
+
+function JournalEntryLine({
+  courseId,
+  entry,
+}: {
+  courseId: number;
+  entry: TopicJournalEntry;
+}) {
+  if (entry.kind === "demo") {
+    const demo = entry.demo;
+    const title =
+      demo?.title ?? demo?.fileName ?? demo?.file ?? `Demo ${entry.demoId ?? ""}`;
+
+    return (
+      <div className="px-4 py-3">
+        {demo === null || demo === undefined ? (
+          <p className="text-sm text-muted-foreground">{title}</p>
+        ) : (
+          <a
+            href={api.demoUrl(courseId, demo.file)}
+            target="_blank"
+            rel="noreferrer"
+            className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium hover:bg-accent"
+          >
+            <ExternalLink className="size-4 shrink-0 text-muted-foreground" />
+            <span className="truncate">{title}</span>
+          </a>
+        )}
+      </div>
+    );
+  }
+
+  const isSummary = entry.kind === "summary";
+
+  return (
+    <div
+      className={
+        isSummary
+          ? "border-l-2 border-primary/60 bg-muted/40 px-4 py-3"
+          : "px-4 py-3"
+      }
+    >
+      {isSummary ? (
+        <p className="mb-2 flex items-center gap-2 text-sm font-medium">
+          <FileText className="size-4 shrink-0 text-primary" />
+          Topic summary
+        </p>
+      ) : null}
+      <Markdown
+        text={entry.bodyMarkdown ?? ""}
+        className="text-sm text-pretty"
+      />
+    </div>
+  );
+}
+
+function JournalRail({
+  courseId,
+  topic,
+}: {
+  courseId: number;
+  topic: TopicNode | undefined;
+}) {
+  const journal = topic?.journal;
+  const entries = journal?.entries ?? [];
+
+  if (entries.length === 0) {
+    return (
+      <p className="px-4 py-6 text-sm text-pretty text-muted-foreground">
+        No notes yet — the mentor writes study notes here as you explore this
+        topic.
+      </p>
+    );
+  }
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="border-b px-4 py-3">
+        <h2 className="truncate text-sm font-medium">
+          {topic?.title ?? "Topic journal"}
+        </h2>
+      </div>
+      <div className="divide-y">
+        {entries.map((entry) => (
+          <JournalEntryLine
+            key={entry.id}
+            courseId={courseId}
+            entry={entry}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function StudyRail({
   courseId,
-  lessons,
+  topic,
   glossary,
   tab,
   onTabChange,
-  selectedLessonId,
-  onSelectLesson,
 }: {
   courseId: number;
-  lessons: LessonSnapshot;
+  topic: TopicNode | undefined;
   glossary: GlossaryEntry[];
   tab: RailTab;
   onTabChange: (tab: RailTab) => void;
-  selectedLessonId: string | undefined;
-  onSelectLesson: (id: string) => void;
 }) {
-  const sorted = [...lessons.lessons].sort(
-    (a, b) => b.modifiedAtMs - a.modifiedAtMs,
-  );
-  const selected =
-    sorted.find((lesson) => lesson.id === selectedLessonId) ?? sorted[0];
+  const noteCount = topic?.journal.totalCount ?? 0;
 
   return (
     <Tabs
@@ -42,7 +123,14 @@ export function StudyRail({
     >
       <div className="flex h-12 shrink-0 items-center border-b px-3">
         <TabsList className="w-full">
-          <TabsTrigger value="lesson">Lesson</TabsTrigger>
+          <TabsTrigger value="journal">
+            Journal
+            {noteCount > 0 ? (
+              <span className="text-muted-foreground tabular-nums">
+                {noteCount}
+              </span>
+            ) : null}
+          </TabsTrigger>
           <TabsTrigger value="glossary">
             Glossary
             {glossary.length > 0 ? (
@@ -55,41 +143,10 @@ export function StudyRail({
       </div>
 
       <TabsContent
-        value="lesson"
+        value="journal"
         className="flex min-h-0 flex-1 flex-col data-[state=inactive]:hidden"
       >
-        {sorted.length === 0 ? (
-          <p className="px-4 py-6 text-sm text-muted-foreground">
-            No lesson yet. The agent writes lessons here as you learn.
-          </p>
-        ) : (
-          <>
-            {sorted.length > 1 ? (
-              <div className="shrink-0 border-b p-3">
-                <Select
-                  value={selected?.id ?? ""}
-                  onValueChange={onSelectLesson}
-                >
-                  <SelectTrigger size="sm" className="w-full" aria-label="Lesson">
-                    <SelectValue placeholder="Choose a lesson" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {sorted.map((lesson) => (
-                      <SelectItem key={lesson.id} value={lesson.id}>
-                        {lesson.id}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            ) : null}
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              {selected ? (
-                <LessonHtml html={selected.html} courseId={courseId} />
-              ) : null}
-            </div>
-          </>
-        )}
+        <JournalRail courseId={courseId} topic={topic} />
       </TabsContent>
 
       <TabsContent

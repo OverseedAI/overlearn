@@ -14,6 +14,7 @@ import {
   createTeachingMcpServer,
   createTeachingMcpHttpHandler,
   teachingMcpServerName,
+  type ActiveTeachingTurn,
   type TeachingSessionScope,
   type TeachingToolName,
   type TeachingWriteEvent,
@@ -25,6 +26,7 @@ import {
   listDemos,
   listFeynmanChecks,
   listGlossary,
+  listJournalEntries,
   listLatestMasteryScores,
   openStore,
   readTopicTree,
@@ -39,7 +41,7 @@ const expectedToolNames: readonly TeachingToolName[] = [
   "get_course_state",
   "upsert_topic",
   "emit_demo",
-  "upsert_lesson",
+  "append_lesson_note",
   "record_mastery",
   "feynman_check",
   "upsert_glossary_entry",
@@ -53,6 +55,7 @@ type Fixture = Readonly<{
   draftCourse: Course;
   activeCourse: Course;
   scopes: ReadonlyMap<string, TeachingSessionScope>;
+  setActiveTurn: (token: string, turn: ActiveTeachingTurn | null) => void;
   writes: TeachingWriteEvent[];
 }>;
 
@@ -172,10 +175,26 @@ const withFixture = async (
       });
     }
 
+    const activeTurns = new Map<string, ActiveTeachingTurn | null>();
     const scopes = new Map<string, TeachingSessionScope>([
-      ["token-a", { courseId: draftCourse.id }],
-      ["token-b", { courseId: activeCourse.id }],
+      [
+        "token-a",
+        {
+          courseId: draftCourse.id,
+          getActiveTurn: () => activeTurns.get("token-a") ?? undefined,
+        },
+      ],
+      [
+        "token-b",
+        {
+          courseId: activeCourse.id,
+          getActiveTurn: () => activeTurns.get("token-b") ?? undefined,
+        },
+      ],
     ]);
+    const setActiveTurn = (token: string, turn: ActiveTeachingTurn | null) => {
+      activeTurns.set(token, turn);
+    };
     const writes: TeachingWriteEvent[] = [];
 
     await run({
@@ -183,6 +202,7 @@ const withFixture = async (
       draftCourse,
       activeCourse,
       scopes,
+      setActiveTurn,
       writes,
     });
   } finally {
@@ -273,6 +293,12 @@ const exerciseDraftTools = async (
     position: 2,
   });
   const currentTopicId = asRecord(topicResult["topic"], "topic")["id"];
+  expect(currentTopicId).toBeNumber();
+  fixture.setActiveTurn("token-a", {
+    turn: 26,
+    topicId: currentTopicId as number,
+    topicPath: "finance/rule-of-72",
+  });
 
   const glossaryResult = parseResult(
     await withTimeout(
@@ -334,13 +360,56 @@ const exerciseDraftTools = async (
     },
   });
 
+  const noteResult = parseResult(
+    await withTimeout(
+      client.callTool("append_lesson_note", {
+        markdown: "The Rule of 72 estimates doubling time as 72 / rate.",
+      }),
+      3_000,
+      "append_lesson_note default",
+    ),
+  );
+  expect(noteResult).toMatchObject({
+    ok: true,
+    entry: {
+      topicId: currentTopicId,
+      kind: "note",
+      bodyMarkdown: "The Rule of 72 estimates doubling time as 72 / rate.",
+      turn: 26,
+    },
+  });
+
+  const tangentTopic = upsertTopic(fixture.store, fixture.draftCourse.id, {
+    path: "finance/tangent",
+    title: "Finance tangent",
+    isCurrent: false,
+  });
+  const tangentNoteResult = parseResult(
+    await withTimeout(
+      client.callTool("append_lesson_note", {
+        markdown: "This tangent belongs off the main Rule of 72 path.",
+        topicPath: tangentTopic.path,
+      }),
+      3_000,
+      "append_lesson_note tangent",
+    ),
+  );
+  expect(tangentNoteResult).toMatchObject({
+    ok: true,
+    entry: {
+      topicId: tangentTopic.id,
+      kind: "note",
+      turn: 26,
+    },
+  });
+
   const demoResult = parseResult(
     await withTimeout(
       client.callTool("emit_demo", {
         title: "Growth table",
-        body: "| rate | years |\n| --- | --- |\n| 6% | 12 |",
-        format: "markdown",
-        topicPath: "finance/rule-of-72",
+        body: "<table><tr><td>6%</td><td>12 years</td></tr></table>",
+        format: "html",
+        fileName: "growth.html",
       }),
       3_000,
       "emit_demo",
@@ -350,22 +419,61 @@ const exerciseDraftTools = async (
     ok: true,
     demo: {
       title: "Growth table",
-      format: "markdown",
+      topicId: currentTopicId,
+      fileName: "growth.html",
+      file: "growth.html",
+      format: "html",
     },
   });
 
-  const lessonResult = await withTimeout(
-    client.callTool("upsert_lesson", {
-      lessonId: "rule-of-72",
-      body: '# Rule of 72\n\nDivide 72 by the growth rate.\n\n:::demo growth.html "Growth table"',
-    }),
-    3_000,
-    "upsert_lesson",
+  const updatedDemoResult = parseResult(
+    await withTimeout(
+      client.callTool("emit_demo", {
+        title: "Growth table updated",
+        body: "<table><tr><td>8%</td><td>9 years</td></tr></table>",
+        format: "html",
+        fileName: "growth.html",
+      }),
+      3_000,
+      "emit_demo update",
+    ),
   );
-  expect(lessonResult.isError).toBe(true);
-  expect(parseResult(lessonResult)["error"]).toContain(
-    "topic journal entries replace lessons",
+  expect(updatedDemoResult).toMatchObject({
+    ok: true,
+    demo: {
+      title: "Growth table updated",
+      topicId: currentTopicId,
+      fileName: "growth.html",
+      file: "growth.html",
+      format: "html",
+    },
+  });
+
+  fixture.setActiveTurn("token-a", { turn: 27, topicId: null, topicPath: null });
+  const chatOnlyDemoResult = parseResult(
+    await withTimeout(
+      client.callTool("emit_demo", {
+        title: "Chat only",
+        body: "no topic",
+        format: "text",
+        fileName: "chat-only.txt",
+      }),
+      3_000,
+      "emit_demo chat only",
+    ),
   );
+  expect(chatOnlyDemoResult).toMatchObject({
+    ok: true,
+    demo: {
+      title: "Chat only",
+      topicId: null,
+    },
+  });
+  fixture.setActiveTurn("token-a", {
+    turn: 26,
+    topicId: currentTopicId as number,
+    topicPath: "finance/rule-of-72",
+  });
 
   const state = parseResult(
     await withTimeout(
@@ -397,14 +505,57 @@ const exerciseDraftTools = async (
 
   const rootTopics = asArray(state["topics"], "topics");
   expect(rootTopics).toHaveLength(1);
-  expect(asRecord(rootTopics[0], "root topic")).toMatchObject({
+  const rootTopic = asRecord(rootTopics[0], "root topic");
+  expect(rootTopic).toMatchObject({
     path: "finance",
-    children: [
-      expect.objectContaining({
-        path: "finance/rule-of-72",
-        state: "current",
-        mastery: expect.objectContaining({ score: 82 }),
-      }),
+  });
+  const childTopics = asArray(rootTopic["children"], "finance children");
+  const ruleTopic = asRecord(
+    childTopics.find(
+      (topic) =>
+        asRecord(topic, "candidate child")["path"] === "finance/rule-of-72",
+    ),
+    "rule topic",
+  );
+  expect(ruleTopic["path"]).toBe("finance/rule-of-72");
+  expect(ruleTopic["state"]).toBe("current");
+  expect(asRecord(ruleTopic["mastery"], "rule mastery")["score"]).toBe(82);
+  const ruleJournal = asRecord(ruleTopic["journal"], "rule journal");
+  expect(ruleJournal["totalCount"]).toBe(2);
+  const ruleJournalEntries = asArray(ruleJournal["entries"], "rule journal entries");
+  expect(ruleJournalEntries).toHaveLength(2);
+  expect(ruleJournalEntries.map((entry) => asRecord(entry, "journal entry")["kind"])).toEqual([
+    "note",
+    "demo",
+  ]);
+  expect(asRecord(ruleJournalEntries[0], "note entry")).toMatchObject({
+    kind: "note",
+    bodyMarkdown: "The Rule of 72 estimates doubling time as 72 / rate.",
+    turn: 26,
+  });
+  expect(asRecord(ruleJournalEntries[1], "demo pin")).toMatchObject({
+    kind: "demo",
+    turn: 26,
+    demo: {
+      title: "Growth table updated",
+      file: "growth.html",
+    },
+  });
+
+  const tangentStateTopic = asRecord(
+    childTopics.find(
+      (topic) => asRecord(topic, "candidate child")["path"] === tangentTopic.path,
+    ),
+    "tangent topic",
+  );
+  expect(asRecord(tangentStateTopic["journal"], "tangent journal")).toMatchObject({
+    totalCount: 1,
+    entries: [
+      {
+        kind: "note",
+        bodyMarkdown: "This tangent belongs off the main Rule of 72 path.",
+        turn: 26,
+      },
     ],
   });
 
@@ -431,32 +582,56 @@ const exerciseDraftTools = async (
     "upsert_glossary_entry",
     "record_mastery",
     "feynman_check",
+    "append_lesson_note",
+    "append_lesson_note",
+    "emit_demo",
+    "emit_demo",
     "emit_demo",
   ]);
   expect(
     fixture.writes.every((event) => event.courseId === fixture.draftCourse.id),
   ).toBe(true);
   const demoId = asRecord(demoResult["demo"], "demo")["id"];
+  const noteEntryId = asRecord(noteResult["entry"], "note entry result")["id"];
+  expect(demoId).toBeNumber();
+  expect(noteEntryId).toBeNumber();
+  expect(asRecord(updatedDemoResult["demo"], "updated demo")["id"]).toBe(demoId);
   expect(
     fixture.writes.find((event) => event.tool === "emit_demo")?.attachment,
   ).toEqual({
     kind: "demo",
-    // Markdown demos fall back to the synthesized servable .html key.
-    file: `demo-${demoId}.html`,
+    file: "growth.html",
     title: "Growth table",
   });
-  expect(fixture.writes.find((event) => event.tool === "upsert_lesson")).toBeUndefined();
+  expect(
+    fixture.writes.find((event) => event.tool === "append_lesson_note")
+      ?.attachment,
+  ).toEqual({
+    kind: "journal-note",
+    entryId: noteEntryId as number,
+    topicId: currentTopicId as number,
+    markdown: "The Rule of 72 estimates doubling time as 72 / rate.",
+  });
 
   expect(getCourse(fixture.store, fixture.draftCourse.id)).toMatchObject({
     title: "Draft Finance",
     description: "Draft description",
   });
-  expect(readTopicTree(fixture.store, fixture.draftCourse.id)).toMatchObject([
-    {
-      path: "finance",
-      children: [{ path: "finance/rule-of-72" }],
-    },
+  const persistedTopics = readTopicTree(fixture.store, fixture.draftCourse.id);
+  expect(persistedTopics.map((topic) => topic.path)).toEqual(["finance"]);
+  expect(persistedTopics[0]?.children.map((topic) => topic.path)).toEqual([
+    "finance/rule-of-72",
+    "finance/tangent",
   ]);
+  expect(persistedTopics[0]?.children[0]).toMatchObject({
+    path: "finance/rule-of-72",
+    isCurrent: true,
+  });
+  expect(persistedTopics[0]?.children[1]).toMatchObject({
+    path: "finance/tangent",
+    isCurrent: false,
+    enteredAt: null,
+  });
   expect(listGlossary(fixture.store, fixture.draftCourse.id)).toHaveLength(1);
   expect(listLatestMasteryScores(fixture.store, fixture.draftCourse.id)).toHaveLength(
     1,
@@ -464,7 +639,20 @@ const exerciseDraftTools = async (
   expect(listFeynmanChecks(fixture.store, fixture.draftCourse.id)).toHaveLength(
     1,
   );
-  expect(listDemos(fixture.store, fixture.draftCourse.id)).toHaveLength(1);
+  expect(listDemos(fixture.store, fixture.draftCourse.id)).toHaveLength(2);
+  const currentJournal = listJournalEntries(
+    fixture.store,
+    fixture.draftCourse.id,
+    currentTopicId as number,
+  );
+  expect(currentJournal.map((entry) => entry.kind)).toEqual(["note", "demo"]);
+  expect(currentJournal[1]?.demoId).toBe(demoId as number);
+  expect(currentJournal[1]?.turn).toBe(26);
+  expect(
+    listJournalEntries(fixture.store, fixture.draftCourse.id, tangentTopic.id).map(
+      (entry) => entry.kind,
+    ),
+  ).toEqual(["note"]);
 };
 
 const exerciseActiveScope = async (
@@ -489,6 +677,18 @@ const exerciseActiveScope = async (
     topics: [],
     glossary: [],
   });
+
+  const rejectedNote = await withTimeout(
+    client.callTool("append_lesson_note", {
+      markdown: "This has nowhere to go.",
+    }),
+    3_000,
+    "active append_lesson_note without topic",
+  );
+  expect(rejectedNote.isError).toBe(true);
+  expect(parseResult(rejectedNote)["error"]).toContain(
+    "needs a topicPath because there is no current topic",
+  );
 
   const writesBeforeReject = fixture.writes.length;
   const rejectedPlan = await withTimeout(

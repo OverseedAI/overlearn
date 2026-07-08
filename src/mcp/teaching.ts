@@ -1,4 +1,5 @@
 import {
+  appendJournalEntry,
   appendMasteryEvent,
   demoFileKey,
   flattenTopicTree,
@@ -8,6 +9,7 @@ import {
   latestMasteryForTopic,
   listDemos,
   listGlossary,
+  listJournalEntries,
   listTopicsDueForReview,
   pageTranscript,
   patchCourse,
@@ -16,12 +18,15 @@ import {
   replaceTopicTree,
   upsertDemo,
   upsertGlossaryEntry,
+  upsertJournalDemoPin,
   upsertTopic,
   withStoreTransaction,
   type Course,
+  type Demo,
   type DemoBodyFormat,
   type Store,
   type Topic,
+  type TopicJournalEntry,
   type TopicStatus,
   type TopicTreeInput,
   type TranscriptEntry,
@@ -42,7 +47,7 @@ export type TeachingToolName =
   | "get_course_state"
   | "upsert_topic"
   | "emit_demo"
-  | "upsert_lesson"
+  | "append_lesson_note"
   | "record_mastery"
   | "feynman_check"
   | "upsert_glossary_entry"
@@ -61,10 +66,15 @@ export type TeachingSessionScope = Readonly<{
 }>;
 
 // Structured detail for writes that surface as rich transcript entries
-// (inline demo cards, lesson cards) instead of a plain tool-call row.
+// (inline demo cards, journal cards) instead of a plain tool-call row.
 export type TeachingWriteAttachment =
   | Readonly<{ kind: "demo"; file: string; title?: string }>
-  | Readonly<{ kind: "lesson"; lessonId: string }>;
+  | Readonly<{
+      kind: "journal-note";
+      entryId: number;
+      topicId: number;
+      markdown: string;
+    }>;
 
 export type TeachingWriteEvent = Readonly<{
   tool: TeachingToolName;
@@ -210,16 +220,14 @@ const inputSchemas: Record<TeachingToolName, McpJsonObject> = {
     },
     ["title", "body"],
   ),
-  upsert_lesson: objectSchema(
+  append_lesson_note: objectSchema(
     {
-      lessonId: stringSchema(
-        "Stable lesson id (slug). Reusing an id updates that lesson.",
-      ),
-      body: stringSchema(
-        'Lesson body markdown. Embed a stored demo with a `:::demo <file.html> "Title"` line.',
+      markdown: stringSchema("Study note markdown to append to the topic journal."),
+      topicPath: stringSchema(
+        "Optional topic path override for tangents. Defaults to the running turn's snapshot topic.",
       ),
     },
-    ["lessonId", "body"],
+    ["markdown"],
   ),
   record_mastery: objectSchema(
     {
@@ -814,6 +822,15 @@ const resolveTopicId = (
   return topic.id;
 };
 
+const resolveTopicIdOrDefault = (
+  store: Store,
+  scope: TeachingSessionScope,
+  topicPath: string | undefined,
+): number | null | undefined =>
+  topicPath === undefined
+    ? defaultTopicId(store, scope)
+    : resolveTopicId(store, scope.courseId, topicPath);
+
 const extensionForFormat = (format: DemoBodyFormat): string => {
   if (format === "html") {
     return "html";
@@ -852,10 +869,68 @@ const publicCourse = (course: Course): McpJsonObject => ({
   harness: course.harnessId,
 });
 
+const journalEntriesPerTopicLimit = 5;
+
+const publicJournalEntry = (
+  entry: TopicJournalEntry,
+  demosById: ReadonlyMap<number, Demo>,
+): McpJsonObject => {
+  const base = {
+    id: entry.id,
+    kind: entry.kind,
+    topicId: entry.topicId,
+    turn: entry.turn,
+    createdAt: entry.createdAt,
+  };
+
+  if (entry.kind === "demo") {
+    const demo = entry.demoId === null ? undefined : demosById.get(entry.demoId);
+    return {
+      ...base,
+      demoId: entry.demoId,
+      demo:
+        demo === undefined
+          ? null
+          : {
+              id: demo.id,
+              title: demo.title,
+              fileName: demo.fileName,
+              file: demoFileKey(demo),
+              format: demo.bodyFormat,
+              addedAt: demo.addedAt,
+            },
+    };
+  }
+
+  return {
+    ...base,
+    bodyMarkdown: entry.bodyMarkdown ?? "",
+  };
+};
+
+const publicJournalWindow = (
+  store: Store,
+  courseId: number,
+  topic: Topic,
+  demosById: ReadonlyMap<number, Demo>,
+): McpJsonObject => {
+  const entries = listJournalEntries(store, courseId, topic.id);
+  const visibleEntries = topic.isCurrent
+    ? entries
+    : entries.slice(-journalEntriesPerTopicLimit);
+
+  return {
+    totalCount: entries.length,
+    limit: topic.isCurrent ? null : journalEntriesPerTopicLimit,
+    entries: visibleEntries.map((entry) => publicJournalEntry(entry, demosById)),
+  };
+};
+
 const publicTopic = (
   store: Store,
   courseId: number,
   topic: Topic,
+  demosById: ReadonlyMap<number, Demo>,
 ): McpJsonObject => {
   const latestMastery = latestMasteryForTopic(store, courseId, topic.path);
 
@@ -877,7 +952,10 @@ const publicTopic = (
             gaps: latestMastery.gaps,
             ts: latestMastery.ts,
           },
-    children: topic.children.map((child) => publicTopic(store, courseId, child)),
+    journal: publicJournalWindow(store, courseId, topic, demosById),
+    children: topic.children.map((child) =>
+      publicTopic(store, courseId, child, demosById),
+    ),
   };
 };
 
@@ -926,6 +1004,8 @@ const courseStatePayload = (
     throw new Error(`Course does not exist: ${courseId}`);
   }
 
+  const demos = listDemos(store, courseId);
+  const demosById = new Map(demos.map((demo) => [demo.id, demo]));
   const topicTree = readTopicTree(store, courseId);
   const flatTopics = flattenTopicTree(topicTree);
   const activeFeynman = getActiveFeynmanCheck(store, courseId);
@@ -934,7 +1014,9 @@ const courseStatePayload = (
     server: teachingMcpServerName,
     course: publicCourse(course),
     currentTopicPath: flatTopics.find((topic) => topic.isCurrent)?.path ?? null,
-    topics: topicTree.map((topic) => publicTopic(store, courseId, topic)),
+    topics: topicTree.map((topic) =>
+      publicTopic(store, courseId, topic, demosById),
+    ),
     dueForReview: listTopicsDueForReview(store, courseId, { limit: 5 }).map(
       (entry) => ({
         path: entry.topic.path,
@@ -956,7 +1038,7 @@ const courseStatePayload = (
             keyPoints: activeFeynman.keyPoints,
             issuedAt: activeFeynman.issuedAt,
           },
-    demos: listDemos(store, courseId).map((demo) => ({
+    demos: demos.map((demo) => ({
       id: demo.id,
       topicId: demo.topicId,
       title: demo.title,
@@ -1077,7 +1159,7 @@ const getCourseStateTool = (
   createTeachingTool(options, {
     name: "get_course_state",
     description:
-      "Returns compact rebuild-from-truth course state for resuming a teaching session.",
+      "Returns compact rebuild-from-truth course state for resuming a teaching session. Topic journals include all entries for the current topic and the last 5 entries plus totalCount for every other topic.",
     knownKeys: ["transcriptLimit"],
     call: (args) => {
       const transcriptLimit =
@@ -1166,10 +1248,14 @@ const upsertTopicTool = (options: TeachingServerOptions): McpServerTool =>
         return getTopicByPath(options.store, courseId, placed.path) ?? placed;
       });
 
+      const demosById = new Map(
+        listDemos(options.store, courseId).map((demo) => [demo.id, demo]),
+      );
+
       return {
         result: jsonResult({
           ok: true,
-          topic: publicTopic(options.store, courseId, topic),
+          topic: publicTopic(options.store, courseId, topic, demosById),
         }),
         writeSummary: `upserted topic ${topic.path}`,
       };
@@ -1179,7 +1265,8 @@ const upsertTopicTool = (options: TeachingServerOptions): McpServerTool =>
 const emitDemoTool = (options: TeachingServerOptions): McpServerTool =>
   createTeachingTool(options, {
     name: "emit_demo",
-    description: "Stores a teaching demo body, optionally attached to a topic.",
+    description:
+      "Stores a teaching demo body and emits a chat attachment. If topicPath is omitted, the demo defaults to the running turn's snapshot topic; when no topic can be resolved, the demo is emitted to chat only and no journal pin is written.",
     knownKeys: ["title", "body", "format", "topicPath", "fileName"],
     call: (args) => {
       const title = requireString(args, "title");
@@ -1187,19 +1274,35 @@ const emitDemoTool = (options: TeachingServerOptions): McpServerTool =>
       const bodyFormat = optionalDemoFormat(args, "format");
       const topicPath = optionalString(args, "topicPath");
       const explicitFileName = optionalString(args, "fileName");
-      const topicId = resolveTopicId(
-        options.store,
-        options.scope.courseId,
-        topicPath,
-      );
       const fileName =
         explicitFileName ?? generatedDemoFileName(title, bodyFormat);
-      const demo = upsertDemo(options.store, options.scope.courseId, {
-        ...(topicId === undefined ? {} : { topicId }),
-        fileName,
-        title,
-        body,
-        bodyFormat,
+      const activeTurn = getActiveTurn(options.scope);
+      const resolvedTopicId = resolveTopicIdOrDefault(
+        options.store,
+        options.scope,
+        topicPath,
+      );
+
+      const demo = withStoreTransaction(options.store, () => {
+        const storedDemo = upsertDemo(options.store, options.scope.courseId, {
+          ...(resolvedTopicId === null || resolvedTopicId === undefined
+            ? {}
+            : { topicId: resolvedTopicId }),
+          fileName,
+          title,
+          body,
+          bodyFormat,
+        });
+
+        if (resolvedTopicId !== null && resolvedTopicId !== undefined) {
+          upsertJournalDemoPin(options.store, options.scope.courseId, {
+            topicId: resolvedTopicId,
+            demoId: storedDemo.id,
+            turn: activeTurn?.turn ?? null,
+          });
+        }
+
+        return storedDemo;
       });
 
       return {
@@ -1220,19 +1323,54 @@ const emitDemoTool = (options: TeachingServerOptions): McpServerTool =>
     },
   });
 
-const upsertLessonTool = (options: TeachingServerOptions): McpServerTool =>
+const appendLessonNoteTool = (options: TeachingServerOptions): McpServerTool =>
   createTeachingTool(options, {
-    name: "upsert_lesson",
+    name: "append_lesson_note",
     description:
-      "Unavailable in store schema v2. Topic journals replace durable lesson documents.",
-    knownKeys: ["lessonId", "body"],
+      "Appends a short study note to a topic journal. topicPath defaults to the running turn's snapshot topic; pass topicPath explicitly for tangents.",
+    knownKeys: ["markdown", "topicPath"],
     call: (args) => {
-      void args;
+      const markdown = requireBodyString(args, "markdown");
+      const topicPath = optionalString(args, "topicPath");
+      const topicId = resolveTopicIdOrDefault(
+        options.store,
+        options.scope,
+        topicPath,
+      );
+
+      if (topicId === null || topicId === undefined) {
+        throw new Error(
+          "append_lesson_note needs a topicPath because there is no current topic for this turn.",
+        );
+      }
+
+      const activeTurn = getActiveTurn(options.scope);
+      const entry = appendJournalEntry(options.store, options.scope.courseId, {
+        topicId,
+        kind: "note",
+        bodyMarkdown: markdown,
+        turn: activeTurn?.turn ?? null,
+      });
 
       return {
-        result: errorResult(
-          "upsert_lesson is unavailable in store schema v2; topic journal entries replace lessons.",
-        ),
+        result: jsonResult({
+          ok: true,
+          entry: {
+            id: entry.id,
+            topicId: entry.topicId,
+            kind: entry.kind,
+            bodyMarkdown: entry.bodyMarkdown,
+            turn: entry.turn,
+            createdAt: entry.createdAt,
+          },
+        }),
+        writeSummary: `appended study note to topic ${topicId}`,
+        writeAttachment: {
+          kind: "journal-note",
+          entryId: entry.id,
+          topicId: entry.topicId,
+          markdown,
+        },
       };
     },
   });
@@ -1393,13 +1531,16 @@ const proposeCoursePlanTool = (
           topics: nextTopics,
         };
       });
+      const demosById = new Map(
+        listDemos(options.store, course.id).map((demo) => [demo.id, demo]),
+      );
 
       return {
         result: jsonResult({
           ok: true,
           course: publicCourse(updated.course),
           topics: updated.topics.map((topic) =>
-            publicTopic(options.store, course.id, topic),
+            publicTopic(options.store, course.id, topic, demosById),
           ),
         }),
         writeSummary: `replaced draft course plan with ${topics.length} root topics`,
@@ -1416,7 +1557,7 @@ export const createTeachingMcpServer = (
     getCourseStateTool(options),
     upsertTopicTool(options),
     emitDemoTool(options),
-    upsertLessonTool(options),
+    appendLessonNoteTool(options),
     recordMasteryTool(options),
     feynmanCheckTool(options),
     upsertGlossaryEntryTool(options),
