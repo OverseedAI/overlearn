@@ -266,6 +266,7 @@ type CourseRuntime = {
   harnessId: string;
   orchestrator: DaemonTurnOrchestrator;
   runningTurn: boolean;
+  lastActivityAt: number;
 };
 
 type TokenScope = Readonly<{
@@ -305,6 +306,8 @@ type ProfilePatchDraft = {
 const LOCALHOST_BIND_HOST = "127.0.0.1";
 const DEFAULT_HARNESS_ID = "claude-code";
 const MAX_AGENT_STREAM_REPLAY = 200;
+const DEFAULT_SESSION_IDLE_TTL_MS = 30 * 60 * 1_000;
+const DEFAULT_SESSION_IDLE_SWEEP_INTERVAL_MS = 60 * 1_000;
 const onboardingStates: readonly OnboardingState[] = [
   "welcome",
   "connect-agent",
@@ -319,6 +322,34 @@ const legalOnboardingTransitions: Readonly<
   "tutorial-offer": ["tutorial-offer", "done"],
   done: ["done", "welcome"],
 };
+
+const parsePositiveInteger = (
+  value: string | undefined,
+  name: string,
+): number | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+
+  return parsed;
+};
+
+export const resolveSessionIdleTtlMs = (env: Env = process.env): number =>
+  parsePositiveInteger(
+    env["OVERLEARN_SESSION_IDLE_TTL_MS"],
+    "OVERLEARN_SESSION_IDLE_TTL_MS",
+  ) ?? DEFAULT_SESSION_IDLE_TTL_MS;
+
+const resolveSessionIdleSweepIntervalMs = (env: Env = process.env): number =>
+  parsePositiveInteger(
+    env["OVERLEARN_SESSION_IDLE_SWEEP_INTERVAL_MS"],
+    "OVERLEARN_SESSION_IDLE_SWEEP_INTERVAL_MS",
+  ) ?? DEFAULT_SESSION_IDLE_SWEEP_INTERVAL_MS;
 
 const jsonResponse = (value: unknown, init?: ResponseInit): Response =>
   new Response(JSON.stringify(value), {
@@ -528,6 +559,58 @@ const writeDaemonMetadata = async (
 
 const clearDaemonMetadata = async (env: Env = process.env): Promise<void> => {
   await rm(daemonMetadataPath(env), { force: true });
+};
+
+type IdleSessionRuntime = {
+  courseId: number;
+  runningTurn: boolean;
+  lastActivityAt: number;
+  orchestrator: Pick<DaemonTurnOrchestrator, "resetSession">;
+};
+
+export const expireIdleSessions = async <Runtime extends IdleSessionRuntime>(
+  input: Readonly<{
+    runtimes: Map<number, Runtime>;
+    idleTtlMs: number;
+    now: () => number;
+    onExpired?: () => void;
+  }>,
+): Promise<number> => {
+  const now = input.now();
+  let expiredCount = 0;
+
+  for (const runtime of [...input.runtimes.values()]) {
+    if (
+      runtime.runningTurn ||
+      now - runtime.lastActivityAt <= input.idleTtlMs ||
+      input.runtimes.get(runtime.courseId) !== runtime
+    ) {
+      continue;
+    }
+
+    input.runtimes.delete(runtime.courseId);
+    await runtime.orchestrator.resetSession("idle-ttl");
+    expiredCount += 1;
+  }
+
+  if (expiredCount > 0) {
+    input.onExpired?.();
+  }
+
+  return expiredCount;
+};
+
+type TimerWithUnref = Readonly<{ unref: () => void }>;
+
+const unrefTimer = (timer: ReturnType<typeof setInterval>): void => {
+  if (typeof timer !== "object" || timer === null || !("unref" in timer)) {
+    return;
+  }
+
+  const unref = (timer as TimerWithUnref).unref;
+  if (typeof unref === "function") {
+    unref();
+  }
 };
 
 const createSseHub = (
@@ -1312,6 +1395,8 @@ export const runDaemon = async (
   env: Env = process.env,
   options: RunDaemonOptions = {},
 ): Promise<void> => {
+  const sessionIdleTtlMs = resolveSessionIdleTtlMs(env);
+  const sessionIdleSweepIntervalMs = resolveSessionIdleSweepIntervalMs(env);
   const store = openStore({ env });
   const daemonToken = randomBytes(32).toString("base64url");
   const tokenScopes = new Map<string, TokenScope>();
@@ -1325,6 +1410,8 @@ export const runDaemon = async (
   const runtimes = new Map<number, CourseRuntime>();
   let port = 0;
   let shuttingDown = false;
+  let sweepingIdleSessions = false;
+  let sessionIdleSweepInterval: ReturnType<typeof setInterval> | undefined;
 
   const readProfileResource = (): ProfileResource => {
     const profile = getProfile(store);
@@ -1398,6 +1485,35 @@ export const runDaemon = async (
     (courseId) => harnessesPayload(courseId, false),
     coursesPayload,
   );
+
+  const sweepIdleSessions = async (): Promise<void> => {
+    if (shuttingDown || sweepingIdleSessions) {
+      return;
+    }
+
+    sweepingIdleSessions = true;
+    try {
+      await expireIdleSessions({
+        runtimes,
+        idleTtlMs: sessionIdleTtlMs,
+        now: () => Date.now(),
+        onExpired: () => {
+          if (!shuttingDown) {
+            sseHub.broadcast("courses", coursesPayload());
+          }
+        },
+      });
+    } finally {
+      sweepingIdleSessions = false;
+    }
+  };
+
+  const startSessionIdleSweep = (): void => {
+    sessionIdleSweepInterval = setInterval(() => {
+      void sweepIdleSessions().catch(() => undefined);
+    }, sessionIdleSweepIntervalMs);
+    unrefTimer(sessionIdleSweepInterval);
+  };
 
   const broadcastCourseCollections = (courseId: number): void => {
     const view = courseView(store, courseId);
@@ -1621,6 +1737,7 @@ export const runDaemon = async (
       harnessId: selectedHarnessId(store, course.id, env),
       orchestrator,
       runningTurn: false,
+      lastActivityAt: Date.now(),
     };
     runtimes.set(course.id, courseRuntime);
     sseHub.broadcast("courses", coursesPayload());
@@ -1644,6 +1761,7 @@ export const runDaemon = async (
       createdAt: new Date().toISOString(),
       events,
     };
+    currentRuntime.lastActivityAt = Date.now();
     currentRuntime.runningTurn = true;
     activeTurnByCourse.set(course.id, turn.turn);
     setStatus(course.id, mode === "wrap-up" ? "wrapping-up" : "agent-working");
@@ -1667,6 +1785,7 @@ export const runDaemon = async (
       });
 
       currentRuntime.runningTurn = false;
+      currentRuntime.lastActivityAt = Date.now();
       activeTurnByCourse.delete(course.id);
 
       if (!result.ok) {
@@ -1688,6 +1807,7 @@ export const runDaemon = async (
       broadcastCourseCollections(course.id);
     })().catch((error) => {
       currentRuntime.runningTurn = false;
+      currentRuntime.lastActivityAt = Date.now();
       activeTurnByCourse.delete(course.id);
       setStatus(
         course.id,
@@ -2490,6 +2610,10 @@ export const runDaemon = async (
     }
 
     shuttingDown = true;
+    if (sessionIdleSweepInterval !== undefined) {
+      clearInterval(sessionIdleSweepInterval);
+      sessionIdleSweepInterval = undefined;
+    }
     await Promise.all(
       [...runtimes.values()].map((courseRuntime) =>
         courseRuntime.orchestrator.endSession("shutdown"),
@@ -2710,6 +2834,8 @@ export const runDaemon = async (
     await mkdir(dirname(options.portFile), { recursive: true });
     await Bun.write(options.portFile, `${port}\n`);
   }
+
+  startSessionIdleSweep();
 
   const cleanup = (): void => {
     void shutdown();
