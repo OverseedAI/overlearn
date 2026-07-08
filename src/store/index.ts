@@ -63,6 +63,26 @@ export type Course = Readonly<{
   updatedAt: string;
 }>;
 
+export type TopicNavigationTopic = Readonly<{
+  id: number;
+  path: string;
+  title: string;
+}>;
+
+export type PendingTopicNavigation = Readonly<{
+  topic: TopicNavigationTopic;
+  previous: TopicNavigationTopic | null;
+  revisit: true;
+  selectedAt: string;
+}>;
+
+export type TopicNavigationResult = Readonly<{
+  changed: boolean;
+  topic: Topic;
+  previous: TopicNavigationTopic | null;
+  pending?: PendingTopicNavigation;
+}>;
+
 export type CourseInput = Readonly<{
   title: string;
   description?: string | null;
@@ -355,6 +375,7 @@ type CourseRow = Readonly<{
   status: CourseStatus;
   source_name: string | null;
   manifest_extra_json: string;
+  pending_nav_json: string | null;
   created_at: string;
   updated_at: string;
 }>;
@@ -524,14 +545,14 @@ type FolderImportPayload = Readonly<{
 }>;
 
 const STORE_FILE_NAME = "overlearn.sqlite";
-export const STORE_SCHEMA_VERSION = 3;
+export const STORE_SCHEMA_VERSION = 4;
 const courseStatusCheckSql =
   "status TEXT NOT NULL CHECK (status IN ('active', 'archived'))";
 
 const migrations: readonly Migration[] = [
   {
     id: STORE_SCHEMA_VERSION,
-    name: "store_schema_v3",
+    name: "store_schema_v4",
     up: (db) => {
       db.exec(`
         CREATE TABLE profile (
@@ -553,6 +574,7 @@ const migrations: readonly Migration[] = [
           ${courseStatusCheckSql},
           source_name TEXT,
           manifest_extra_json TEXT NOT NULL DEFAULT '{}',
+          pending_nav_json TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -1412,6 +1434,300 @@ export const getTopicByPath = (
 
   return topicFromBuilder(topicBuilderFromRow(row));
 };
+
+const topicNavigationTopicFromRow = (row: TopicRow): TopicNavigationTopic => ({
+  id: toNumber(row.id),
+  path: row.path,
+  title: row.title,
+});
+
+const topicNavigationTopicFromTopic = (topic: Topic): TopicNavigationTopic => ({
+  id: topic.id,
+  path: topic.path,
+  title: topic.title,
+});
+
+const topicRowByPath = (
+  store: Store,
+  courseId: number,
+  path: string,
+): TopicRow | undefined => {
+  const row = store.db
+    .query("SELECT * FROM topics WHERE course_id = ?1 AND path = ?2")
+    .get(courseId, path) as TopicRow | null | undefined;
+
+  return isMissingRow(row) ? undefined : row;
+};
+
+const currentTopicRowForCourse = (
+  store: Store,
+  courseId: number,
+): TopicRow | undefined => {
+  const row = store.db
+    .query(
+      `
+        SELECT *
+        FROM topics
+        WHERE course_id = ?1
+          AND is_current = 1
+        LIMIT 1
+      `,
+    )
+    .get(courseId) as TopicRow | null | undefined;
+
+  return isMissingRow(row) ? undefined : row;
+};
+
+const topicFromRow = (row: TopicRow): Topic =>
+  topicFromBuilder(topicBuilderFromRow(row));
+
+const requireTopicByPath = (
+  store: Store,
+  courseId: number,
+  path: string,
+): TopicRow => {
+  const row = topicRowByPath(store, courseId, path);
+  if (row === undefined) {
+    throw new Error(`Topic does not exist in course ${courseId}: ${path}`);
+  }
+
+  return row;
+};
+
+const pendingTopicNavigationJson = (
+  pending: PendingTopicNavigation,
+): string => stringifyJson(pending);
+
+const topicNavigationTopicFromValue = (
+  value: unknown,
+): TopicNavigationTopic | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const id = value["id"];
+  const path = value["path"];
+  const title = value["title"];
+  if (
+    typeof id !== "number" ||
+    !Number.isInteger(id) ||
+    typeof path !== "string" ||
+    path.length === 0 ||
+    typeof title !== "string" ||
+    title.length === 0
+  ) {
+    return undefined;
+  }
+
+  return { id, path, title };
+};
+
+const pendingTopicNavigationFromJson = (
+  text: string | null,
+): PendingTopicNavigation | null => {
+  if (text === null) {
+    return null;
+  }
+
+  let value: unknown;
+  try {
+    value = parseJson(text);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(value) || value["revisit"] !== true) {
+    return null;
+  }
+
+  const topic = topicNavigationTopicFromValue(value["topic"]);
+  const previousValue = value["previous"];
+  const previous =
+    previousValue === null
+      ? null
+      : topicNavigationTopicFromValue(previousValue);
+  const selectedAt = value["selectedAt"];
+  if (
+    topic === undefined ||
+    previous === undefined ||
+    typeof selectedAt !== "string" ||
+    selectedAt.length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    topic,
+    previous,
+    revisit: true,
+    selectedAt,
+  };
+};
+
+const setPendingTopicNavigationJson = (
+  store: Store,
+  courseId: number,
+  pendingJson: string | null,
+  updatedAt: string,
+): void => {
+  store.db
+    .query(
+      `
+        UPDATE courses
+        SET
+          pending_nav_json = ?1,
+          updated_at = ?2
+        WHERE id = ?3
+      `,
+    )
+    .run(pendingJson, updatedAt, courseId);
+};
+
+export const readPendingTopicNavigation = (
+  store: Store,
+  courseId: number,
+): PendingTopicNavigation | null => {
+  requireCourse(store, courseId);
+  const row = store.db
+    .query("SELECT pending_nav_json FROM courses WHERE id = ?1")
+    .get(courseId) as { pending_nav_json: string | null } | null | undefined;
+
+  return isMissingRow(row)
+    ? null
+    : pendingTopicNavigationFromJson(row.pending_nav_json);
+};
+
+export const consumePendingTopicNavigation = (
+  store: Store,
+  courseId: number,
+): PendingTopicNavigation | null =>
+  withStoreTransaction(store, () => {
+    requireCourse(store, courseId);
+    const row = store.db
+      .query("SELECT pending_nav_json FROM courses WHERE id = ?1")
+      .get(courseId) as { pending_nav_json: string | null } | null | undefined;
+
+    if (isMissingRow(row) || row.pending_nav_json === null) {
+      return null;
+    }
+
+    const pending = pendingTopicNavigationFromJson(row.pending_nav_json);
+    setPendingTopicNavigationJson(store, courseId, null, nowIso());
+
+    return pending;
+  });
+
+export const enterFrontierTopic = (
+  store: Store,
+  courseId: number,
+  path: string,
+): TopicNavigationResult =>
+  withStoreTransaction(store, () => {
+    requireCourse(store, courseId);
+    const target = requireTopicByPath(store, courseId, path);
+    const current = currentTopicRowForCourse(store, courseId);
+    const previous =
+      current === undefined ? null : topicNavigationTopicFromRow(current);
+
+    if (target.is_current === 1) {
+      return {
+        changed: false,
+        topic: topicFromRow(target),
+        previous,
+      };
+    }
+
+    if (target.entered_at !== null) {
+      throw new Error(`Topic has already been entered: ${path}`);
+    }
+
+    const timestamp = nowIso();
+    store.db
+      .query("UPDATE topics SET is_current = 0, updated_at = ?1 WHERE course_id = ?2")
+      .run(timestamp, courseId);
+    store.db
+      .query(
+        `
+          UPDATE topics
+          SET
+            entered_at = COALESCE(entered_at, ?1),
+            is_current = 1,
+            updated_at = ?1
+          WHERE id = ?2
+        `,
+      )
+      .run(timestamp, target.id);
+    setPendingTopicNavigationJson(store, courseId, null, timestamp);
+
+    const updated = requireTopicByPath(store, courseId, path);
+    return {
+      changed: true,
+      topic: topicFromRow(updated),
+      previous,
+    };
+  });
+
+export const selectVisitedTopic = (
+  store: Store,
+  courseId: number,
+  path: string,
+): TopicNavigationResult =>
+  withStoreTransaction(store, () => {
+    requireCourse(store, courseId);
+    const target = requireTopicByPath(store, courseId, path);
+    const current = currentTopicRowForCourse(store, courseId);
+    const previous =
+      current === undefined ? null : topicNavigationTopicFromRow(current);
+
+    if (target.is_current === 1) {
+      return {
+        changed: false,
+        topic: topicFromRow(target),
+        previous,
+      };
+    }
+
+    if (target.entered_at === null) {
+      throw new Error(`Topic has not been entered yet: ${path}`);
+    }
+
+    const timestamp = nowIso();
+    store.db
+      .query("UPDATE topics SET is_current = 0, updated_at = ?1 WHERE course_id = ?2")
+      .run(timestamp, courseId);
+    store.db
+      .query(
+        `
+          UPDATE topics
+          SET
+            is_current = 1,
+            updated_at = ?1
+          WHERE id = ?2
+        `,
+      )
+      .run(timestamp, target.id);
+
+    const updated = topicFromRow(requireTopicByPath(store, courseId, path));
+    const pending = {
+      topic: topicNavigationTopicFromTopic(updated),
+      previous,
+      revisit: true,
+      selectedAt: timestamp,
+    } as const;
+    setPendingTopicNavigationJson(
+      store,
+      courseId,
+      pendingTopicNavigationJson(pending),
+      timestamp,
+    );
+
+    return {
+      changed: true,
+      topic: updated,
+      previous,
+      pending,
+    };
+  });
 
 const nextTopicPosition = (
   store: Store,

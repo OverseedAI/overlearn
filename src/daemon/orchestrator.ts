@@ -23,6 +23,12 @@ export type TurnPromptMode = "teaching" | "wrap-up" | "greeting" | "orientation"
 export type TurnEvent =
   | Readonly<{ type: "message"; text: string }>
   | Readonly<{ type: "nav"; path: string }>
+  | Readonly<{
+      type: "topic-entered";
+      path: string;
+      revisit: boolean;
+      previous: TurnPositionTopic | null;
+    }>
   | Readonly<{ type: "review-weak"; concepts: readonly string[] }>
   | Readonly<{ type: "session-done" }>
   | Readonly<{ type: "harness-swapped"; from: string; to: string }>

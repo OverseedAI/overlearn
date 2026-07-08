@@ -222,7 +222,7 @@ export const api = {
   submit: (id: number, text: string) =>
     post<{ ok: true; turn: number }>(`/api/courses/${id}/submit`, { text }),
   nav: (id: number, path: string) =>
-    post<{ ok: true; turn: number }>(`/api/courses/${id}/nav`, { path }),
+    post<{ ok: true; turn?: number }>(`/api/courses/${id}/nav`, { path }),
   reviewWeak: (id: number) =>
     post<{ ok: true; turn: number }>(`/api/courses/${id}/nav`, {
       path: "overlearn:review-weak",

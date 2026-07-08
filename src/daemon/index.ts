@@ -19,12 +19,15 @@ import {
   appendTranscriptEntry,
   appendTurnEvents,
   clearActiveFeynmanCheck,
+  consumePendingTopicNavigation,
   createCourse,
   demoFileKey,
+  enterFrontierTopic,
   endSession as endStoreSession,
   flattenTopicTree,
   getActiveFeynmanCheck,
   getCourse,
+  getTopicByPath,
   getProfile,
   getStoreDataDir,
   listCourses,
@@ -38,7 +41,9 @@ import {
   patchProfile,
   patchCourse,
   readTopicTree,
+  selectVisitedTopic,
   startSession,
+  withStoreTransaction,
   type Course,
   type CourseStatus as StoreCourseStatus,
   type Demo,
@@ -48,6 +53,9 @@ import {
   type Profile,
   type Store,
   type Topic,
+  type PendingTopicNavigation,
+  type TopicNavigationResult,
+  type TopicNavigationTopic,
   type TopicJournalEntry as StoreTopicJournalEntry,
   type TranscriptEntry as StoreTranscriptEntry,
 } from "../store";
@@ -230,6 +238,11 @@ type TranscriptEntry = TranscriptEntryBase &
       text: string;
       tool: string;
     }>
+    | Readonly<{
+      role: "system";
+      kind: "topic-change";
+      text: string;
+    }>
   );
 
 type HarnessSummary = Readonly<{
@@ -306,6 +319,7 @@ type TokenScope = Readonly<{
 }>;
 
 type MessageTurnEvent = Extract<TurnEvent, { type: "message" }>;
+type TopicEnteredTurnEvent = Extract<TurnEvent, { type: "topic-entered" }>;
 type FeynmanAnswerTurnEvent = Extract<TurnEvent, { type: "feynman-answer" }>;
 
 type CourseCreateInput = {
@@ -1221,6 +1235,15 @@ const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
     };
   }
 
+  if (entry.kind === "topic-change") {
+    return {
+      ...base,
+      role: "system",
+      kind: "topic-change",
+      text: entry.content,
+    };
+  }
+
   return {
     ...base,
     role: entry.role === "agent" ? "agent" : "learner",
@@ -1418,6 +1441,37 @@ const topicForTurnPosition = (topic: Topic): TurnPositionTopic => ({
   title: topic.title,
 });
 
+const navigationTopicForTurnPosition = (
+  topic: TopicNavigationTopic,
+): TurnPositionTopic => ({
+  id: topic.id,
+  path: topic.path,
+  title: topic.title,
+});
+
+const topicEnteredEvent = (
+  topic: TopicNavigationTopic,
+  previous: TopicNavigationTopic | null,
+  revisit: boolean,
+): TopicEnteredTurnEvent => ({
+  type: "topic-entered",
+  path: topic.path,
+  revisit,
+  previous:
+    previous === null ? null : navigationTopicForTurnPosition(previous),
+});
+
+const topicEnteredEventFromNavigation = (
+  navigation: TopicNavigationResult,
+  revisit: boolean,
+): TopicEnteredTurnEvent =>
+  topicEnteredEvent(navigationResultTopic(navigation), navigation.previous, revisit);
+
+const topicEnteredEventFromPending = (
+  pending: PendingTopicNavigation,
+): TopicEnteredTurnEvent =>
+  topicEnteredEvent(pending.topic, pending.previous, pending.revisit);
+
 const flatTopicsForCourse = (store: Store, courseId: number): readonly Topic[] =>
   flattenTopicTree(readTopicTree(store, courseId));
 
@@ -1486,6 +1540,7 @@ const turnPositionContext = (
   courseId: number,
   turn: number,
   currentTopic: Topic | null,
+  events: readonly TurnEvent[] = [],
 ): TurnPositionContext => {
   if (currentTopic === null) {
     return { currentTopic: null };
@@ -1495,6 +1550,20 @@ const turnPositionContext = (
     ...topicForTurnPosition(currentTopic),
     state: currentTopic.state,
   };
+  const explicitTopicEntry = [...events]
+    .reverse()
+    .find(
+      (event): event is TopicEnteredTurnEvent =>
+        event.type === "topic-entered" && event.path === currentTopic.path,
+    );
+  if (explicitTopicEntry !== undefined) {
+    return {
+      currentTopic: currentPositionTopic,
+      previousTopic: explicitTopicEntry.previous,
+      revisit: explicitTopicEntry.revisit,
+    };
+  }
+
   const previousTopic = previousTranscriptTopic(store, courseId, turn);
   if (previousTopic === undefined) {
     return { currentTopic: currentPositionTopic };
@@ -1517,6 +1586,45 @@ const appendUiTranscript = (
   courseId: number,
   input: Parameters<typeof appendTranscriptEntry>[2],
 ): TranscriptEntry => uiTranscriptEntry(appendTranscriptEntry(store, courseId, input));
+
+const navigationResultTopic = (
+  navigation: TopicNavigationResult,
+): TopicNavigationTopic => ({
+  id: navigation.topic.id,
+  path: navigation.topic.path,
+  title: navigation.topic.title,
+});
+
+const topicChangeContent = (
+  topic: TopicNavigationTopic,
+  revisit: boolean,
+): string =>
+  revisit
+    ? `Back to **${topic.title}** (revisit)`
+    : `Entered **${topic.title}**`;
+
+const appendTopicChangeTranscript = (
+  store: Store,
+  courseId: number,
+  input: Readonly<{
+    turn: number;
+    topic: TopicNavigationTopic;
+    previous: TopicNavigationTopic | null;
+    revisit: boolean;
+  }>,
+): TranscriptEntry =>
+  appendUiTranscript(store, courseId, {
+    turn: input.turn,
+    role: "system",
+    kind: "topic-change",
+    content: topicChangeContent(input.topic, input.revisit),
+    payload: {
+      kind: "topic-change",
+      topic: input.topic,
+      previous: input.previous,
+      revisit: input.revisit,
+    },
+  });
 
 const routeCourseRequest = (
   path: string,
@@ -2040,6 +2148,7 @@ export const runDaemon = async (
       course.id,
       turn.turn,
       turnSnapshot.currentTopic,
+      turn.events,
     );
     currentRuntime.lastActivityAt = Date.now();
     currentRuntime.runningTurn = true;
@@ -2114,6 +2223,53 @@ export const runDaemon = async (
     return jsonResponse({ ok: true, turn: turn.turn });
   };
 
+  const broadcastTranscriptEntries = (
+    courseId: number,
+    entries: readonly TranscriptEntry[],
+  ): void => {
+    for (const entry of entries) {
+      sseHub.broadcast("message", { courseId, entry });
+    }
+  };
+
+  const appendLearnerTurnTranscript = (
+    courseId: number,
+    turn: number,
+    event: TurnEvent,
+    input: Parameters<typeof appendTranscriptEntry>[2],
+    afterAppend?: () => void,
+  ): Readonly<{
+    events: readonly TurnEvent[];
+    entries: readonly TranscriptEntry[];
+  }> =>
+    withStoreTransaction(store, () => {
+      const pending = consumePendingTopicNavigation(store, courseId);
+      const topicChange =
+        pending === null
+          ? undefined
+          : appendTopicChangeTranscript(store, courseId, {
+              turn,
+              topic: pending.topic,
+              previous: pending.previous,
+              revisit: true,
+            });
+      const entry = appendUiTranscript(store, courseId, {
+        ...input,
+        turn,
+      });
+
+      afterAppend?.();
+
+      return {
+        events:
+          pending === null
+            ? [event]
+            : [topicEnteredEventFromPending(pending), event],
+        entries:
+          topicChange === undefined ? [entry] : [topicChange, entry],
+      };
+    });
+
   const parseSubmit = async (request: Request): Promise<MessageTurnEvent> => {
     const body = await readJsonBody(request);
     if (!isRecord(body)) {
@@ -2126,30 +2282,31 @@ export const runDaemon = async (
     };
   };
 
-  const parseNav = async (request: Request, courseId: number): Promise<TurnEvent> => {
+  const parseNavPath = async (request: Request): Promise<string> => {
     const body = await readJsonBody(request);
     if (!isRecord(body)) {
       throw new Error("Nav body must be an object.");
     }
 
-    const path = requiredStringField(body, "path");
-    if (path === REVIEW_WEAK_NAV_PATH) {
-      const weakest = flattenTopicTree(readTopicTree(store, courseId))
-        .filter((topic) => topic.state !== "frontier")
-        .flatMap((topic) => {
-          const score = listLatestMasteryScores(store, courseId).find(
-            (entry) => entry.concept === topic.path || entry.concept === topic.path.split("/").at(-1),
-          );
-          return score === undefined ? [] : [score];
-        })
-        .sort((left, right) => left.score - right.score)
-        .slice(0, 3)
-        .map((entry) => entry.concept);
+    return requiredStringField(body, "path");
+  };
 
-      return { type: "review-weak", concepts: weakest };
-    }
+  const reviewWeakEvent = (courseId: number): TurnEvent => {
+    const weakest = flattenTopicTree(readTopicTree(store, courseId))
+      .filter((topic) => topic.state !== "frontier")
+      .flatMap((topic) => {
+        const score = listLatestMasteryScores(store, courseId).find(
+          (entry) =>
+            entry.concept === topic.path ||
+            entry.concept === topic.path.split("/").at(-1),
+        );
+        return score === undefined ? [] : [score];
+      })
+      .sort((left, right) => left.score - right.score)
+      .slice(0, 3)
+      .map((entry) => entry.concept);
 
-    return { type: "nav", path };
+    return { type: "review-weak", concepts: weakest };
   };
 
   const parseFeynmanAnswer = async (
@@ -2597,14 +2754,13 @@ export const runDaemon = async (
       try {
         const event = await parseSubmit(request);
         const turn = nextTurnNumber(store, courseId);
-        const entry = appendUiTranscript(store, courseId, {
-          turn,
+        const appended = appendLearnerTurnTranscript(courseId, turn, event, {
           role: "learner",
           kind: "text",
           content: event.text,
         });
-        sseHub.broadcast("message", { courseId, entry });
-        return runCourseTurn(course, [event], "teaching", turn);
+        broadcastTranscriptEntries(courseId, appended.entries);
+        return runCourseTurn(course, appended.events, "teaching", turn);
       } catch (error) {
         return textResponse(error instanceof Error ? error.message : "Invalid submit request.", 400);
       }
@@ -2637,7 +2793,55 @@ export const runDaemon = async (
 
     if (action === "nav" && extra === undefined && request.method === "POST") {
       try {
-        return runCourseTurn(course, [await parseNav(request, courseId)], "teaching");
+        const path = await parseNavPath(request);
+        if (path === REVIEW_WEAK_NAV_PATH) {
+          return runCourseTurn(course, [reviewWeakEvent(courseId)], "teaching");
+        }
+
+        const topic = getTopicByPath(store, courseId, path);
+        if (topic === undefined) {
+          throw new Error(`Topic does not exist in course ${courseId}: ${path}`);
+        }
+
+        if (topic.isCurrent) {
+          return jsonResponse({ ok: true });
+        }
+
+        if (topic.state === "frontier") {
+          const currentRuntime = runtimes.get(courseId);
+          if (currentRuntime?.runningTurn === true) {
+            return textResponse("A turn is already running for this course.", 409);
+          }
+
+          const turn = nextTurnNumber(store, courseId);
+          const navigation = enterFrontierTopic(store, courseId, path);
+          if (!navigation.changed) {
+            return jsonResponse({ ok: true });
+          }
+
+          broadcastCourseCollections(courseId);
+          const topicChange = appendTopicChangeTranscript(store, courseId, {
+            turn,
+            topic: navigationResultTopic(navigation),
+            previous: navigation.previous,
+            revisit: false,
+          });
+          sseHub.broadcast("message", { courseId, entry: topicChange });
+
+          return runCourseTurn(
+            course,
+            [topicEnteredEventFromNavigation(navigation, false)],
+            "teaching",
+            turn,
+          );
+        }
+
+        const navigation = selectVisitedTopic(store, courseId, path);
+        if (navigation.changed) {
+          broadcastCourseCollections(courseId);
+        }
+
+        return jsonResponse({ ok: true });
       } catch (error) {
         return textResponse(error instanceof Error ? error.message : "Invalid nav request.", 400);
       }
@@ -2655,20 +2859,24 @@ export const runDaemon = async (
       try {
         const event = await parseFeynmanAnswer(request);
         const turn = nextTurnNumber(store, courseId);
-        const entry = appendUiTranscript(store, courseId, {
+        const appended = appendLearnerTurnTranscript(
+          courseId,
           turn,
-          role: "learner",
-          kind: "feynman-answer",
-          content: event.text,
-          payload: {
-            concept: event.concept,
-            keyPoints: event.keyPoints,
+          event,
+          {
+            role: "learner",
+            kind: "feynman-answer",
+            content: event.text,
+            payload: {
+              concept: event.concept,
+              keyPoints: event.keyPoints,
+            },
           },
-        });
-        clearActiveFeynmanCheck(store, courseId);
-        sseHub.broadcast("message", { courseId, entry });
+          () => clearActiveFeynmanCheck(store, courseId),
+        );
+        broadcastTranscriptEntries(courseId, appended.entries);
         broadcastCourseCollections(courseId);
-        return runCourseTurn(course, [event], "teaching", turn);
+        return runCourseTurn(course, appended.events, "teaching", turn);
       } catch (error) {
         return textResponse(error instanceof Error ? error.message : "Invalid Feynman answer.", 400);
       }

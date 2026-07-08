@@ -9,8 +9,10 @@ import {
   appendMasteryEvent,
   appendTranscriptEntry,
   clearActiveFeynmanCheck,
+  consumePendingTopicNavigation,
   createCourse,
   deleteCourse,
+  enterFrontierTopic,
   endSession,
   flattenTopicTree,
   getActiveFeynmanCheck,
@@ -32,9 +34,11 @@ import {
   pageTranscriptBefore,
   patchCourse,
   patchProfile,
+  readPendingTopicNavigation,
   readTopicTree,
   registerFeynmanCheck,
   replaceTopicTree,
+  selectVisitedTopic,
   startSession,
   STORE_SCHEMA_VERSION,
   upsertDemo,
@@ -81,7 +85,7 @@ describe("store migrations", () => {
         .query("SELECT id, name FROM migrations ORDER BY id")
         .all();
       expect(migrations).toEqual([
-        { id: STORE_SCHEMA_VERSION, name: "store_schema_v3" },
+        { id: STORE_SCHEMA_VERSION, name: "store_schema_v4" },
       ]);
 
       expect(getProfile(store)).toMatchObject({
@@ -463,6 +467,68 @@ describe("store query API", () => {
         ["a/c", 1, false, "frontier"],
       ]);
     });
+  });
+
+  test("persists visited-topic pending nav and clears it on consume", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "overlearn-pending-nav-"));
+    const databasePath = join(dir, "store.sqlite");
+    const first = openStore({ databasePath });
+    const enteredAt = "2026-01-02T00:00:00.000Z";
+    const course = createCourse(first, { title: "Navigation" });
+    replaceTopicTree(first, course.id, [
+      {
+        path: "alpha",
+        title: "Alpha",
+        enteredAt,
+        isCurrent: true,
+      },
+      {
+        path: "beta",
+        title: "Beta",
+        enteredAt,
+      },
+      {
+        path: "gamma",
+        title: "Gamma",
+      },
+    ]);
+
+    const selected = selectVisitedTopic(first, course.id, "beta");
+    expect(selected.changed).toBe(true);
+    expect(selected.topic.path).toBe("beta");
+    expect(selected.topic.enteredAt).toBe(enteredAt);
+    expect(selected.previous?.path).toBe("alpha");
+    expect(readPendingTopicNavigation(first, course.id)?.topic.path).toBe("beta");
+    first.close();
+
+    const second = openStore({ databasePath });
+    try {
+      const persisted = readPendingTopicNavigation(second, course.id);
+      expect(persisted?.topic.path).toBe("beta");
+      expect(persisted?.previous?.path).toBe("alpha");
+      expect(persisted?.revisit).toBe(true);
+
+      const consumed = consumePendingTopicNavigation(second, course.id);
+      expect(consumed?.topic.path).toBe("beta");
+      expect(readPendingTopicNavigation(second, course.id)).toBeNull();
+
+      const frontier = enterFrontierTopic(second, course.id, "gamma");
+      expect(frontier.changed).toBe(true);
+      expect(frontier.topic.path).toBe("gamma");
+      expect(frontier.topic.enteredAt).not.toBeNull();
+      expect(frontier.previous?.path).toBe("beta");
+
+      const topics = flattenTopicTree(readTopicTree(second, course.id));
+      expect(topics.find((topic) => topic.path === "beta")?.enteredAt).toBe(
+        enteredAt,
+      );
+      expect(topics.find((topic) => topic.path === "gamma")?.isCurrent).toBe(
+        true,
+      );
+    } finally {
+      second.close();
+      await rm(dir, { force: true, recursive: true });
+    }
   });
 
   test("transaction rolls back a forced mid-write failure", async () => {

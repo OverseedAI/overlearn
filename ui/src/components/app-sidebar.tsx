@@ -6,6 +6,7 @@ import {
   Sun,
   SunMoon,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   Sidebar,
   SidebarContent,
@@ -28,7 +29,7 @@ import {
 import { OverlearnWordmark } from "@/components/brand";
 import { TopicTree } from "@/components/topic-tree";
 import { MasteryMeter } from "@/components/mastery-meter";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { useOptionalCourseStore } from "@/lib/course-store";
 import { useRoute, type Route } from "@/lib/router";
 import { useTheme, type ThemePreference } from "@/lib/theme";
@@ -72,9 +73,18 @@ function CourseSection() {
     return null;
   }
 
-  const { store, courseId, selectTopic } = context;
+  const { store, courseId } = context;
   const { topics, mastery } = store.state!;
   const busy = store.status === "agent-working" || store.status === "wrapping-up";
+  const navigateTopic = async (path: string) => {
+    try {
+      await api.nav(courseId, path);
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError ? error.message : "Couldn’t change topic.",
+      );
+    }
+  };
 
   return (
     <>
@@ -89,9 +99,8 @@ function CourseSection() {
         <SidebarGroupContent>
           <TopicTree
             topics={topics}
-            disabled={busy}
-            onNavigate={(path) => void api.nav(courseId, path)}
-            onSelectTopic={selectTopic}
+            frontierDisabled={busy}
+            onNavigate={(path) => void navigateTopic(path)}
           />
           <SidebarMenu>
             <SidebarMenuItem>
