@@ -23,7 +23,10 @@ export function useHarnesses() {
   const load = useCallback(async (refresh?: boolean) => {
     setLoading(true);
     try {
-      const list = await api.listHarnesses({ scope: "profile", refresh });
+      const list = await api.listHarnesses({
+        scope: "profile",
+        ...(refresh === undefined ? {} : { refresh }),
+      });
       setHarnesses(list);
     } catch (cause) {
       toast.error(errorMessage(cause));

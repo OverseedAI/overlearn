@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  BookOpenText,
   Check,
   ChevronRight,
   CircleAlert,
