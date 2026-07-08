@@ -1,11 +1,11 @@
 # Learning Overlearn
 
-A short guided course that teaches the shape of Overlearn while you use it. You will learn what to say to the agent, how topics and mastery scores stay organized, when Feynman checks appear, how the review rail helps you keep context, and how to create your next course.
+A short guided course that teaches the shape of Overlearn while you use it. It opens as a partially explored fog-of-war map: visited topics have mentor-written journal notes, the current topic is active, and one frontier stub is waiting for you to enter it.
 
-## Topics
+## Seeded map
 
-1. `dialogue-loop` - Dialogue loop - `dialogue-loop.md`
-2. `topics-mastery` - Topics and mastery - `topics-mastery.md`
-3. `feynman-checks` - Feynman checks - `feynman-checks.md`
-4. `review-rail-glossary` - Review rail and glossary - `review-rail-glossary.md`
-5. `next-course` - Creating your next course - `next-course.md`
+1. `dialogue-loop` - visited - `dialogue-loop.md`
+2. `topics-mastery` - visited - `topics-mastery.md`
+3. `feynman-checks` - visited - `feynman-checks.md`
+4. `review-rail-glossary` - current - `review-rail-glossary.md`
+5. `next-course` - frontier - no seeded journal
