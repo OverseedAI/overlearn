@@ -72,7 +72,7 @@ function CourseSection() {
     return null;
   }
 
-  const { store, courseId } = context;
+  const { store, courseId, selectTopic } = context;
   const { topics, mastery } = store.state!;
   const busy = store.status === "agent-working" || store.status === "wrapping-up";
 
@@ -91,6 +91,7 @@ function CourseSection() {
             topics={topics}
             disabled={busy}
             onNavigate={(path) => void api.nav(courseId, path)}
+            onSelectTopic={selectTopic}
           />
           <SidebarMenu>
             <SidebarMenuItem>

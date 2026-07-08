@@ -40,6 +40,7 @@ export type CourseStore = {
   loading: boolean;
   loadError?: string | undefined;
   state?: CourseState | undefined;
+  selectedTopicPath?: string | undefined;
   status?: UiStatus | undefined;
   statusMessage?: string | undefined;
   activity?: AgentActivity | undefined;
@@ -59,7 +60,7 @@ type Action =
   | { type: "feynman"; activeCheck: ActiveFeynmanCheck | null }
   | { type: "agent-stream"; payload: AgentStreamPayload }
   | { type: "connection"; connected: boolean }
-  | { type: "refresh-lessons"; state: CourseState };
+  | { type: "select-topic"; path: string };
 
 function withState(
   store: CourseStore,
@@ -83,6 +84,35 @@ function uniqueTranscriptEntries(
   }
 
   return result;
+}
+
+function flattenTopics(topics: readonly TopicNode[]): TopicNode[] {
+  return topics.flatMap((topic) => [topic, ...flattenTopics(topic.children)]);
+}
+
+function currentTopicPath(topics: readonly TopicNode[]): string | undefined {
+  return flattenTopics(topics).find((topic) => topic.current)?.path;
+}
+
+function firstTopicPath(topics: readonly TopicNode[]): string | undefined {
+  return flattenTopics(topics)[0]?.path;
+}
+
+function hasTopicPath(topics: readonly TopicNode[], path: string | undefined): boolean {
+  return path === undefined
+    ? false
+    : flattenTopics(topics).some((topic) => topic.path === path);
+}
+
+function selectedTopicPathForLoadedState(
+  state: CourseState,
+  existing: string | undefined,
+): string | undefined {
+  if (hasTopicPath(state.topics, existing)) {
+    return existing;
+  }
+
+  return currentTopicPath(state.topics) ?? firstTopicPath(state.topics);
 }
 
 function applyAgentStream(
@@ -136,7 +166,15 @@ function applyAgentStream(
 function reduce(store: CourseStore, action: Action): CourseStore {
   switch (action.type) {
     case "loaded":
-      return { ...store, loading: false, state: action.state };
+      return {
+        ...store,
+        loading: false,
+        state: action.state,
+        selectedTopicPath: selectedTopicPathForLoadedState(
+          action.state,
+          store.selectedTopicPath,
+        ),
+      };
     case "load-error":
       return { ...store, loading: false, loadError: action.message };
     case "status":
@@ -195,8 +233,23 @@ function reduce(store: CourseStore, action: Action): CourseStore {
         : store;
     case "glossary":
       return withState(store, { glossary: action.entries });
-    case "topics":
-      return withState(store, { topics: action.topics });
+    case "topics": {
+      const previousCurrentPath =
+        store.state === undefined ? undefined : currentTopicPath(store.state.topics);
+      const nextCurrentPath = currentTopicPath(action.topics);
+      const followsCurrent =
+        store.selectedTopicPath === undefined ||
+        store.selectedTopicPath === previousCurrentPath;
+      const selectedTopicPath =
+        followsCurrent || !hasTopicPath(action.topics, store.selectedTopicPath)
+          ? nextCurrentPath ?? firstTopicPath(action.topics)
+          : store.selectedTopicPath;
+
+      return {
+        ...withState(store, { topics: action.topics }),
+        selectedTopicPath,
+      };
+    }
     case "mastery":
       return withState(store, { mastery: action.entries });
     case "feynman":
@@ -205,11 +258,8 @@ function reduce(store: CourseStore, action: Action): CourseStore {
       return applyAgentStream(store, action.payload);
     case "connection":
       return { ...store, connected: action.connected };
-    case "refresh-lessons":
-      return withState(store, {
-        lessons: action.state.lessons,
-        demos: action.state.demos,
-      });
+    case "select-topic":
+      return { ...store, selectedTopicPath: action.path };
     default:
       return store;
   }
@@ -220,6 +270,7 @@ const CourseStoreContext = createContext<
       store: CourseStore;
       courseId: number;
       prependTranscript: (entries: TranscriptEntry[]) => void;
+      selectTopic: (path: string) => void;
     }
   | undefined
 >(undefined);
@@ -239,6 +290,9 @@ export function CourseStoreProvider({
   const seenStreamEvents = useRef(new Set<string>());
   const prependTranscript = useCallback((entries: TranscriptEntry[]) => {
     dispatch({ type: "prepend-transcript", entries });
+  }, []);
+  const selectTopic = useCallback((path: string) => {
+    dispatch({ type: "select-topic", path });
   }, []);
 
   useEffect(() => {
@@ -306,13 +360,6 @@ export function CourseStoreProvider({
           seenStreamEvents.current.add(key);
           dispatch({ type: "agent-stream", payload });
         }),
-        lesson: forCourse(() => {
-          // Lesson files changed on disk; refetch the rendered snapshot.
-          void api
-            .getCourse(courseId)
-            .then((state) => dispatch({ type: "refresh-lessons", state }))
-            .catch(() => undefined);
-        }),
       },
       (connected) => dispatch({ type: "connection", connected }),
     );
@@ -324,8 +371,8 @@ export function CourseStoreProvider({
   }, [courseId]);
 
   const value = useMemo(
-    () => ({ store, courseId, prependTranscript }),
-    [store, courseId, prependTranscript],
+    () => ({ store, courseId, prependTranscript, selectTopic }),
+    [store, courseId, prependTranscript, selectTopic],
   );
 
   return (

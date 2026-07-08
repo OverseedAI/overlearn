@@ -146,9 +146,9 @@ function TranscriptEntryBody({ entry }: { entry: TranscriptEntry }) {
       </p>
     );
   }
-  if (entry.kind === "lesson") {
+  if (entry.kind === "journal-note") {
     return (
-      <p className="text-xs italic text-muted-foreground">Lesson updated.</p>
+      <p className="text-xs italic text-muted-foreground">Study note added.</p>
     );
   }
   if (entry.kind === "feynman-check") {

@@ -39,6 +39,7 @@ import {
   STORE_SCHEMA_VERSION,
   upsertDemo,
   upsertGlossaryEntry,
+  upsertJournalDemoPin,
   upsertTopic,
   withStoreTransaction,
   type Store,
@@ -323,12 +324,18 @@ describe("store query API", () => {
         turn: 1,
         createdAt: "2026-01-06T00:02:00.000Z",
       });
+      upsertJournalDemoPin(store, course.id, {
+        topicId: firstTopic.id,
+        demoId: demo.id,
+        turn: 3,
+        createdAt: "2026-01-06T00:04:00.000Z",
+      });
       appendJournalEntry(store, course.id, {
         topicId: firstTopic.id,
         kind: "summary",
         bodyMarkdown: "Divide 72 by the percent rate.",
         turn: 2,
-        createdAt: "2026-01-06T00:03:00.000Z",
+        createdAt: "2026-01-06T00:05:00.000Z",
       });
       expect(listJournalEntries(store, course.id, firstTopic.id)).toMatchObject([
         {
@@ -341,7 +348,8 @@ describe("store query API", () => {
           kind: "demo",
           bodyMarkdown: null,
           demoId: demo.id,
-          turn: 1,
+          turn: 3,
+          createdAt: "2026-01-06T00:04:00.000Z",
         },
         {
           kind: "summary",

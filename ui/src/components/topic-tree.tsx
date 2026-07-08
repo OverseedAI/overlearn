@@ -17,6 +17,7 @@ type TopicTreeProps = {
   topics: TopicNode[];
   disabled?: boolean;
   onNavigate: (path: string) => void;
+  onSelectTopic: (path: string) => void;
 };
 
 function containsCurrent(topic: TopicNode): boolean {
@@ -27,11 +28,26 @@ function TopicBranch({
   topic,
   disabled,
   onNavigate,
+  onSelectTopic,
 }: {
   topic: TopicNode;
   disabled: boolean;
   onNavigate: (path: string) => void;
+  onSelectTopic: (path: string) => void;
 }) {
+  const selectOrNavigate = () => {
+    if (disabled) {
+      return;
+    }
+
+    if (topic.state === "frontier") {
+      onNavigate(topic.path);
+      return;
+    }
+
+    onSelectTopic(topic.path);
+  };
+
   if (topic.children.length === 0) {
     return (
       <SidebarMenuSubItem>
@@ -43,11 +59,7 @@ function TopicBranch({
           <button
             type="button"
             className="w-full"
-            onClick={() => {
-              if (!disabled && !topic.current) {
-                onNavigate(topic.path);
-              }
-            }}
+            onClick={selectOrNavigate}
           >
             <span className="truncate">{topic.title}</span>
           </button>
@@ -68,11 +80,7 @@ function TopicBranch({
           >
             <button
               type="button"
-              onClick={() => {
-                if (!disabled && !topic.current) {
-                  onNavigate(topic.path);
-                }
-              }}
+              onClick={selectOrNavigate}
             >
               <span className="truncate">{topic.title}</span>
             </button>
@@ -95,6 +103,7 @@ function TopicBranch({
                 topic={child}
                 disabled={disabled}
                 onNavigate={onNavigate}
+                onSelectTopic={onSelectTopic}
               />
             ))}
           </SidebarMenuSub>
@@ -104,7 +113,12 @@ function TopicBranch({
   );
 }
 
-export function TopicTree({ topics, disabled = false, onNavigate }: TopicTreeProps) {
+export function TopicTree({
+  topics,
+  disabled = false,
+  onNavigate,
+  onSelectTopic,
+}: TopicTreeProps) {
   if (topics.length === 0) {
     return (
       <p className="px-2 py-1.5 text-sm text-muted-foreground">No topics yet.</p>
@@ -121,6 +135,7 @@ export function TopicTree({ topics, disabled = false, onNavigate }: TopicTreePro
               topic={topic}
               disabled={disabled}
               onNavigate={onNavigate}
+              onSelectTopic={onSelectTopic}
             />
           ))}
         </SidebarMenuSub>

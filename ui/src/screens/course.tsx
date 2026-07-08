@@ -21,9 +21,13 @@ import { Transcript } from "@/components/transcript";
 import { api, ApiError } from "@/lib/api";
 import { useCourseStore } from "@/lib/course-store";
 import { cn } from "@/lib/utils";
-import type { HarnessSummary, UiStatus } from "@/lib/types";
+import type { HarnessSummary, TopicNode, UiStatus } from "@/lib/types";
 
 const RAIL_KEY = "overlearn-rail-open";
+
+function flattenTopics(topics: readonly TopicNode[]): TopicNode[] {
+  return topics.flatMap((topic) => [topic, ...flattenTopics(topic.children)]);
+}
 
 function StatusDot({ status }: { status: UiStatus | undefined }) {
   const { color, label, pulse } =
@@ -190,22 +194,13 @@ export function CourseScreen() {
   const [railOpen, setRailOpen] = useState(
     () => localStorage.getItem(RAIL_KEY) !== "closed",
   );
-  const [railTab, setRailTab] = useState<RailTab>("lesson");
-  const [selectedLessonId, setSelectedLessonId] = useState<string>();
+  const [railTab, setRailTab] = useState<RailTab>("journal");
 
   const toggleRail = () => {
     setRailOpen((current) => {
       localStorage.setItem(RAIL_KEY, current ? "closed" : "open");
       return !current;
     });
-  };
-
-  const openLesson = (lessonId: string) => {
-    setSelectedLessonId(lessonId);
-    setRailTab("lesson");
-    if (!railOpen) {
-      toggleRail();
-    }
   };
 
   const loadOlderTranscript = useCallback(
@@ -234,8 +229,12 @@ export function CourseScreen() {
     );
   }
 
-  const { course, transcript, glossary, lessons, activeFeynmanCheck } =
-    store.state;
+  const { course, transcript, glossary, topics, activeFeynmanCheck } = store.state;
+  const flatTopics = flattenTopics(topics);
+  const selectedTopic =
+    flatTopics.find((topic) => topic.path === store.selectedTopicPath) ??
+    flatTopics.find((topic) => topic.current) ??
+    flatTopics[0];
   const busy = store.status === "agent-working" || store.status === "wrapping-up";
   const ended = store.status === "session-ended";
   const composerDisabled = busy || ended;
@@ -274,7 +273,6 @@ export function CourseScreen() {
             courseId={courseId}
             activity={store.activity}
             showTyping={busy && !store.activity}
-            onOpenLesson={openLesson}
             onLoadOlder={loadOlderTranscript}
             onPrependEntries={prependTranscript}
           />
@@ -315,12 +313,10 @@ export function CourseScreen() {
           <aside className="hidden w-80 shrink-0 border-l lg:block">
             <StudyRail
               courseId={courseId}
-              lessons={lessons}
+              topic={selectedTopic}
               glossary={glossary}
               tab={railTab}
               onTabChange={setRailTab}
-              selectedLessonId={selectedLessonId ?? lessons.selectedLessonId}
-              onSelectLesson={setSelectedLessonId}
             />
           </aside>
         ) : null}

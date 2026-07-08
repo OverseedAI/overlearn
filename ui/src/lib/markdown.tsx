@@ -30,20 +30,3 @@ export function Markdown({
     />
   );
 }
-
-/** Render daemon-prerendered HTML (lessons) with the same prose styling. */
-export function ProseHtml({
-  html,
-  className,
-}: {
-  html: string;
-  className?: string;
-}) {
-  const safe = useMemo(() => DOMPurify.sanitize(html), [html]);
-  return (
-    <div
-      className={cn(PROSE, className)}
-      dangerouslySetInnerHTML={{ __html: safe }}
-    />
-  );
-}

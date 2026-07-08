@@ -85,26 +85,6 @@ export type CoursePatch = Readonly<{
   manifestExtra?: JsonRecord;
 }>;
 
-export type Lesson = Readonly<{
-  id: number;
-  courseId: number;
-  lessonId: string;
-  bodyMarkdown: string;
-  position: number;
-  sourceMtimeMs: number | null;
-  createdAt: string;
-  updatedAt: string;
-}>;
-
-export type LessonInput = Readonly<{
-  lessonId: string;
-  bodyMarkdown: string;
-  position?: number;
-  sourceMtimeMs?: number | null;
-  createdAt?: string;
-  updatedAt?: string;
-}>;
-
 export type TopicStatus = "active" | "archived";
 export type TopicNodeState = "frontier" | "visited" | "current";
 
@@ -384,17 +364,6 @@ type ProfileRow = Readonly<{
   onboarding_state: string;
   settings_json: string;
   preferred_harness: string | null;
-  created_at: string;
-  updated_at: string;
-}>;
-
-type LessonRow = Readonly<{
-  id: number;
-  course_id: number;
-  lesson_id: string;
-  body_markdown: string;
-  position: number;
-  source_mtime_ms: number | null;
   created_at: string;
   updated_at: string;
 }>;
@@ -1047,17 +1016,6 @@ const profileFromRow = (row: ProfileRow): Profile => ({
   updatedAt: row.updated_at,
 });
 
-const lessonFromRow = (row: LessonRow): Lesson => ({
-  id: toNumber(row.id),
-  courseId: toNumber(row.course_id),
-  lessonId: row.lesson_id,
-  bodyMarkdown: row.body_markdown,
-  position: toNumber(row.position),
-  sourceMtimeMs: row.source_mtime_ms,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-});
-
 export const deriveTopicNodeState = (
   topic: Readonly<{ enteredAt: string | null; isCurrent: boolean }>,
 ): TopicNodeState => {
@@ -1388,23 +1346,6 @@ export const patchProfile = (store: Store, patch: ProfilePatch): Profile => {
     );
 
   return getProfile(store);
-};
-
-export const upsertLesson = (
-  store: Store,
-  courseId: number,
-  input: LessonInput,
-): Lesson => {
-  requireCourse(store, courseId);
-  void input;
-  throw new Error(
-    "Lessons have been replaced by topic journal entries in store schema v2.",
-  );
-};
-
-export const listLessons = (store: Store, courseId: number): readonly Lesson[] => {
-  requireCourse(store, courseId);
-  return [];
 };
 
 const topicRowsForCourse = (
@@ -2428,6 +2369,70 @@ export const appendJournalEntry = (
   return journalEntryFromRow(row);
 };
 
+export const upsertJournalDemoPin = (
+  store: Store,
+  courseId: number,
+  input: Readonly<{
+    topicId: number;
+    demoId: number;
+    turn?: number | null;
+    createdAt?: string;
+  }>,
+): TopicJournalEntry => {
+  requireCourse(store, courseId);
+  requireTopicId(store, courseId, input.topicId);
+  requireDemoId(store, courseId, input.demoId);
+
+  const existing = store.db
+    .query(
+      `
+        SELECT *
+        FROM topic_journal_entries
+        WHERE course_id = ?1
+          AND topic_id = ?2
+          AND kind = 'demo'
+          AND demo_id = ?3
+        LIMIT 1
+      `,
+    )
+    .get(courseId, input.topicId, input.demoId) as
+    | TopicJournalEntryRow
+    | null
+    | undefined;
+
+  if (isMissingRow(existing)) {
+    return appendJournalEntry(store, courseId, {
+      topicId: input.topicId,
+      kind: "demo",
+      demoId: input.demoId,
+      ...(input.turn === undefined ? {} : { turn: input.turn }),
+      ...(input.createdAt === undefined ? {} : { createdAt: input.createdAt }),
+    });
+  }
+
+  const createdAt = input.createdAt ?? nowIso();
+  store.db
+    .query(
+      `
+        UPDATE topic_journal_entries
+        SET turn = ?1,
+            created_at = ?2
+        WHERE id = ?3
+      `,
+    )
+    .run(input.turn ?? null, createdAt, existing.id);
+
+  const row = store.db
+    .query("SELECT * FROM topic_journal_entries WHERE id = ?1")
+    .get(existing.id) as TopicJournalEntryRow | null | undefined;
+
+  if (isMissingRow(row)) {
+    throw new Error("Unable to update journal demo pin.");
+  }
+
+  return journalEntryFromRow(row);
+};
+
 export const listJournalEntries = (
   store: Store,
   courseId: number,
@@ -2443,7 +2448,7 @@ export const listJournalEntries = (
         FROM topic_journal_entries
         WHERE course_id = ?1
           AND topic_id = ?2
-        ORDER BY id
+        ORDER BY created_at, id
       `,
     )
     .all(courseId, topicId) as readonly TopicJournalEntryRow[];

@@ -304,7 +304,7 @@ const teachingMcpToolNames: readonly TeachingToolName[] = [
   "get_course_state",
   "upsert_topic",
   "emit_demo",
-  "upsert_lesson",
+  "append_lesson_note",
   "record_mastery",
   "feynman_check",
   "upsert_glossary_entry",
