@@ -1,4 +1,5 @@
 .bun-cache/
+.claude/
 .idea/
 .tmp/
 .wrangler/
