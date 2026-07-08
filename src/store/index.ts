@@ -317,6 +317,17 @@ export type TranscriptPage = Readonly<{
   nextAfterId: number | null;
 }>;
 
+export type TranscriptBeforePageOptions = Readonly<{
+  beforeId?: number;
+  limit?: number;
+}>;
+
+export type TranscriptBeforePage = Readonly<{
+  entries: readonly TranscriptEntry[];
+  hasMore: boolean;
+  nextBeforeId: number | null;
+}>;
+
 export type Session = Readonly<{
   id: number;
   courseId: number;
@@ -2555,6 +2566,38 @@ export const pageTranscript = (
   return {
     entries: pageRows.map(transcriptEntryFromRow),
     nextAfterId: extra === undefined ? null : toNumber(pageRows.at(-1)?.id ?? 0),
+  };
+};
+
+export const pageTranscriptBefore = (
+  store: Store,
+  courseId: number,
+  options: TranscriptBeforePageOptions = {},
+): TranscriptBeforePage => {
+  const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+  const rows = store.db
+    .query(
+      `
+        SELECT *
+        FROM transcript
+        WHERE course_id = ?1
+          AND id < ?2
+        ORDER BY id DESC
+        LIMIT ?3
+      `,
+    )
+    .all(
+      courseId,
+      options.beforeId ?? Number.MAX_SAFE_INTEGER,
+      limit + 1,
+    ) as readonly TranscriptRow[];
+  const pageRows = [...rows.slice(0, limit)].reverse();
+
+  return {
+    entries: pageRows.map(transcriptEntryFromRow),
+    hasMore: rows.length > limit,
+    nextBeforeId:
+      pageRows.length === 0 ? null : toNumber(pageRows[0]?.id ?? 0),
   };
 };
 

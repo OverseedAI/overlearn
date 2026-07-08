@@ -186,7 +186,7 @@ function Composer({
 }
 
 export function CourseScreen() {
-  const { store, courseId } = useCourseStore();
+  const { store, courseId, prependTranscript } = useCourseStore();
   const [railOpen, setRailOpen] = useState(
     () => localStorage.getItem(RAIL_KEY) !== "closed",
   );
@@ -207,6 +207,12 @@ export function CourseScreen() {
       toggleRail();
     }
   };
+
+  const loadOlderTranscript = useCallback(
+    (beforeId: number) =>
+      api.pageTranscript(courseId, { before: beforeId, limit: 50 }),
+    [courseId],
+  );
 
   if (store.loading) {
     return (
@@ -269,6 +275,8 @@ export function CourseScreen() {
             activity={store.activity}
             showTyping={busy && !store.activity}
             onOpenLesson={openLesson}
+            onLoadOlder={loadOlderTranscript}
+            onPrependEntries={prependTranscript}
           />
 
           <div className="shrink-0 border-t">

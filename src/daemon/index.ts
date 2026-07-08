@@ -35,6 +35,7 @@ import {
   listLessons,
   openStore,
   pageTranscript,
+  pageTranscriptBefore,
   patchProfile,
   patchCourse,
   readTopicTree,
@@ -161,53 +162,50 @@ type ActiveFeynmanCheck = Readonly<{
   }>;
 }>;
 
-type TranscriptEntry =
-  | Readonly<{
+type TranscriptEntryBase = Readonly<{
+  id: number;
+  topicId: number | null;
+  at: string;
+  turn?: number;
+}>;
+
+type TranscriptEntry = TranscriptEntryBase &
+  (
+    | Readonly<{
       role: "learner" | "agent";
       text: string;
-      at: string;
       kind?: "text";
-      turn?: number;
     }>
-  | Readonly<{
+    | Readonly<{
       role: "agent";
       kind: "demo";
       file: string;
       title?: string;
-      at: string;
-      turn?: number;
     }>
-  | Readonly<{
+    | Readonly<{
       role: "agent";
       kind: "lesson";
       lesson: string;
-      at: string;
-      turn?: number;
     }>
-  | Readonly<{
+    | Readonly<{
       role: "agent";
       kind: "feynman-check";
       concept: string;
       prompt: string;
-      at: string;
-      turn?: number;
     }>
-  | Readonly<{
+    | Readonly<{
       role: "learner";
       kind: "feynman-answer";
       concept: string;
       text: string;
-      at: string;
-      turn?: number;
     }>
-  | Readonly<{
+    | Readonly<{
       role: "system";
       kind: "tool-call";
       text: string;
-      at: string;
       tool: string;
-      turn?: number;
-    }>;
+    }>
+  );
 
 type HarnessSummary = Readonly<{
   id: string;
@@ -337,6 +335,18 @@ const parsePositiveInteger = (
   }
 
   return parsed;
+};
+
+const parseOptionalPositiveIntegerParam = (
+  params: URLSearchParams,
+  name: string,
+): number | undefined => {
+  const value = params.get(name);
+  if (value === null || value.length === 0) {
+    return undefined;
+  }
+
+  return parsePositiveInteger(value, name);
 };
 
 export const resolveSessionIdleTtlMs = (env: Env = process.env): number =>
@@ -1044,13 +1054,21 @@ const transcriptPayloadRecord = (
 ): Record<string, unknown> =>
   isRecord(entry.payload) ? entry.payload : {};
 
+const transcriptEntryBase = (entry: StoreTranscriptEntry) => ({
+  id: entry.id,
+  topicId: entry.topicId,
+  at: entry.ts,
+  turn: entry.turn,
+});
+
 const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
   const payload = transcriptPayloadRecord(entry);
-  const at = entry.ts;
+  const base = transcriptEntryBase(entry);
 
   if (entry.kind === "demo") {
     const title = payload["title"];
     return {
+      ...base,
       role: "agent",
       kind: "demo",
       file:
@@ -1058,64 +1076,57 @@ const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
           ? payload["file"]
           : entry.content,
       ...(typeof title === "string" && title.length > 0 ? { title } : {}),
-      at,
-      turn: entry.turn,
     };
   }
 
   if (entry.kind === "lesson") {
     return {
+      ...base,
       role: "agent",
       kind: "lesson",
       lesson:
         typeof payload["lessonId"] === "string" && payload["lessonId"].length > 0
           ? payload["lessonId"]
           : entry.content,
-      at,
-      turn: entry.turn,
     };
   }
 
   if (entry.kind === "feynman-check") {
     return {
+      ...base,
       role: "agent",
       kind: "feynman-check",
       concept:
         typeof payload["concept"] === "string" ? payload["concept"] : "unknown",
       prompt: entry.content,
-      at,
-      turn: entry.turn,
     };
   }
 
   if (entry.kind === "feynman-answer") {
     return {
+      ...base,
       role: "learner",
       kind: "feynman-answer",
       concept:
         typeof payload["concept"] === "string" ? payload["concept"] : "unknown",
       text: entry.content,
-      at,
-      turn: entry.turn,
     };
   }
 
   if (entry.kind === "tool-call") {
     return {
+      ...base,
       role: "system",
       kind: "tool-call",
       text: entry.content,
-      at,
       tool: typeof payload["tool"] === "string" ? payload["tool"] : "tool",
-      turn: entry.turn,
     };
   }
 
   return {
+    ...base,
     role: entry.role === "agent" ? "agent" : "learner",
     text: entry.content,
-    at,
-    turn: entry.turn,
   };
 };
 
@@ -1141,6 +1152,20 @@ const readTranscriptTail = (
   }
 
   return tail.map(uiTranscriptEntry);
+};
+
+const readTranscriptBefore = (
+  store: Store,
+  courseId: number,
+  options: Readonly<{ beforeId?: number; limit?: number }>,
+) => {
+  const page = pageTranscriptBefore(store, courseId, options);
+
+  return {
+    entries: page.entries.map(uiTranscriptEntry),
+    hasMore: page.hasMore,
+    nextBeforeId: page.nextBeforeId,
+  };
 };
 
 const lessonSnapshot = (
@@ -2362,7 +2387,7 @@ export const runDaemon = async (
 
   const handleCourseApi = async (
     request: Request,
-    _requestUrl: URL,
+    requestUrl: URL,
     courseId: number,
     rest: readonly string[],
   ): Promise<Response> => {
@@ -2441,6 +2466,35 @@ export const runDaemon = async (
     }
 
     const [action, extra] = rest;
+
+    if (action === "transcript" && extra === undefined) {
+      if (request.method !== "GET") {
+        return emptyResponse(405);
+      }
+
+      try {
+        const beforeId = parseOptionalPositiveIntegerParam(
+          requestUrl.searchParams,
+          "before",
+        );
+        const limit = parseOptionalPositiveIntegerParam(
+          requestUrl.searchParams,
+          "limit",
+        );
+
+        return jsonResponse(
+          readTranscriptBefore(store, courseId, {
+            ...(beforeId === undefined ? {} : { beforeId }),
+            ...(limit === undefined ? {} : { limit }),
+          }),
+        );
+      } catch (error) {
+        return textResponse(
+          error instanceof Error ? error.message : "Invalid transcript page.",
+          400,
+        );
+      }
+    }
 
     if (action === "submit" && extra === undefined && request.method === "POST") {
       try {

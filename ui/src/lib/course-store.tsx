@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -51,6 +52,7 @@ type Action =
   | { type: "status"; status: UiStatus; message?: string }
   | { type: "message"; entry: TranscriptEntry }
   | { type: "transcript"; entries: TranscriptEntry[] }
+  | { type: "prepend-transcript"; entries: TranscriptEntry[] }
   | { type: "glossary"; entries: GlossaryEntry[] }
   | { type: "topics"; topics: TopicNode[] }
   | { type: "mastery"; entries: MasteryEntry[] }
@@ -64,6 +66,23 @@ function withState(
   update: Partial<CourseState>,
 ): CourseStore {
   return store.state ? { ...store, state: { ...store.state, ...update } } : store;
+}
+
+function uniqueTranscriptEntries(
+  entries: readonly TranscriptEntry[],
+): TranscriptEntry[] {
+  const seen = new Set<number>();
+  const result: TranscriptEntry[] = [];
+
+  for (const entry of entries) {
+    if (seen.has(entry.id)) {
+      continue;
+    }
+    seen.add(entry.id);
+    result.push(entry);
+  }
+
+  return result;
 }
 
 function applyAgentStream(
@@ -141,15 +160,39 @@ function reduce(store: CourseStore, action: Action): CourseStore {
         action.entry.role === "agent" && (action.entry.kind ?? "text") === "text";
       return {
         ...withState(store, {
-          transcript: [...store.state.transcript, action.entry],
+          transcript: uniqueTranscriptEntries([
+            ...store.state.transcript,
+            action.entry,
+          ]),
         }),
         ...(clearsActivity && store.activity
           ? { activity: { ...store.activity, text: "" } }
           : {}),
       };
     }
-    case "transcript":
-      return withState(store, { transcript: action.entries });
+    case "transcript": {
+      if (!store.state) {
+        return store;
+      }
+      const firstTailId = action.entries[0]?.id;
+      const retainedOlder =
+        firstTailId === undefined
+          ? []
+          : store.state.transcript.filter((entry) => entry.id < firstTailId);
+
+      return withState(store, {
+        transcript: uniqueTranscriptEntries([...retainedOlder, ...action.entries]),
+      });
+    }
+    case "prepend-transcript":
+      return store.state
+        ? withState(store, {
+            transcript: uniqueTranscriptEntries([
+              ...action.entries,
+              ...store.state.transcript,
+            ]),
+          })
+        : store;
     case "glossary":
       return withState(store, { glossary: action.entries });
     case "topics":
@@ -173,7 +216,12 @@ function reduce(store: CourseStore, action: Action): CourseStore {
 }
 
 const CourseStoreContext = createContext<
-  { store: CourseStore; courseId: number } | undefined
+  | {
+      store: CourseStore;
+      courseId: number;
+      prependTranscript: (entries: TranscriptEntry[]) => void;
+    }
+  | undefined
 >(undefined);
 
 export function CourseStoreProvider({
@@ -189,6 +237,9 @@ export function CourseStoreProvider({
   });
   // Replayed agent-stream events must be applied at most once.
   const seenStreamEvents = useRef(new Set<string>());
+  const prependTranscript = useCallback((entries: TranscriptEntry[]) => {
+    dispatch({ type: "prepend-transcript", entries });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -272,7 +323,10 @@ export function CourseStoreProvider({
     };
   }, [courseId]);
 
-  const value = useMemo(() => ({ store, courseId }), [store, courseId]);
+  const value = useMemo(
+    () => ({ store, courseId, prependTranscript }),
+    [store, courseId, prependTranscript],
+  );
 
   return (
     <CourseStoreContext.Provider value={value}>

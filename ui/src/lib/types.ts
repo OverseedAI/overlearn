@@ -85,47 +85,52 @@ export type ActiveFeynmanCheck = {
   replaced?: { concept: string; issuedAt: string; replacedAt: string };
 };
 
-export type TranscriptEntry =
-  | {
+type TranscriptEntryBase = {
+  id: number;
+  topicId: number | null;
+  at: string;
+  turn?: number;
+};
+
+export type TranscriptEntry = TranscriptEntryBase &
+  (
+    | {
       role: "learner" | "agent";
       text: string;
-      at: string;
       kind?: "text";
-      turn?: number;
     }
-  | {
+    | {
       role: "agent";
       kind: "demo";
       file: string;
       title?: string;
-      at: string;
-      turn?: number;
     }
-  | { role: "agent"; kind: "lesson"; lesson: string; at: string; turn?: number }
-  | {
+    | { role: "agent"; kind: "lesson"; lesson: string }
+    | {
       role: "agent";
       kind: "feynman-check";
       concept: string;
       prompt: string;
-      at: string;
-      turn?: number;
     }
-  | {
+    | {
       role: "learner";
       kind: "feynman-answer";
       concept: string;
       text: string;
-      at: string;
-      turn?: number;
     }
-  | {
+    | {
       role: "system";
       kind: "tool-call";
       text: string;
-      at: string;
       tool: string;
-      turn?: number;
-    };
+    }
+  );
+
+export type TranscriptPage = {
+  entries: TranscriptEntry[];
+  hasMore: boolean;
+  nextBeforeId: number | null;
+};
 
 export type RenderedLesson = {
   id: string;
