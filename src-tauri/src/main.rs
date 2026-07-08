@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     sync::{
@@ -9,7 +9,7 @@ use std::{
         Mutex,
     },
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use tauri::{
     image::Image,
@@ -25,6 +25,8 @@ use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(30);
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HTTP_TIMEOUT: Duration = Duration::from_millis(800);
+const STALE_DAEMON_TERM_TIMEOUT: Duration = Duration::from_secs(3);
+const STALE_DAEMON_KILL_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 struct RunningDaemon {
@@ -53,6 +55,12 @@ struct HealthPayload {
 struct StatusPayload {
     status: String,
     _has_seen_wait: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DaemonInfo {
+    port: u16,
+    token: String,
 }
 
 #[derive(Default)]
@@ -93,12 +101,57 @@ impl DesktopState {
     fn take_daemon(&self) -> Result<Option<RunningDaemon>, String> {
         Ok(lock_mutex(&self.daemon)?.take())
     }
+
+    fn daemon_info_snapshot(&self) -> Result<Option<DaemonInfo>, String> {
+        let daemon = lock_mutex(&self.daemon)?;
+        let Some(daemon) = daemon.as_ref() else {
+            return Ok(None);
+        };
+
+        Ok(Some(DaemonInfo {
+            port: daemon.port,
+            token: daemon.token.clone(),
+        }))
+    }
 }
 
 fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String> {
     mutex
         .lock()
         .map_err(|_| "Desktop state lock was poisoned.".to_string())
+}
+
+#[tauri::command]
+async fn daemon_info(state: tauri::State<'_, DesktopState>) -> Result<DaemonInfo, String> {
+    wait_for_daemon_info(state.inner(), DAEMON_START_TIMEOUT, DAEMON_POLL_INTERVAL).await
+}
+
+async fn wait_for_daemon_info(
+    state: &DesktopState,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<DaemonInfo, String> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(info) = state.daemon_info_snapshot()? {
+            return Ok(info);
+        }
+
+        if Instant::now() >= deadline {
+            return Err("Overlearn daemon did not start in time.".to_string());
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let delay = poll_interval.min(remaining);
+        if delay.is_zero() {
+            continue;
+        }
+
+        tauri::async_runtime::spawn_blocking(move || thread::sleep(delay))
+            .await
+            .map_err(|error| format!("Daemon info wait failed: {error}"))?;
+    }
 }
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -115,11 +168,12 @@ fn read_daemon_metadata(data_dir: &Path) -> Result<Option<DaemonMetadata>, Strin
         return Ok(None);
     }
 
-    let contents = fs::read_to_string(&path)
-        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
-    serde_json::from_str(&contents)
-        .map(Some)
-        .map_err(|error| format!("Invalid daemon metadata in {}: {error}", path.display()))
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Failed to read {}: {error}", path.display())),
+    };
+    Ok(serde_json::from_str(&contents).ok())
 }
 
 fn read_live_daemon(data_dir: &Path) -> Result<Option<RunningDaemon>, String> {
@@ -169,18 +223,21 @@ fn start_app_daemon(app: &AppHandle) -> Result<RunningDaemon, String> {
     fs::create_dir_all(&data_dir)
         .map_err(|error| format!("Failed to create {}: {error}", data_dir.display()))?;
 
-    if let Some(daemon) = read_live_daemon(&data_dir)? {
-        return Ok(daemon);
-    }
+    terminate_existing_daemon(&data_dir)?;
 
-    let (mut rx, child) = app
+    let mut command = app
         .shell()
         .sidecar("learn")
         .map_err(stringify_error)?
         .arg("daemon")
-        .env("OVERLEARN_DATA_DIR", data_dir.display().to_string())
-        .spawn()
-        .map_err(stringify_error)?;
+        .env("OVERLEARN_DATA_DIR", data_dir.display().to_string());
+
+    #[cfg(debug_assertions)]
+    {
+        command = command.env("OVERLEARN_DEV_ORIGINS", tauri_dev_origins());
+    }
+
+    let (mut rx, child) = command.spawn().map_err(stringify_error)?;
     let child_pid = child.pid();
 
     tauri::async_runtime::spawn(async move {
@@ -207,6 +264,98 @@ fn start_app_daemon(app: &AppHandle) -> Result<RunningDaemon, String> {
     });
 
     wait_for_live_daemon(&data_dir)
+}
+
+#[cfg(debug_assertions)]
+fn tauri_dev_origins() -> String {
+    const VITE_DEV_ORIGINS: &str = "http://localhost:1420,http://127.0.0.1:1420";
+
+    match std::env::var("OVERLEARN_DEV_ORIGINS") {
+        Ok(existing) if !existing.trim().is_empty() => format!("{existing},{VITE_DEV_ORIGINS}"),
+        _ => VITE_DEV_ORIGINS.to_string(),
+    }
+}
+
+fn terminate_existing_daemon(data_dir: &Path) -> Result<(), String> {
+    let Some(metadata) = read_daemon_metadata(data_dir)? else {
+        remove_daemon_metadata(data_dir);
+        return Ok(());
+    };
+
+    if !pid_is_alive(metadata.pid) {
+        remove_daemon_metadata(data_dir);
+        return Ok(());
+    }
+
+    terminate_pid(metadata.pid)?;
+    remove_daemon_metadata(data_dir);
+    Ok(())
+}
+
+fn terminate_pid(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        signal_pid(pid, libc::SIGTERM, "SIGTERM")?;
+        if wait_for_pid_exit(pid, STALE_DAEMON_TERM_TIMEOUT) {
+            return Ok(());
+        }
+
+        signal_pid(pid, libc::SIGKILL, "SIGKILL")?;
+        if wait_for_pid_exit(pid, STALE_DAEMON_KILL_TIMEOUT) {
+            return Ok(());
+        }
+
+        Err(format!("Daemon pid {pid} did not exit after SIGKILL."))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn signal_pid(pid: u32, signal: libc::c_int, signal_name: &str) -> Result<(), String> {
+    let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Failed to send {signal_name} to daemon pid {pid}: {error}"
+    ))
+}
+
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let started_at = Instant::now();
+
+    while started_at.elapsed() < timeout {
+        if !pid_is_alive(pid) {
+            return true;
+        }
+
+        thread::sleep(DAEMON_POLL_INTERVAL);
+    }
+
+    !pid_is_alive(pid)
+}
+
+fn remove_daemon_metadata(data_dir: &Path) {
+    let path = daemon_metadata_path(data_dir);
+    if let Err(error) = fs::remove_file(&path) {
+        if error.kind() != ErrorKind::NotFound {
+            eprintln!(
+                "Failed to remove stale daemon metadata {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 fn pid_is_alive(pid: u32) -> bool {
@@ -495,21 +644,6 @@ fn setup_window_focus(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn navigate_to_daemon(app: &AppHandle, daemon: &RunningDaemon) -> Result<(), String> {
-    let Some(window) = app.get_webview_window("main") else {
-        return Err("Main window was not created.".to_string());
-    };
-    let url = tauri::Url::parse(&format!(
-        "http://127.0.0.1:{}/?token={}",
-        daemon.port, daemon.token
-    ))
-    .map_err(stringify_error)?;
-
-    window.navigate(url).map_err(stringify_error)?;
-    window.set_focus().ok();
-    Ok(())
-}
-
 fn build_tray(app: &AppHandle) -> Result<(), String> {
     let show =
         MenuItem::with_id(app, "show", "Show", true, None::<&str>).map_err(stringify_error)?;
@@ -597,7 +731,6 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     state
         .set_daemon(Some(daemon.clone()))
         .map_err(to_boxed_error)?;
-    navigate_to_daemon(app.handle(), &daemon).map_err(to_boxed_error)?;
     start_sse_subscription(app.handle().clone(), state.inner(), daemon);
 
     Ok(())
@@ -633,6 +766,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(DesktopState::default())
+        .invoke_handler(tauri::generate_handler![daemon_info])
         .setup(setup_app)
         .build(tauri::generate_context!())
         .expect("error while building Tauri application");
@@ -642,7 +776,65 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_http_response;
+    use super::{parse_http_response, wait_for_daemon_info, DesktopState, RunningDaemon};
+    use std::{
+        path::PathBuf,
+        sync::Arc,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn daemon_info_waits_until_daemon_is_registered() {
+        let state = Arc::new(DesktopState::default());
+        let setter_state = Arc::clone(&state);
+
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            setter_state
+                .set_daemon(Some(RunningDaemon {
+                    pid: 42,
+                    port: 4242,
+                    token: "ready-token".to_string(),
+                    data_dir: PathBuf::from("/tmp/overlearn-test"),
+                }))
+                .unwrap();
+        });
+
+        let info = tauri::async_runtime::block_on(wait_for_daemon_info(
+            &state,
+            Duration::from_millis(500),
+            Duration::from_millis(5),
+        ))
+        .unwrap();
+
+        assert_eq!(info.port, 4242);
+        assert_eq!(info.token, "ready-token");
+    }
+
+    #[test]
+    fn daemon_info_returns_poisoned_lock_without_waiting() {
+        let state = DesktopState::default();
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.daemon.lock().unwrap();
+            panic!("poison daemon lock");
+        }));
+        std::panic::set_hook(previous_hook);
+        assert!(poisoned.is_err());
+
+        let started_at = Instant::now();
+        let error = tauri::async_runtime::block_on(wait_for_daemon_info(
+            &state,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        ))
+        .unwrap_err();
+
+        assert_eq!(error, "Desktop state lock was poisoned.");
+        assert!(started_at.elapsed() < Duration::from_millis(50));
+    }
 
     #[test]
     fn parses_content_length_response() {

@@ -14,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { AppScaleControls } from "@/components/app-scale-controls";
 import { FeynmanPanel } from "@/components/feynman-panel";
 import { StudyRail, type RailTab } from "@/components/study-rail";
 import { Transcript } from "@/components/transcript";
@@ -169,7 +170,7 @@ function Composer({
             void send();
           }
         }}
-        className="max-h-48 min-h-12 resize-none bg-card pr-12"
+        className="max-h-48 min-h-16 resize-none bg-card pr-12 text-[15pt] leading-[1.45] md:text-[15pt]"
       />
       <Button
         type="submit"
@@ -240,6 +241,7 @@ export function CourseScreen() {
         <h1 className="min-w-0 truncate text-sm font-medium">{course.title}</h1>
         <StatusDot status={store.status} />
         <div className="ms-auto flex items-center gap-1">
+          <AppScaleControls />
           <HarnessPicker courseId={courseId} disabled={busy || ended} />
           <Tooltip>
             <TooltipTrigger asChild>

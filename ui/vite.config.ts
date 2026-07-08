@@ -17,16 +17,20 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
-  server: daemonPort
-    ? {
-        proxy: {
-          "/api": {
-            target: `http://127.0.0.1:${daemonPort}`,
-            headers: daemonToken
-              ? { Authorization: `Bearer ${daemonToken}` }
-              : {},
+  server: {
+    port: 1420,
+    strictPort: true,
+    ...(daemonPort
+      ? {
+          proxy: {
+            "/api": {
+              target: `http://127.0.0.1:${daemonPort}`,
+              headers: daemonToken
+                ? { Authorization: `Bearer ${daemonToken}` }
+                : {},
+            },
           },
-        },
-      }
-    : {},
+        }
+      : {}),
+  },
 });

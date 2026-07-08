@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { OverlearnWordmark } from "@/components/brand";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { HarnessItem, useHarnesses } from "@/components/harness-list";
 import { api, ApiError } from "@/lib/api";
 import { useProfile } from "@/lib/profile";
-import type { HarnessSummary, OnboardingState } from "@/lib/types";
+import type { OnboardingState } from "@/lib/types";
 
 const STEPS: OnboardingState[] = ["welcome", "connect-agent", "tutorial-offer"];
 
@@ -17,16 +17,6 @@ function errorMessage(cause: unknown): string {
     return cause.message;
   }
   return cause instanceof Error ? cause.message : String(cause);
-}
-
-function harnessStatusLabel(harness: HarnessSummary): string {
-  if (!harness.installed) {
-    return "Not installed";
-  }
-  if (!harness.authenticated) {
-    return "Not logged in";
-  }
-  return harness.version ? harness.version : "Ready";
 }
 
 function StepIndicator({ step }: { step: OnboardingState }) {
@@ -79,7 +69,7 @@ function WelcomeStep() {
           void continueToNext();
         }}
       >
-        <Label htmlFor="onboarding-name">Name (optional)</Label>
+        <Label htmlFor="onboarding-name">Preferred name (optional)</Label>
         <Input
           id="onboarding-name"
           name="name"
@@ -98,118 +88,11 @@ function WelcomeStep() {
   );
 }
 
-function HarnessCard({
-  harness,
-  selected,
-  loggingIn,
-  onSelect,
-  onLogin,
-}: {
-  harness: HarnessSummary;
-  selected: boolean;
-  loggingIn: boolean;
-  onSelect: () => void;
-  onLogin: () => void;
-}) {
-  return (
-    <Card className="flex-row items-start gap-3 p-4">
-      <input
-        id={`onboarding-harness-${harness.id}`}
-        type="radio"
-        name="preferredHarness"
-        className="mt-1 size-4 shrink-0 accent-primary"
-        checked={selected}
-        disabled={!harness.installed}
-        onChange={onSelect}
-      />
-      <div className="min-w-0 flex-1">
-        <Label
-          htmlFor={`onboarding-harness-${harness.id}`}
-          className="text-sm font-normal"
-        >
-          {harness.name}
-        </Label>
-        <div className="mt-1 flex items-center gap-2">
-          <Badge
-            variant="secondary"
-            className={
-              harness.authenticated ? "bg-success/15 text-success" : undefined
-            }
-          >
-            {harnessStatusLabel(harness)}
-          </Badge>
-        </div>
-      </div>
-      {harness.installed && !harness.authenticated ? (
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          disabled={loggingIn}
-          onClick={onLogin}
-        >
-          {loggingIn ? "Logging in…" : "Log in"}
-        </Button>
-      ) : null}
-    </Card>
-  );
-}
-
 function ConnectAgentStep() {
-  const { profile, update, refresh } = useProfile();
-  const [harnesses, setHarnesses] = useState<HarnessSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loggingInId, setLoggingInId] = useState<string>();
+  const { refresh } = useProfile();
+  const { harnesses, loading, load, loggingInId, select, login, selectedId } =
+    useHarnesses();
   const [busy, setBusy] = useState(false);
-
-  const load = useCallback(async (refreshList?: boolean) => {
-    setLoading(true);
-    try {
-      const list = await api.listHarnesses(
-        refreshList ? { refresh: true } : undefined,
-      );
-      setHarnesses(list);
-    } catch (cause) {
-      toast.error(errorMessage(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const handleSelect = useCallback(
-    async (id: string) => {
-      try {
-        await update({ preferredHarness: id });
-      } catch (cause) {
-        toast.error(errorMessage(cause));
-      }
-    },
-    [update],
-  );
-
-  const handleLogin = useCallback(
-    async (id: string) => {
-      setLoggingInId(id);
-      try {
-        const result = await api.harnessLogin(id);
-        if (result.manual) {
-          toast.info(result.note, { description: result.command });
-        } else {
-          toast.success(result.note);
-        }
-      } catch (cause) {
-        toast.error(errorMessage(cause));
-      } finally {
-        setLoggingInId(undefined);
-        void load();
-      }
-    },
-    [load],
-  );
 
   const goBack = useCallback(async () => {
     setBusy(true);
@@ -267,14 +150,16 @@ function ConnectAgentStep() {
           </p>
         ) : null}
         {harnesses.map((harness) => (
-          <HarnessCard
-            key={harness.id}
-            harness={harness}
-            selected={profile?.preferredHarness === harness.id}
-            loggingIn={loggingInId === harness.id}
-            onSelect={() => void handleSelect(harness.id)}
-            onLogin={() => void handleLogin(harness.id)}
-          />
+          <Card key={harness.id} className="flex-row items-start gap-3 p-4">
+            <HarnessItem
+              harness={harness}
+              idPrefix="onboarding-harness"
+              selected={selectedId === harness.id}
+              loggingIn={loggingInId === harness.id}
+              onSelect={() => void select(harness.id)}
+              onLogin={() => void login(harness.id)}
+            />
+          </Card>
         ))}
       </div>
       <div className="mt-8 flex items-center gap-2">

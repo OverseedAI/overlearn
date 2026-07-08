@@ -85,6 +85,20 @@ const authFetch = (
     ),
   });
 
+const expectNoAccessControlHeaders = (headers: Headers): void => {
+  expect(headers.get("access-control-allow-origin")).toBeNull();
+  expect(headers.get("access-control-allow-credentials")).toBeNull();
+  expect(headers.get("access-control-allow-methods")).toBeNull();
+  expect(headers.get("access-control-allow-headers")).toBeNull();
+};
+
+const expectVaryOrigin = (headers: Headers): void => {
+  const vary = headers.get("vary");
+  expect(vary?.split(",").map((part) => part.trim().toLowerCase())).toContain(
+    "origin",
+  );
+};
+
 const createCourse = async (
   daemon: StartedContractDaemon,
   input: Record<string, unknown>,
@@ -97,6 +111,42 @@ const createCourse = async (
 
   expect(response.status).toBe(201);
   return (await response.json()) as CourseResource;
+};
+
+const importDemoCourse = async (
+  daemon: StartedContractDaemon,
+): Promise<Readonly<{ courseId: number; file: string }>> => {
+  const path = join(daemon.dataDir, "query-token-demo-course");
+  const file = "iframe-demo.html";
+
+  await mkdir(join(path, "demos"), { recursive: true });
+  await writeJson(join(path, "course.json"), {
+    title: "Query-token Demo Course",
+    unassignedDemos: [
+      {
+        file,
+        title: "Iframe demo",
+        addedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ],
+  });
+  await writeFile(
+    join(path, "demos", file),
+    "<h1>Iframe demo</h1><script>document.title='iframe';</script>",
+    "utf8",
+  );
+
+  const response = await authFetch(daemon, "/api/import", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  expect(response.status).toBe(200);
+
+  const payload = (await response.json()) as Record<string, unknown>;
+  expect(typeof payload["courseId"]).toBe("number");
+
+  return { courseId: payload["courseId"] as number, file };
 };
 
 const createIdeationCourse = async (
@@ -256,6 +306,221 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
+    "answers CORS preflight for allowlisted origins only",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({
+        extraEnv: {
+          OVERLEARN_DEV_ORIGINS: "http://localhost:5173",
+        },
+      });
+
+      const allowed = await fetch(`${daemon.url}/api/health`, {
+        method: "OPTIONS",
+        headers: {
+          origin: "http://localhost:5173",
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization, content-type",
+        },
+      });
+      expect(allowed.status).toBe(204);
+      expect(allowed.headers.get("access-control-allow-origin")).toBe(
+        "http://localhost:5173",
+      );
+      expect(allowed.headers.get("access-control-allow-credentials")).toBe("true");
+      expect(allowed.headers.get("access-control-allow-methods")).toContain("GET");
+      expect(allowed.headers.get("access-control-allow-methods")).toContain(
+        "OPTIONS",
+      );
+      expect(
+        allowed.headers.get("access-control-allow-headers")?.toLowerCase(),
+      ).toContain("authorization");
+      expectVaryOrigin(allowed.headers);
+
+      const denied = await fetch(`${daemon.url}/api/health`, {
+        method: "OPTIONS",
+        headers: {
+          origin: "https://example.invalid",
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization",
+        },
+      });
+      expect(denied.status).toBe(204);
+      expectNoAccessControlHeaders(denied.headers);
+    },
+    15_000,
+  );
+
+  contractTest(
+    "sets CORS headers on allowed-origin API fetches without changing same-origin responses",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+
+      const allowed = await fetch(`${daemon.url}/api/health`, {
+        headers: daemonAuthHeaders(daemon.token, {
+          origin: "tauri://localhost",
+        }),
+      });
+      expect(allowed.status).toBe(200);
+      expect(allowed.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+      expect(allowed.headers.get("access-control-allow-credentials")).toBe("true");
+      expectVaryOrigin(allowed.headers);
+
+      const denied = await fetch(`${daemon.url}/api/health`, {
+        headers: daemonAuthHeaders(daemon.token, {
+          origin: "https://example.invalid",
+        }),
+      });
+      expect(denied.status).toBe(200);
+      expectNoAccessControlHeaders(denied.headers);
+
+      const sameOrigin = await authFetch(daemon, "/api/health");
+      expect(sameOrigin.status).toBe(200);
+      expectNoAccessControlHeaders(sameOrigin.headers);
+      expect(sameOrigin.headers.get("vary")).toBeNull();
+    },
+    15_000,
+  );
+
+  contractTest(
+    "opens SSE streams with query-token auth",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+
+      const response = await fetch(
+        `${daemon.url}/api/events?token=${encodeURIComponent(daemon.token)}`,
+        {
+          headers: {
+            origin: "http://tauri.localhost",
+          },
+        },
+      );
+      try {
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain("text/event-stream");
+        expect(response.headers.get("access-control-allow-origin")).toBe(
+          "http://tauri.localhost",
+        );
+        expectVaryOrigin(response.headers);
+      } finally {
+        await response.body?.cancel();
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
+    "rejects bad query-token SSE auth without enabling query auth elsewhere",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+
+      const badSse = await fetch(`${daemon.url}/api/events?token=not-the-token`, {
+        headers: {
+          origin: "tauri://localhost",
+        },
+      });
+      expect(badSse.status).toBe(401);
+      expect(badSse.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+      await expect(badSse.text()).resolves.toContain(
+        "Overlearn daemon authentication is required.",
+      );
+
+      const otherApi = await fetch(
+        `${daemon.url}/api/health?token=${encodeURIComponent(daemon.token)}`,
+        {
+          headers: {
+            origin: "tauri://localhost",
+          },
+        },
+      );
+      expect(otherApi.status).toBe(401);
+      expect(otherApi.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+      await expect(otherApi.text()).resolves.toContain(
+        "Overlearn daemon authentication is required.",
+      );
+    },
+    15_000,
+  );
+
+  contractTest(
+    "allows query-token auth only for demo iframe GETs",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+      const demo = await importDemoCourse(daemon);
+      const demoPath = `/api/courses/${demo.courseId}/demos/${demo.file}`;
+
+      const allowed = await fetch(
+        `${daemon.url}${demoPath}?token=${encodeURIComponent(daemon.token)}`,
+        {
+          headers: {
+            origin: "tauri://localhost",
+          },
+        },
+      );
+      expect(allowed.status).toBe(200);
+      expect(allowed.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+      expect(allowed.headers.get("content-security-policy")).toContain(
+        "default-src 'none'",
+      );
+      await expect(allowed.text()).resolves.toContain("<h1>Iframe demo</h1>");
+
+      const badToken = await fetch(`${daemon.url}${demoPath}?token=not-the-token`, {
+        headers: {
+          origin: "tauri://localhost",
+        },
+      });
+      expect(badToken.status).toBe(401);
+      expect(badToken.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+      await expect(badToken.text()).resolves.toContain(
+        "Overlearn daemon authentication is required.",
+      );
+
+      const nonDemo = await fetch(
+        `${daemon.url}/api/courses?token=${encodeURIComponent(daemon.token)}`,
+        {
+          headers: {
+            origin: "tauri://localhost",
+          },
+        },
+      );
+      expect(nonDemo.status).toBe(401);
+      expect(nonDemo.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+    },
+    15_000,
+  );
+
+  contractTest(
     "starts the authored tutorial course from onboarding and runs a teaching turn",
     async () => {
       if (!(await ensureLocalhost())) {
@@ -341,11 +606,10 @@ describe(`daemon contract (${runtime.name})`, () => {
         });
         expect(advanced.status).toBe(200);
 
-        // The page shell may be the SPA (title arrives via API) or the legacy
-        // server-rendered page (title inline) — assert both layers directly.
         const opened = await authFetch(daemon, `/?course=${courseId}`);
-        expect(opened.status).toBe(200);
-        await expect(opened.text()).resolves.toContain("Overlearn");
+        expect(opened.status).toBe(404);
+        expect(opened.headers.get("content-type")).toContain("application/json");
+        await expect(opened.json()).resolves.toEqual({ error: "Not found." });
 
         const openedState = await authFetch(daemon, `/api/courses/${courseId}`);
         expect(openedState.status).toBe(200);
@@ -520,8 +784,10 @@ describe(`daemon contract (${runtime.name})`, () => {
         const bootstrap = await fetch(`${daemon.url}/?token=${daemon.token}`, {
           redirect: "manual",
         });
-        expect(bootstrap.status).toBe(303);
-        expect(bootstrap.headers.get("set-cookie")).toContain("HttpOnly");
+        expect(bootstrap.status).toBe(404);
+        expect(bootstrap.headers.get("content-type")).toContain("application/json");
+        expect(bootstrap.headers.get("set-cookie")).toBeNull();
+        await expect(bootstrap.json()).resolves.toEqual({ error: "Not found." });
 
         const health = (await (
           await authFetch(daemon, "/api/health")

@@ -1,8 +1,8 @@
 # Overlearn UI — design conventions
 
-Vite + React 19 + Tailwind v4 + shadcn/ui SPA replacing the old server-rendered
-UI in `src/daemon/ui.ts`. Talks to the Bun daemon over `/api/*` + SSE
-(`/api/events`). See `src/lib/api.ts` (client), `src/lib/types.ts` (protocol).
+Vite + React 19 + Tailwind v4 + shadcn/ui SPA served by Tauri. Talks to the
+Bun daemon over `/api/*` + SSE (`/api/events`). See `src/lib/api.ts` (client),
+`src/lib/types.ts` (protocol).
 
 ## Visual language — "warm scholarly"
 

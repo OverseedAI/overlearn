@@ -1,3 +1,4 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type {
   CourseResource,
   CourseState,
@@ -9,6 +10,16 @@ import type {
   TopicTreeInput,
 } from "./types";
 
+type DaemonInfo = {
+  port: number;
+  token: string;
+};
+
+type ApiRuntime = {
+  baseUrl: string;
+  token?: string;
+};
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -18,12 +29,72 @@ export class ApiError extends Error {
   }
 }
 
+let runtime: ApiRuntime = { baseUrl: "" };
+
+const resolveRuntime = async (): Promise<ApiRuntime> => {
+  try {
+    if (!isTauri()) {
+      return runtime;
+    }
+
+    const info = await invoke<DaemonInfo>("daemon_info");
+    return {
+      baseUrl: `http://127.0.0.1:${info.port}`,
+      token: info.token,
+    };
+  } catch (error) {
+    console.warn(
+      "Falling back to same-origin daemon API after daemon_info failed.",
+      error,
+    );
+    return { baseUrl: "" };
+  }
+};
+
+export const apiReady = resolveRuntime().then((resolved) => {
+  runtime = resolved;
+  return resolved;
+});
+
+const apiUrl = (path: string, apiRuntime: ApiRuntime = runtime): string =>
+  `${apiRuntime.baseUrl}${path}`;
+
+const eventSourceUrl = (apiRuntime: ApiRuntime): string => {
+  if (!apiRuntime.token) {
+    return apiUrl("/api/events", apiRuntime);
+  }
+
+  const url = new URL(apiUrl("/api/events", apiRuntime), window.location.href);
+  url.searchParams.set("token", apiRuntime.token);
+  return url.toString();
+};
+
+const demoFileUrl = (
+  courseId: number,
+  file: string,
+  apiRuntime: ApiRuntime = runtime,
+): string => {
+  const path = `/api/courses/${courseId}/demos/${encodeURIComponent(file)}`;
+  if (!apiRuntime.token) {
+    return apiUrl(path, apiRuntime);
+  }
+
+  const url = new URL(apiUrl(path, apiRuntime), window.location.href);
+  url.searchParams.set("token", apiRuntime.token);
+  return url.toString();
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const apiRuntime = await apiReady;
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
-  const response = await fetch(path, { ...init, headers });
+  if (apiRuntime.token) {
+    headers.set("Authorization", `Bearer ${apiRuntime.token}`);
+  }
+
+  const response = await fetch(apiUrl(path, apiRuntime), { ...init, headers });
 
   if (!response.ok) {
     // The daemon returns plain-text error bodies.
@@ -157,8 +228,7 @@ export const api = {
   exportCourse: (id: number, includeTranscript: boolean) =>
     post<unknown>(`/api/courses/${id}/export`, { includeTranscript }),
 
-  demoUrl: (courseId: number, file: string) =>
-    `/api/courses/${courseId}/demos/${encodeURIComponent(file)}`,
+  demoUrl: demoFileUrl,
 };
 
 export type ServerEventHandlers = {
@@ -174,25 +244,42 @@ export function subscribeEvents(
   handlers: ServerEventHandlers,
   onConnectionChange?: (connected: boolean) => void,
 ): () => void {
-  const source = new EventSource("/api/events");
+  let source: EventSource | undefined;
+  let closed = false;
 
-  for (const [name, handler] of Object.entries(handlers)) {
-    if (!handler) {
-      continue;
+  const attachHandlers = (nextSource: EventSource) => {
+    for (const [name, handler] of Object.entries(handlers)) {
+      if (!handler) {
+        continue;
+      }
+      nextSource.addEventListener(name, (event) => {
+        let payload: unknown;
+        try {
+          payload = JSON.parse((event as MessageEvent<string>).data);
+        } catch {
+          return;
+        }
+        (handler as (payload: unknown) => void)(payload);
+      });
     }
-    source.addEventListener(name, (event) => {
-      let payload: unknown;
-      try {
-        payload = JSON.parse((event as MessageEvent<string>).data);
-      } catch {
+
+    nextSource.onopen = () => onConnectionChange?.(true);
+    nextSource.onerror = () => onConnectionChange?.(false);
+  };
+
+  void apiReady
+    .then((apiRuntime) => {
+      if (closed) {
         return;
       }
-      (handler as (payload: unknown) => void)(payload);
-    });
-  }
 
-  source.onopen = () => onConnectionChange?.(true);
-  source.onerror = () => onConnectionChange?.(false);
+      source = new EventSource(eventSourceUrl(apiRuntime));
+      attachHandlers(source);
+    })
+    .catch(() => onConnectionChange?.(false));
 
-  return () => source.close();
+  return () => {
+    closed = true;
+    source?.close();
+  };
 }

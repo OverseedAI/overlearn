@@ -18,7 +18,7 @@ bun run app:dev
 
 The desktop shell builds the internal sidecar, copies it into Tauri's
 target-triple binary location, starts one app-level daemon on launch, and loads
-the authenticated local UI directly in the main webview.
+the bundled UI directly in the main webview.
 
 In orchestrated mode, changing the header harness picker mid-course takes effect
 once the current turn is idle. The daemon ends the old harness session, starts
@@ -31,10 +31,9 @@ Release steps and desktop artifact locations are documented in
 
 ## UI
 
-The interface is a Vite + React + Tailwind v4 + shadcn/ui SPA in [`ui/`](ui/),
-served by the daemon at `/` from assets embedded into the sidecar binary
-(`bun run ui:build` → gitignored `src/daemon/spa-assets.gen.ts`; `bun run
-build` does this automatically). Design conventions live in
+The interface is a Vite + React + Tailwind v4 + shadcn/ui SPA in [`ui/`](ui/).
+Tauri serves the built UI from `ui/dist` in packaged builds and uses the Vite
+dev server in development; the daemon is API-only. Design conventions live in
 [`ui/DESIGN.md`](ui/DESIGN.md).
 
 For fast UI iteration against a running daemon, read `port`/`token` from the
@@ -43,9 +42,6 @@ daemon's `daemon.json` and start the Vite dev server with its proxy:
 ```sh
 OVERLEARN_DAEMON_PORT=<port> OVERLEARN_DAEMON_TOKEN=<token> bun run --cwd ui dev
 ```
-
-Set `OVERLEARN_LEGACY_UI=1` on the daemon to fall back to the previous
-server-rendered UI.
 
 ## Testing
 
