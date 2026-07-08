@@ -16,6 +16,7 @@ import {
   resolveTurnTimeoutMs,
   type AgentStreamPayload,
   type TurnPayload,
+  type TurnPositionContext,
 } from "./orchestrator";
 
 const turn: TurnPayload = {
@@ -27,10 +28,14 @@ const turn: TurnPayload = {
 const promptInput = {
   courseId: 42,
   courseTitle: "Finance",
+  courseDescription: "Money over time.",
+  position: { currentTopic: null },
   turn,
   instructions: "## module: protocol (builtin)\n\nEach teaching turn...",
   includeResumeContext: true,
 } as const;
+
+const noTopicPosition: TurnPositionContext = { currentTopic: null };
 
 const collect = async <T>(values: AsyncIterable<T>): Promise<readonly T[]> => {
   const collected: T[] = [];
@@ -55,6 +60,9 @@ describe("daemon turn orchestration helpers", () => {
     expect(prompt).toContain("get_course_state");
     expect(prompt).toContain("Do not write course files directly");
     expect(prompt).toContain("no sidecar callback commands are available");
+    expect(prompt).toContain("Course description: Money over time.");
+    expect(prompt).toContain("## Position");
+    expect(prompt).toContain("No current topic is selected");
     expect(prompt).toContain("## Turn payload");
     expect(prompt).toContain('"turn": 7');
     expect(prompt).toContain('"type": "message"');
@@ -114,6 +122,37 @@ describe("daemon turn orchestration helpers", () => {
     expect(prompt).toContain("## Course ideation turn");
     expect(prompt).toContain("propose_course_plan");
     expect(prompt).toContain("Teach me investing.");
+  });
+
+  test("includes current and changed topic position details", () => {
+    const prompt = buildTurnPrompt({
+      ...promptInput,
+      includeResumeContext: false,
+      mode: "teaching",
+      position: {
+        currentTopic: {
+          id: 2,
+          path: "finance/rule-of-72",
+          title: "Rule of 72",
+          state: "current",
+        },
+        previousTopic: {
+          id: 1,
+          path: "finance/compound-growth",
+          title: "Compound growth",
+        },
+        revisit: true,
+      },
+    });
+
+    expect(prompt).toContain("## Position");
+    expect(prompt).toContain('"currentTopic"');
+    expect(prompt).toContain('"path": "finance/rule-of-72"');
+    expect(prompt).toContain('"title": "Rule of 72"');
+    expect(prompt).toContain('"state": "current"');
+    expect(prompt).toContain('"previousTopic"');
+    expect(prompt).toContain('"path": "finance/compound-growth"');
+    expect(prompt).toContain('"revisit": true');
   });
 
   test("builds a read-only attached-dir permission policy", () => {
@@ -249,7 +288,10 @@ describe("daemon turn orchestrator", () => {
 
     const orchestrator = createDaemonTurnOrchestrator({
       courseId: 42,
-      courseTitle: "Finance",
+      getCourseMetadata: () => ({
+        title: "Finance",
+        description: "Money over time.",
+      }),
       attachedDir: "/repos/example",
       cwd: "/tmp",
       mcpBaseUrl: "http://127.0.0.1:1234",
@@ -265,7 +307,7 @@ describe("daemon turn orchestrator", () => {
       },
     });
 
-    const result = await orchestrator.runTurn(turn, "teaching");
+    const result = await orchestrator.runTurn(turn, "teaching", noTopicPosition);
 
     expect(result).toEqual({ ok: true });
     expect(promptCount).toBe(2);
@@ -298,6 +340,65 @@ describe("daemon turn orchestrator", () => {
     await orchestrator.endSession("test-end");
     expect(unregistered).toContain("token-2:test-end");
     expect(endedSessions).toEqual(["session-1", "session-2"]);
+  });
+
+  test("reads course metadata for each prompt attempt", async () => {
+    const prompts: string[] = [];
+    let metadata = {
+      title: "Original title",
+      description: "Original description",
+    };
+
+    const adapter: HarnessAdapter = {
+      id: "codex",
+      name: "Codex",
+      detect: () => ({ installed: true, authenticated: true }),
+      newSession: async () => ({
+        id: "session",
+        adapterId: "codex",
+        cwd: "/tmp",
+        processId: 1,
+      }),
+      prompt: async function* (_session, prompt): AsyncIterable<AgentEvent> {
+        prompts.push(prompt);
+        yield { type: "done", reason: "complete" };
+      },
+      cancel: async () => undefined,
+      end: async () => undefined,
+    };
+
+    const orchestrator = createDaemonTurnOrchestrator({
+      courseId: 42,
+      getCourseMetadata: () => metadata,
+      cwd: "/tmp",
+      mcpBaseUrl: "http://127.0.0.1:1234",
+      adapter,
+      onAgentEvent: () => undefined,
+      registerTeachingSession: () => ({ token: "token" }),
+      unregisterTeachingSession: () => undefined,
+    });
+
+    await expect(
+      orchestrator.runTurn(turn, "teaching", noTopicPosition),
+    ).resolves.toEqual({ ok: true });
+
+    metadata = {
+      title: "Renamed title",
+      description: "Renamed description",
+    };
+    await expect(
+      orchestrator.runTurn({ ...turn, turn: 8 }, "teaching", noTopicPosition),
+    ).resolves.toEqual({ ok: true });
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts.at(0) ?? "").toContain("Course title: Original title");
+    expect(prompts.at(0) ?? "").toContain(
+      "Course description: Original description",
+    );
+    expect(prompts.at(1) ?? "").toContain("Course title: Renamed title");
+    expect(prompts.at(1) ?? "").toContain(
+      "Course description: Renamed description",
+    );
   });
 
   test("can collect events from an async adapter stream", async () => {

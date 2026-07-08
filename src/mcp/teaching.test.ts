@@ -11,6 +11,7 @@ import {
   type McpToolCallResult,
 } from "./protocol";
 import {
+  createTeachingMcpServer,
   createTeachingMcpHttpHandler,
   teachingMcpServerName,
   type TeachingSessionScope,
@@ -27,6 +28,7 @@ import {
   listLatestMasteryScores,
   openStore,
   readTopicTree,
+  upsertTopic,
   type Course,
   type Store,
 } from "../store";
@@ -549,5 +551,62 @@ describe("teaching MCP server", () => {
 
   test("serves all teaching tools through the stdio HTTP proxy", async () => {
     await runTransportScenario("stdio-proxy");
+  });
+
+  test("defaults writes to the active turn snapshot topic", async () => {
+    await withFixture(async (fixture) => {
+      const snapshotTopic = upsertTopic(fixture.store, fixture.draftCourse.id, {
+        path: "snapshot-topic",
+        title: "Snapshot topic",
+      });
+      const activeTurn = {
+        turn: 9,
+        topicId: snapshotTopic.id,
+        topicPath: snapshotTopic.path,
+      };
+
+      upsertTopic(fixture.store, fixture.draftCourse.id, {
+        path: "clicked-mid-turn",
+        title: "Clicked mid-turn",
+      });
+
+      const definition = createTeachingMcpServer({
+        store: fixture.store,
+        scope: {
+          courseId: fixture.draftCourse.id,
+          getActiveTurn: () => activeTurn,
+        },
+        onWrite: (event) => {
+          fixture.writes.push(event);
+        },
+      });
+      const tool = definition.tools.find(
+        (candidate) => candidate.name === "upsert_glossary_entry",
+      );
+      if (tool === undefined) {
+        throw new Error("Missing upsert_glossary_entry tool.");
+      }
+
+      const result = parseResult(
+        await tool.call({
+          term: "Snapshot default",
+          definition: "Resolved at turn start.",
+        }),
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        glossaryEntry: {
+          term: "Snapshot default",
+          topicId: snapshotTopic.id,
+        },
+      });
+      expect(fixture.writes).toHaveLength(1);
+      expect(fixture.writes.at(0)).toMatchObject({
+        tool: "upsert_glossary_entry",
+        courseId: fixture.draftCourse.id,
+        activeTurn,
+      });
+    });
   });
 });

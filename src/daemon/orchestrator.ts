@@ -14,6 +14,7 @@ import {
   teachingMcpServerName,
   type TeachingToolName,
 } from "../mcp/teaching";
+import type { TopicNodeState } from "../store";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -39,9 +40,33 @@ export type TurnPayload = Readonly<{
   events: readonly TurnEvent[];
 }>;
 
+export type TurnPositionTopic = Readonly<{
+  id: number;
+  path: string;
+  title: string;
+}>;
+
+export type TurnPositionContext = Readonly<{
+  currentTopic:
+    | (TurnPositionTopic &
+        Readonly<{
+          state: TopicNodeState;
+        }>)
+    | null;
+  previousTopic?: TurnPositionTopic | null;
+  revisit?: boolean;
+}>;
+
+export type CoursePromptMetadata = Readonly<{
+  title: string;
+  description: string | null;
+}>;
+
 export type TurnPromptInput = Readonly<{
   courseId: number;
   courseTitle: string;
+  courseDescription: string | null;
+  position: TurnPositionContext;
   turn: TurnPayload;
   instructions: string;
   includeResumeContext: boolean;
@@ -67,6 +92,7 @@ export type DaemonTurnOrchestrator = Readonly<{
   runTurn: (
     turn: TurnPayload,
     mode: TurnPromptMode,
+    position: TurnPositionContext,
   ) => Promise<OrchestratorResult>;
   endSession: (reason?: string) => Promise<void>;
   resetSession: (reason?: string) => Promise<boolean>;
@@ -80,7 +106,7 @@ export type ActiveTeachingSessionRegistration = Readonly<{
 
 type CreateDaemonTurnOrchestratorOptions = Readonly<{
   courseId: number;
-  courseTitle: string;
+  getCourseMetadata: () => CoursePromptMetadata | undefined;
   attachedDir?: string | null;
   cwd: string;
   mcpBaseUrl: string;
@@ -365,6 +391,46 @@ const modePreamble = (input: TurnPromptInput): string => {
   ].join("\n");
 };
 
+const positionTopicRecord = (
+  topic: TurnPositionTopic & Readonly<{ state?: TopicNodeState }>,
+): Record<string, unknown> => ({
+  path: topic.path,
+  title: topic.title,
+  ...(topic.state === undefined ? {} : { state: topic.state }),
+});
+
+const positionBlock = (input: TurnPromptInput): string => {
+  if (input.position.currentTopic === null) {
+    return [
+      "## Position",
+      "",
+      "No current topic is selected for this course.",
+    ].join("\n");
+  }
+
+  const previousTopic = input.position.previousTopic;
+  const payload = {
+    currentTopic: positionTopicRecord(input.position.currentTopic),
+    ...(previousTopic === undefined
+      ? {}
+      : {
+          previousTopic:
+            previousTopic === null ? null : positionTopicRecord(previousTopic),
+        }),
+    ...(input.position.revisit === undefined
+      ? {}
+      : { revisit: input.position.revisit }),
+  };
+
+  return [
+    "## Position",
+    "",
+    "```json",
+    JSON.stringify(payload, null, 2),
+    "```",
+  ].join("\n");
+};
+
 export const buildTurnPrompt = (input: TurnPromptInput): string =>
   [
     "# Overlearn daemon turn",
@@ -373,6 +439,8 @@ export const buildTurnPrompt = (input: TurnPromptInput): string =>
     "Do not write course files directly. Use only the MCP tools and the conversation response; no sidecar callback commands are available.",
     `Course id: ${input.courseId}`,
     `Course title: ${input.courseTitle}`,
+    `Course description: ${input.courseDescription ?? "(none)"}`,
+    positionBlock(input),
     resumePreamble(input),
     modePreamble(input),
     "## Teaching protocol",
@@ -574,12 +642,19 @@ export const createDaemonTurnOrchestrator = (
     turn: TurnPayload,
     mode: TurnPromptMode,
     includeResumeContext: boolean,
+    position: TurnPositionContext,
   ): Promise<OrchestratorResult> => {
     const active = await ensureSession();
     const instructions = formatInstructions(assembleInstructionModules({ env }));
+    const courseMetadata = options.getCourseMetadata() ?? {
+      title: `Course ${options.courseId}`,
+      description: null,
+    };
     const prompt = buildTurnPrompt({
       courseId: options.courseId,
-      courseTitle: options.courseTitle,
+      courseTitle: courseMetadata.title,
+      courseDescription: courseMetadata.description,
+      position,
       turn,
       instructions,
       includeResumeContext,
@@ -615,16 +690,17 @@ export const createDaemonTurnOrchestrator = (
   const runTurn = async (
     turn: TurnPayload,
     mode: TurnPromptMode,
+    position: TurnPositionContext,
   ): Promise<OrchestratorResult> => {
     const includeResumeContext = nextTurnNeedsResumeContext;
-    const first = await runAttempt(turn, mode, includeResumeContext);
+    const first = await runAttempt(turn, mode, includeResumeContext, position);
 
     if (first.ok || first.reason === "timeout") {
       nextTurnNeedsResumeContext = !first.ok;
       return attemptFailureMessage(first);
     }
 
-    const retry = await runAttempt(turn, mode, true);
+    const retry = await runAttempt(turn, mode, true, position);
     nextTurnNeedsResumeContext = !retry.ok;
     return attemptFailureMessage(retry);
   };
