@@ -652,12 +652,19 @@ fn build_tray(app: &AppHandle) -> Result<(), String> {
     let quit =
         MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).map_err(stringify_error)?;
     let menu = Menu::with_items(app, &[&show, &hide, &quit]).map_err(stringify_error)?;
-    let icon = make_tray_icon();
+    let icon = make_tray_icon()?;
 
-    TrayIconBuilder::new()
+    let builder = TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        .show_menu_on_left_click(true);
+
+    // Template rendering lets macOS tint the monochrome sprout to match the
+    // menu bar (black in light mode, white in dark mode).
+    #[cfg(target_os = "macos")]
+    let builder = builder.icon_as_template(true);
+
+    builder
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
                 if let Some(window) = app.get_webview_window("main") {
@@ -679,26 +686,8 @@ fn build_tray(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn make_tray_icon() -> Image<'static> {
-    let size = 32_u32;
-    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
-
-    for y in 0..size {
-        for x in 0..size {
-            let border = x < 3 || y < 3 || x >= size - 3 || y >= size - 3;
-            let diagonal = x.abs_diff(y) <= 2 || x + y >= size - 3 && x + y <= size + 1;
-            let (r, g, b, a) = if border {
-                (20, 28, 36, 255)
-            } else if diagonal {
-                (0, 142, 110, 255)
-            } else {
-                (245, 248, 250, 255)
-            };
-            rgba.extend_from_slice(&[r, g, b, a]);
-        }
-    }
-
-    Image::new_owned(rgba, size, size)
+fn make_tray_icon() -> Result<Image<'static>, String> {
+    Image::from_bytes(include_bytes!("../icons/tray.png")).map_err(stringify_error)
 }
 
 fn show_startup_failure(app: &AppHandle, message: &str) {
