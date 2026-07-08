@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { OverlearnWordmark } from "@/components/brand";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -64,8 +65,8 @@ function WelcomeStep() {
 
   return (
     <div className="text-center">
-      <h1 className="text-2xl font-semibold tracking-tight text-balance">
-        Overlearn
+      <h1 className="text-2xl tracking-tight text-balance">
+        <OverlearnWordmark className="text-2xl" />
       </h1>
       <p className="mt-3 text-base text-pretty text-muted-foreground">
         Turn your coding agent into a personal teacher — durable notes,

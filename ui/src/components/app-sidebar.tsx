@@ -1,5 +1,4 @@
 import {
-  GraduationCap,
   LibraryBig,
   Moon,
   Settings2,
@@ -26,6 +25,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { OverlearnWordmark } from "@/components/brand";
 import { TopicTree } from "@/components/topic-tree";
 import { MasteryMeter } from "@/components/mastery-meter";
 import { api } from "@/lib/api";
@@ -120,13 +120,9 @@ export function AppSidebar({ route }: { route: Route }) {
             <SidebarMenuButton
               size="lg"
               onClick={() => navigate({ view: "library" })}
+              aria-label="Overlearn — go to library"
             >
-              <div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                <GraduationCap className="size-4" />
-              </div>
-              <span className="text-base font-semibold tracking-tight">
-                Overlearn
-              </span>
+              <OverlearnWordmark className="px-1 text-xl" />
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
