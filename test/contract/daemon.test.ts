@@ -23,10 +23,15 @@ import {
   type StartedContractDaemon,
 } from "./runtime";
 import {
+  flattenTopicTree,
   listGlossary,
+  listSessions as listStoreSessions,
   openStore,
   pageTranscript,
   patchCourse,
+  readPendingTopicNavigation,
+  readTopicTree,
+  replaceTopicTree,
   upsertTopic,
 } from "../../src/store";
 import {
@@ -1438,6 +1443,220 @@ describe(`daemon contract (${runtime.name})`, () => {
       }
     },
     15_000,
+  );
+
+  contractTest(
+    "enters frontier topics before starting the kickstart turn",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({ scenario: "crash-always" });
+      const sse = await createSseClient(daemon.url, daemon.token);
+      const store = openStore({
+        env: { OVERLEARN_DATA_DIR: daemon.dataDir },
+      });
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Frontier Navigation Course",
+        });
+        replaceTopicTree(store, course.id, [
+          {
+            path: "known",
+            title: "Known",
+            enteredAt: "2026-01-01T00:00:00.000Z",
+            isCurrent: true,
+          },
+          {
+            path: "frontier",
+            title: "Frontier",
+          },
+        ]);
+
+        const response = await authFetch(daemon, `/api/courses/${course.id}/nav`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ path: "frontier" }),
+        });
+        expect(response.status).toBe(200);
+        const payload = (await response.json()) as Record<string, unknown>;
+        expect(payload["ok"]).toBe(true);
+        expect(payload["turn"]).toBe(1);
+
+        const committedBeforeFailure = flattenTopicTree(
+          readTopicTree(store, course.id),
+        );
+        const frontierBeforeFailure = committedBeforeFailure.find(
+          (topic) => topic.path === "frontier",
+        );
+        expect(frontierBeforeFailure?.isCurrent).toBe(true);
+        expect(frontierBeforeFailure?.enteredAt).not.toBeNull();
+
+        await sse.waitFor(
+          "status",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["status"] === "agent-failed",
+          "frontier turn failure",
+        );
+
+        const committedAfterFailure = flattenTopicTree(
+          readTopicTree(store, course.id),
+        );
+        const frontierAfterFailure = committedAfterFailure.find(
+          (topic) => topic.path === "frontier",
+        );
+        expect(frontierAfterFailure?.isCurrent).toBe(true);
+        expect(frontierAfterFailure?.enteredAt).toBe(
+          frontierBeforeFailure?.enteredAt,
+        );
+
+        const transcript = pageTranscript(store, course.id, { limit: 20 }).entries;
+        expect(transcript[0]?.kind).toBe("topic-change");
+        expect(transcript[0]?.content).toBe("Entered **Frontier**");
+        expect(transcript[0]?.topicId).toBe(frontierAfterFailure?.id);
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.some((entry) => entry["event"] === "session/prompt"),
+          "frontier prompt log",
+        );
+        const prompt = promptText(
+          logs.find((entry) => entry["event"] === "session/prompt") ?? {},
+        );
+        expect(prompt).toContain('"type": "topic-entered"');
+        expect(prompt).toContain('"path": "frontier"');
+        expect(prompt).toContain('"revisit": false');
+        expect(prompt).toContain('"previous"');
+        expect(prompt).toContain('"path": "known"');
+      } finally {
+        store.close();
+        sse.close();
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
+    "persists visited-topic selection across daemon restart until the next learner message",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({ scenario: "normal" });
+      const store = openStore({
+        env: { OVERLEARN_DATA_DIR: daemon.dataDir },
+      });
+      let restarted: StartedContractDaemon | undefined;
+      let restartedSse: Awaited<ReturnType<typeof createSseClient>> | undefined;
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Visited Navigation Course",
+        });
+        const betaEnteredAt = "2026-01-02T00:00:00.000Z";
+        replaceTopicTree(store, course.id, [
+          {
+            path: "alpha",
+            title: "Alpha",
+            enteredAt: "2026-01-01T00:00:00.000Z",
+            isCurrent: true,
+          },
+          {
+            path: "beta",
+            title: "Beta",
+            enteredAt: betaEnteredAt,
+          },
+        ]);
+
+        const response = await authFetch(daemon, `/api/courses/${course.id}/nav`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ path: "beta" }),
+        });
+        expect(response.status).toBe(200);
+        const navPayload = (await response.json()) as Record<string, unknown>;
+        expect(navPayload["ok"]).toBe(true);
+        expect(Object.hasOwn(navPayload, "turn")).toBe(false);
+        expect(listStoreSessions(store, course.id)).toEqual([]);
+
+        const selectedTopics = flattenTopicTree(readTopicTree(store, course.id));
+        expect(selectedTopics.find((topic) => topic.path === "beta")?.isCurrent).toBe(
+          true,
+        );
+        expect(
+          selectedTopics.find((topic) => topic.path === "beta")?.enteredAt,
+        ).toBe(betaEnteredAt);
+        expect(readPendingTopicNavigation(store, course.id)?.topic.path).toBe(
+          "beta",
+        );
+
+        await daemon.stop();
+        restarted = await start({
+          scenario: "normal",
+          extraEnv: {
+            OVERLEARN_DATA_DIR: daemon.dataDir,
+            FAKE_ACP_LOG: daemon.logPath,
+          },
+        });
+        restartedSse = await createSseClient(restarted.url, restarted.token);
+
+        await submitCourseMessage(
+          restarted.url,
+          restarted.token,
+          course.id,
+          "continue on beta",
+        );
+        await restartedSse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "visited revisit turn done",
+        );
+
+        expect(readPendingTopicNavigation(store, course.id)).toBeNull();
+        const transcript = pageTranscript(store, course.id, { limit: 20 }).entries;
+        expect(transcript[0]?.kind).toBe("topic-change");
+        expect(transcript[0]?.content).toBe("Back to **Beta** (revisit)");
+        expect(transcript[1]?.role).toBe("learner");
+        expect(transcript[1]?.content).toBe("continue on beta");
+        expect(transcript[0]?.topicId).toBe(transcript[1]?.topicId);
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.some((entry) => entry["event"] === "session/prompt"),
+          "visited revisit prompt log",
+        );
+        const prompt = promptText(
+          logs.find((entry) => entry["event"] === "session/prompt") ?? {},
+        );
+        expect(prompt).toContain('"type": "topic-entered"');
+        expect(prompt).toContain('"path": "beta"');
+        expect(prompt).toContain('"revisit": true');
+        expect(prompt).toContain('"previous"');
+        expect(prompt).toContain('"path": "alpha"');
+      } finally {
+        if (restartedSse !== undefined) {
+          restartedSse.close();
+        }
+        if (restarted !== undefined) {
+          await restarted.cleanup();
+          activeDaemons.delete(restarted);
+        }
+        store.close();
+      }
+    },
+    20_000,
   );
 
   contractTest(

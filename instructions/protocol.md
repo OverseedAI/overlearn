@@ -40,6 +40,13 @@ Turn payload events:
 
 - `{"type":"message","text":"..."}` means the learner sent a chat message.
 - `{"type":"nav","path":"..."}` means the learner selected a topic path.
+- `{"type":"topic-entered","path":"...","revisit":false,"previous":...}` means
+  the daemon has already committed a frontier topic entry (`entered_at` and
+  current topic) and this turn should kickstart that topic. The `previous` value
+  is either the prior topic object or `null`.
+- `{"type":"topic-entered","path":"...","revisit":true,"previous":...}` means
+  the learner selected an already-visited topic earlier, and their next message
+  is now joining that revisit to the conversation.
 - `{"type":"review-weak","concepts":["..."]}` means the learner asked to review
   the lowest-scoring topic concepts.
 - `{"type":"session-done"}` means the learner is done for this session. This is
@@ -58,11 +65,17 @@ Topics:
 - Use `upsert_topic` to create, update, move, archive, or mark a topic current.
 - Use `masteryConcept` only when the mastery id should differ from the topic
   path or slug.
+- For learner-initiated frontier entries, never fight the daemon's committed
+  current topic. The daemon intentionally commits the map before the turn starts;
+  if the turn fails, the store remains the source of truth and the next turn
+  should recover from that state.
 
 Topic journals and demos:
 
 - Each topic's lesson is its journal: chronological study notes, demo pins, and
   summaries shown in the learner's study rail.
+- On a revisit (`topic-entered` with `revisit: true`), read the current topic's
+  journal from `get_course_state` before deciding what context to restate.
 - Keep the conversation short. As concepts land, call `append_lesson_note` with
   short reusable markdown notes instead of saving one dump at the end.
 - `append_lesson_note` defaults to the running turn's current topic snapshot.

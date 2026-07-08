@@ -150,6 +150,11 @@ export type TranscriptEntry = TranscriptEntryBase &
       text: string;
       tool: string;
     }
+    | {
+      role: "system";
+      kind: "topic-change";
+      text: string;
+    }
   );
 
 export type TranscriptPage = {

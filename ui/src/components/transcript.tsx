@@ -70,6 +70,19 @@ function ToolLine({ tool }: { tool: ToolActivity }) {
   );
 }
 
+function TopicChangeDivider({ text }: { text: string }) {
+  return (
+    <div className="flex items-center gap-3 py-1 text-center text-xs text-muted-foreground/80">
+      <span className="h-px flex-1 bg-border" aria-hidden="true" />
+      <Markdown
+        text={text}
+        className="max-w-[70%] text-xs leading-snug prose-p:m-0 prose-strong:font-medium prose-strong:text-muted-foreground"
+      />
+      <span className="h-px flex-1 bg-border" aria-hidden="true" />
+    </div>
+  );
+}
+
 export function LiveActivity({ activity }: { activity: AgentActivity }) {
   const hasAnything =
     activity.thinking.length > 0 ||
@@ -142,6 +155,10 @@ function Entry({
   courseId: number;
 }) {
   const kind = "kind" in entry ? (entry.kind ?? "text") : "text";
+
+  if (kind === "topic-change" && entry.role === "system" && "text" in entry) {
+    return <TopicChangeDivider text={entry.text} />;
+  }
 
   if (kind === "tool-call" && entry.role === "system") {
     return (

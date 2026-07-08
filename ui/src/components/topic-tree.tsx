@@ -1,4 +1,4 @@
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Sparkles } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -11,13 +11,13 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
 } from "@/components/ui/sidebar";
+import { cn } from "@/lib/utils";
 import type { TopicNode } from "@/lib/types";
 
 type TopicTreeProps = {
   topics: TopicNode[];
-  disabled?: boolean;
+  frontierDisabled?: boolean;
   onNavigate: (path: string) => void;
-  onSelectTopic: (path: string) => void;
 };
 
 function containsCurrent(topic: TopicNode): boolean {
@@ -26,27 +26,40 @@ function containsCurrent(topic: TopicNode): boolean {
 
 function TopicBranch({
   topic,
-  disabled,
+  frontierDisabled,
   onNavigate,
-  onSelectTopic,
 }: {
   topic: TopicNode;
-  disabled: boolean;
+  frontierDisabled: boolean;
   onNavigate: (path: string) => void;
-  onSelectTopic: (path: string) => void;
 }) {
+  const isFrontier = topic.state === "frontier";
+  const disabled = isFrontier && frontierDisabled;
   const selectOrNavigate = () => {
-    if (disabled) {
+    if (topic.current || disabled) {
       return;
     }
 
-    if (topic.state === "frontier") {
-      onNavigate(topic.path);
-      return;
-    }
-
-    onSelectTopic(topic.path);
+    onNavigate(topic.path);
   };
+  const buttonLabel = topic.current
+    ? `${topic.title} (current topic)`
+    : isFrontier
+      ? `Enter ${topic.title} with mentor`
+      : `Switch to ${topic.title}`;
+  const buttonClassName = cn(
+    "w-full justify-between",
+    isFrontier &&
+      "border border-dashed border-sidebar-border/80 text-sidebar-foreground/65 hover:border-sidebar-accent-foreground/40 [&>svg]:text-sidebar-foreground/50",
+  );
+  const buttonContent = (
+    <>
+      <span className="truncate">{topic.title}</span>
+      {isFrontier ? (
+        <Sparkles className="size-4 shrink-0" aria-hidden="true" />
+      ) : null}
+    </>
+  );
 
   if (topic.children.length === 0) {
     return (
@@ -54,14 +67,15 @@ function TopicBranch({
         <SidebarMenuSubButton
           asChild
           isActive={topic.current}
-          aria-disabled={disabled}
+          className={buttonClassName}
         >
           <button
             type="button"
-            className="w-full"
+            disabled={disabled}
+            aria-label={buttonLabel}
             onClick={selectOrNavigate}
           >
-            <span className="truncate">{topic.title}</span>
+            {buttonContent}
           </button>
         </SidebarMenuSubButton>
       </SidebarMenuSubItem>
@@ -75,14 +89,15 @@ function TopicBranch({
           <SidebarMenuSubButton
             asChild
             isActive={topic.current}
-            aria-disabled={disabled}
-            className="flex-1"
+            className={cn("flex-1", buttonClassName)}
           >
             <button
               type="button"
+              disabled={disabled}
+              aria-label={buttonLabel}
               onClick={selectOrNavigate}
             >
-              <span className="truncate">{topic.title}</span>
+              {buttonContent}
             </button>
           </SidebarMenuSubButton>
           <CollapsibleTrigger asChild>
@@ -101,9 +116,8 @@ function TopicBranch({
               <TopicBranch
                 key={child.path}
                 topic={child}
-                disabled={disabled}
+                frontierDisabled={frontierDisabled}
                 onNavigate={onNavigate}
-                onSelectTopic={onSelectTopic}
               />
             ))}
           </SidebarMenuSub>
@@ -115,13 +129,14 @@ function TopicBranch({
 
 export function TopicTree({
   topics,
-  disabled = false,
+  frontierDisabled = false,
   onNavigate,
-  onSelectTopic,
 }: TopicTreeProps) {
   if (topics.length === 0) {
     return (
-      <p className="px-2 py-1.5 text-sm text-muted-foreground">No topics yet.</p>
+      <p className="px-2 py-1.5 text-sm text-muted-foreground">
+        Your map is empty — tell your mentor where to start.
+      </p>
     );
   }
 
@@ -133,9 +148,8 @@ export function TopicTree({
             <TopicBranch
               key={topic.path}
               topic={topic}
-              disabled={disabled}
+              frontierDisabled={frontierDisabled}
               onNavigate={onNavigate}
-              onSelectTopic={onSelectTopic}
             />
           ))}
         </SidebarMenuSub>
