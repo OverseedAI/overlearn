@@ -255,6 +255,11 @@ export function OnboardingScreen() {
 
   return (
     <div className="h-dvh overflow-y-auto p-8">
+      <div
+        data-tauri-drag-region
+        aria-hidden="true"
+        className="app-onboarding-drag-region"
+      />
       <div className="grid min-h-full place-items-center">
         <div className="w-full max-w-md">
           {step === "done" ? null : <StepIndicator step={step} />}

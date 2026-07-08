@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUp, Bot, ChevronDown, PanelRight } from "lucide-react";
 import { toast } from "sonner";
+import { AppHeader } from "@/components/app-chrome";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
-import { SidebarTrigger } from "@/components/ui/sidebar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -236,31 +236,30 @@ export function CourseScreen() {
 
   return (
     <div className="flex h-dvh min-w-0 flex-col">
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
-        <SidebarTrigger />
-        <h1 className="min-w-0 truncate text-sm font-medium">{course.title}</h1>
-        <StatusDot status={store.status} />
-        <div className="ms-auto flex items-center gap-1">
-          <AppScaleControls />
-          <HarnessPicker courseId={courseId} disabled={busy || ended} />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label={railOpen ? "Hide study rail" : "Show study rail"}
-                aria-pressed={railOpen}
-                onClick={toggleRail}
-                className="size-8"
-              >
-                <PanelRight className="size-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Study rail</TooltipContent>
-          </Tooltip>
-        </div>
-      </header>
+      <AppHeader
+        title={course.title}
+        afterTitle={<StatusDot status={store.status} />}
+        actionsClassName="gap-1"
+      >
+        <AppScaleControls />
+        <HarnessPicker courseId={courseId} disabled={busy || ended} />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label={railOpen ? "Hide study rail" : "Show study rail"}
+              aria-pressed={railOpen}
+              onClick={toggleRail}
+              className="size-8"
+            >
+              <PanelRight className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Study rail</TooltipContent>
+        </Tooltip>
+      </AppHeader>
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">

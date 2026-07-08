@@ -1,6 +1,7 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
 import { toast } from "sonner";
 import { CornerDownRight, Plus, Trash2 } from "lucide-react";
+import { AppHeader } from "@/components/app-chrome";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,7 +13,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
@@ -425,30 +425,24 @@ export function WizardScreen() {
 
   return (
     <>
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
-        <SidebarTrigger />
-        <h1 className="truncate text-sm font-medium">
-          {store.state.course.title || "Course plan review"}
-        </h1>
-        <div className="ms-auto flex items-center gap-2">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => setDiscardOpen(true)}
-          >
-            Discard draft
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            disabled={accepting || localTopics.length === 0}
-            onClick={() => void handleAccept()}
-          >
-            Accept plan
-          </Button>
-        </div>
-      </header>
+      <AppHeader title={store.state.course.title || "Course plan review"}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => setDiscardOpen(true)}
+        >
+          Discard draft
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          disabled={accepting || localTopics.length === 0}
+          onClick={() => void handleAccept()}
+        >
+          Accept plan
+        </Button>
+      </AppHeader>
 
       <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] overflow-hidden lg:grid-cols-[1fr_1fr] lg:grid-rows-1">
         <section className="flex min-h-0 flex-col overflow-hidden border-b lg:border-r lg:border-b-0">

@@ -115,6 +115,11 @@ export function AppSidebar({ route }: { route: Route }) {
   return (
     <Sidebar>
       <SidebarHeader>
+        <div
+          data-tauri-drag-region
+          aria-hidden="true"
+          className="app-sidebar-titlebar-space"
+        />
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton

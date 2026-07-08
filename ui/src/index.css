@@ -47,6 +47,10 @@
   --sidebar-accent-foreground: oklch(0.28 0.026 55);
   --sidebar-border: oklch(0.28 0.03 60 / 10%);
   --sidebar-ring: oklch(0.62 0.13 55);
+
+  --app-titlebar-safe-leading: 0px;
+  --app-traffic-light-safe-width: 5.5rem;
+  --app-window-control-space: 2.125rem;
 }
 
 .dark {
@@ -145,5 +149,39 @@
   body {
     @apply bg-background text-foreground;
     overflow: hidden;
+  }
+}
+
+@layer components {
+  .app-header {
+    padding-right: 1rem;
+    padding-left: calc(1rem + var(--app-titlebar-safe-leading));
+  }
+
+  .app-sidebar-titlebar-space,
+  .app-onboarding-drag-region {
+    display: none;
+  }
+
+  html[data-window-chrome="macos-overlay"] .app-sidebar-titlebar-space {
+    display: block;
+    height: var(--app-window-control-space);
+    flex: 0 0 auto;
+  }
+
+  html[data-window-chrome="macos-overlay"]
+    [data-slot="sidebar"][data-state="collapsed"]
+    ~ [data-slot="sidebar-inset"] {
+    --app-titlebar-safe-leading: var(--app-traffic-light-safe-width);
+  }
+
+  html[data-window-chrome="macos-overlay"] .app-onboarding-drag-region {
+    position: fixed;
+    z-index: 20;
+    top: 0;
+    right: 0;
+    left: var(--app-traffic-light-safe-width);
+    display: block;
+    height: var(--app-window-control-space);
   }
 }

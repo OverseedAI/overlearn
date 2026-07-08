@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { AppHeader } from "@/components/app-chrome";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { SidebarTrigger } from "@/components/ui/sidebar";
 import { HarnessItem, useHarnesses } from "@/components/harness-list";
 import { api, ApiError } from "@/lib/api";
 import { useProfile } from "@/lib/profile";
@@ -177,10 +177,7 @@ export function SettingsScreen() {
 
   return (
     <>
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
-        <SidebarTrigger />
-        <h1 className="text-sm font-medium">Settings</h1>
-      </header>
+      <AppHeader title="Settings" />
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-2xl px-4 py-10">
           <div className="divide-y divide-border [&>section]:py-10 [&>section:first-child]:pt-0 [&>section:last-child]:pb-0">

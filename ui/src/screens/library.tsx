@@ -17,6 +17,7 @@ import {
   Sparkles,
   Upload,
 } from "lucide-react";
+import { AppHeader } from "@/components/app-chrome";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -49,7 +50,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -685,34 +685,30 @@ export function LibraryScreen() {
 
   return (
     <>
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
-        <SidebarTrigger />
-        <h1 className="text-sm font-medium">Library</h1>
-        <div className="ms-auto flex items-center gap-2">
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            onClick={() => setImportOpen(true)}
-          >
-            <Upload className="size-4 shrink-0" />
-            Import
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            onClick={() => setBrainstormOpen(true)}
-          >
-            <Sparkles className="size-4 shrink-0" />
-            Brainstorm
-          </Button>
-          <Button type="button" size="sm" onClick={() => setNewCourseOpen(true)}>
-            <Plus className="size-4 shrink-0" />
-            New course
-          </Button>
-        </div>
-      </header>
+      <AppHeader title="Library">
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() => setImportOpen(true)}
+        >
+          <Upload className="size-4 shrink-0" />
+          Import
+        </Button>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() => setBrainstormOpen(true)}
+        >
+          <Sparkles className="size-4 shrink-0" />
+          Brainstorm
+        </Button>
+        <Button type="button" size="sm" onClick={() => setNewCourseOpen(true)}>
+          <Plus className="size-4 shrink-0" />
+          New course
+        </Button>
+      </AppHeader>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-6">
         <div className="mx-auto max-w-5xl space-y-8">
