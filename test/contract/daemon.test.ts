@@ -2076,6 +2076,152 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
+    "expires idle sessions and resumes the next turn with stored course state",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          OVERLEARN_SESSION_IDLE_TTL_MS: "60",
+          OVERLEARN_SESSION_IDLE_SWEEP_INTERVAL_MS: "20",
+          FAKE_ACP_MCP_CALL: JSON.stringify({
+            server: "overlearn-teaching",
+            tool: "get_course_state",
+            args: { transcriptLimit: 10 },
+          }),
+        },
+      });
+      const sse = await createSseClient(daemon.url, daemon.token);
+      let expirySse: Awaited<ReturnType<typeof createSseClient>> | undefined;
+
+      try {
+        const course = await createCourse(daemon, { title: "Idle TTL Course" });
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "first turn before idle expiry",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "first ttl turn done",
+        );
+        await sse.waitFor(
+          "courses",
+          (data) =>
+            isRecord(data) &&
+            Array.isArray(data["liveSessions"]) &&
+            data["liveSessions"].some(
+              (session) =>
+                isRecord(session) &&
+                session["courseId"] === course.id &&
+                session["state"] === "idle",
+            ),
+          "ttl session idle",
+        );
+
+        sse.close();
+        expirySse = await createSseClient(daemon.url, daemon.token);
+        await expirySse.waitFor(
+          "courses",
+          (data) =>
+            isRecord(data) &&
+            Array.isArray(data["liveSessions"]) &&
+            data["liveSessions"].some(
+              (session) =>
+                isRecord(session) &&
+                session["courseId"] === course.id &&
+                session["state"] === "idle",
+            ),
+          "ttl idle snapshot",
+        );
+        await expirySse.waitFor(
+          "courses",
+          (data) =>
+            isRecord(data) &&
+            Array.isArray(data["liveSessions"]) &&
+            !data["liveSessions"].some(
+              (session) =>
+                isRecord(session) && session["courseId"] === course.id,
+            ),
+          "ttl expiry courses broadcast",
+        );
+
+        const expiredHealth = (await (
+          await authFetch(daemon, "/api/health")
+        ).json()) as Record<string, unknown>;
+        expect(expiredHealth["liveSessions"]).toEqual([]);
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "second turn after idle expiry",
+        );
+        await expirySse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "second ttl turn done",
+        );
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.filter((entry) => entry["event"] === "session/prompt")
+              .length >= 2 &&
+            entries.filter(
+              (entry) =>
+                entry["event"] === "mcp/tools/call" &&
+                entry["tool"] === "get_course_state",
+            ).length >= 2,
+          "ttl resume prompts and state rebuilds",
+        );
+        const prompts = logs.filter(
+          (entry) => entry["event"] === "session/prompt",
+        );
+        const secondPrompt = promptText(prompts[1] ?? {});
+        expect(secondPrompt).toContain("## Resume context required");
+        expect(secondPrompt).toContain(
+          "This is a daemon-supervised resumed harness session.",
+        );
+        expect(secondPrompt).toContain("get_course_state");
+
+        const states = logs
+          .filter(
+            (entry) =>
+              entry["event"] === "mcp/tools/call" &&
+              entry["tool"] === "get_course_state",
+          )
+          .map(parseLoggedMcpResult);
+        expect(states.at(-1)).toMatchObject({
+          course: {
+            id: course.id,
+            title: "Idle TTL Course",
+          },
+        });
+      } finally {
+        sse.close();
+        expirySse?.close();
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
     "runs two course turns concurrently while same-course turns remain serialized",
     async () => {
       if (!(await ensureLocalhost())) {
