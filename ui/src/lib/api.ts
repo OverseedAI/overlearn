@@ -221,8 +221,11 @@ export const api = {
   deleteCourse: (id: number) => del<CourseResource>(`/api/courses/${id}`),
   submit: (id: number, text: string) =>
     post<{ ok: true; turn: number }>(`/api/courses/${id}/submit`, { text }),
-  nav: (id: number, path: string) =>
-    post<{ ok: true; turn?: number }>(`/api/courses/${id}/nav`, { path }),
+  nav: (id: number, path: string, options: { cardId?: string } = {}) =>
+    post<{ ok: true; turn?: number }>(`/api/courses/${id}/nav`, {
+      path,
+      ...(options.cardId === undefined ? {} : { cardId: options.cardId }),
+    }),
   reviewWeak: (id: number) =>
     post<{ ok: true; turn: number }>(`/api/courses/${id}/nav`, {
       path: "overlearn:review-weak",

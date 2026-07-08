@@ -43,6 +43,7 @@ import {
   readTopicTree,
   selectVisitedTopic,
   startSession,
+  updateLatestActiveTranscriptCardState,
   withStoreTransaction,
   type Course,
   type CourseStatus as StoreCourseStatus,
@@ -54,9 +55,11 @@ import {
   type Store,
   type Topic,
   type PendingTopicNavigation,
+  type PendingCardSkippedEvent,
   type TopicNavigationResult,
   type TopicNavigationTopic,
   type TopicJournalEntry as StoreTopicJournalEntry,
+  type TranscriptCardStateChange,
   type TranscriptEntry as StoreTranscriptEntry,
 } from "../store";
 import {
@@ -195,6 +198,12 @@ type ActiveFeynmanCheck = Readonly<{
   }>;
 }>;
 
+type TopicProposalCardTopic = Readonly<{
+  path: string;
+  title: string;
+  blurb: string;
+}>;
+
 type TranscriptEntryBase = Readonly<{
   id: number;
   topicId: number | null;
@@ -225,6 +234,13 @@ type TranscriptEntry = TranscriptEntryBase &
       kind: "feynman-check";
       concept: string;
       prompt: string;
+    }>
+    | Readonly<{
+      role: "agent";
+      kind: "topic-proposals";
+      cardId: string;
+      state: "active" | "acted" | "skipped";
+      topics: readonly TopicProposalCardTopic[];
     }>
     | Readonly<{
       role: "learner";
@@ -321,6 +337,12 @@ type TokenScope = Readonly<{
 type MessageTurnEvent = Extract<TurnEvent, { type: "message" }>;
 type TopicEnteredTurnEvent = Extract<TurnEvent, { type: "topic-entered" }>;
 type FeynmanAnswerTurnEvent = Extract<TurnEvent, { type: "feynman-answer" }>;
+type CardSkippedTurnEvent = Extract<TurnEvent, { type: "card-skipped" }>;
+
+type NavRequest = Readonly<{
+  path: string;
+  cardId?: string;
+}>;
 
 type CourseCreateInput = {
   title: string;
@@ -1165,6 +1187,29 @@ const transcriptPayloadRecord = (
 ): Record<string, unknown> =>
   isRecord(entry.payload) ? entry.payload : {};
 
+const topicProposalCardTopics = (
+  value: unknown,
+): readonly TopicProposalCardTopic[] =>
+  Array.isArray(value)
+    ? value.flatMap((entry) => {
+        if (!isRecord(entry)) {
+          return [];
+        }
+
+        const path = entry["path"];
+        const title = entry["title"];
+        const blurb = entry["blurb"];
+        return typeof path === "string" &&
+          typeof title === "string" &&
+          typeof blurb === "string"
+          ? [{ path, title, blurb }]
+          : [];
+      })
+    : [];
+
+const topicProposalCardState = (value: unknown): "active" | "acted" | "skipped" =>
+  value === "acted" || value === "skipped" ? value : "active";
+
 const transcriptEntryBase = (entry: StoreTranscriptEntry) => ({
   id: entry.id,
   topicId: entry.topicId,
@@ -1211,6 +1256,21 @@ const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
       concept:
         typeof payload["concept"] === "string" ? payload["concept"] : "unknown",
       prompt: entry.content,
+    };
+  }
+
+  if (entry.kind === "topic-proposals") {
+    const cardId = payload["cardId"];
+    return {
+      ...base,
+      role: "agent",
+      kind: "topic-proposals",
+      cardId:
+        typeof cardId === "string" && cardId.length > 0
+          ? cardId
+          : `topic-proposals-${entry.id}`,
+      state: topicProposalCardState(payload["state"]),
+      topics: topicProposalCardTopics(payload["topics"]),
     };
   }
 
@@ -1471,6 +1531,34 @@ const topicEnteredEventFromPending = (
   pending: PendingTopicNavigation,
 ): TopicEnteredTurnEvent =>
   topicEnteredEvent(pending.topic, pending.previous, pending.revisit);
+
+const cardSkippedEventFromChange = (
+  change: TranscriptCardStateChange,
+): CardSkippedTurnEvent => ({
+  type: "card-skipped",
+  cardId: change.cardId,
+  cardKind: change.cardKind,
+  reason: "learner-action",
+});
+
+const cardSkippedEventFromPending = (
+  event: PendingCardSkippedEvent,
+): CardSkippedTurnEvent => ({
+  type: "card-skipped",
+  cardId: event.cardId,
+  cardKind: event.cardKind,
+  reason: event.reason,
+});
+
+const pendingCardSkippedEventsFromChanges = (
+  changes: readonly TranscriptCardStateChange[],
+): readonly PendingCardSkippedEvent[] =>
+  changes.map((change) => ({
+    type: "card-skipped",
+    cardId: change.cardId,
+    cardKind: change.cardKind,
+    reason: "learner-action",
+  }));
 
 const flatTopicsForCourse = (store: Store, courseId: number): readonly Topic[] =>
   flattenTopicTree(readTopicTree(store, courseId));
@@ -1890,8 +1978,8 @@ export const runDaemon = async (
     flushPendingAgentText(event.courseId);
     const activeTurn = event.activeTurn;
     const attachment = event.attachment;
-    // Demo and journal-note writes render as rich transcript cards; every other
-    // teaching write keeps its readable tool-call row.
+    // Demo, journal-note, and topic-proposal writes render as rich transcript
+    // cards; every other teaching write keeps its readable tool-call row.
     const entry =
       attachment?.kind === "demo"
         ? appendUiTranscript(store, event.courseId, {
@@ -1920,6 +2008,26 @@ export const runDaemon = async (
                 markdown: attachment.markdown,
               },
             })
+          : attachment?.kind === "topic-proposals"
+            ? withStoreTransaction(store, () => {
+                updateLatestActiveTranscriptCardState(store, event.courseId, {
+                  state: "skipped",
+                });
+                return appendUiTranscript(store, event.courseId, {
+                  ...(activeTurn === undefined
+                    ? {}
+                    : { turn: activeTurn.turn, topicId: activeTurn.topicId }),
+                  role: "agent",
+                  kind: "topic-proposals",
+                  content: event.summary,
+                  payload: {
+                    cardId: attachment.cardId,
+                    cardKind: "topic-proposals",
+                    state: "active",
+                    topics: attachment.topics,
+                  },
+                });
+              })
           : appendUiTranscript(store, event.courseId, {
               ...(activeTurn === undefined
                 ? {}
@@ -2232,6 +2340,27 @@ export const runDaemon = async (
     }
   };
 
+  const skipLatestActiveCard = (
+    courseId: number,
+  ): TranscriptCardStateChange | null =>
+    updateLatestActiveTranscriptCardState(store, courseId, { state: "skipped" });
+
+  const actOnTopicProposalCard = (
+    courseId: number,
+    cardId: string,
+  ): TranscriptCardStateChange => {
+    const changed = updateLatestActiveTranscriptCardState(store, courseId, {
+      state: "acted",
+      cardId,
+      cardKind: "topic-proposals",
+    });
+    if (changed === null) {
+      throw new Error("Topic proposal card is no longer active.");
+    }
+
+    return changed;
+  };
+
   const appendLearnerTurnTranscript = (
     courseId: number,
     turn: number,
@@ -2244,6 +2373,7 @@ export const runDaemon = async (
   }> =>
     withStoreTransaction(store, () => {
       const pending = consumePendingTopicNavigation(store, courseId);
+      const skipped = skipLatestActiveCard(courseId);
       const topicChange =
         pending === null
           ? undefined
@@ -2261,10 +2391,12 @@ export const runDaemon = async (
       afterAppend?.();
 
       return {
-        events:
-          pending === null
-            ? [event]
-            : [topicEnteredEventFromPending(pending), event],
+        events: [
+          ...(pending?.cardEvents.map(cardSkippedEventFromPending) ?? []),
+          ...(pending === null ? [] : [topicEnteredEventFromPending(pending)]),
+          ...(skipped === null ? [] : [cardSkippedEventFromChange(skipped)]),
+          event,
+        ],
         entries:
           topicChange === undefined ? [entry] : [topicChange, entry],
       };
@@ -2282,13 +2414,21 @@ export const runDaemon = async (
     };
   };
 
-  const parseNavPath = async (request: Request): Promise<string> => {
+  const parseNavRequest = async (request: Request): Promise<NavRequest> => {
     const body = await readJsonBody(request);
     if (!isRecord(body)) {
       throw new Error("Nav body must be an object.");
     }
 
-    return requiredStringField(body, "path");
+    const cardId = optionalStringField(body, "cardId");
+    if (cardId === null) {
+      throw new Error("cardId must be a string.");
+    }
+
+    return {
+      path: requiredStringField(body, "path"),
+      ...(cardId === undefined ? {} : { cardId }),
+    };
   };
 
   const reviewWeakEvent = (courseId: number): TurnEvent => {
@@ -2760,6 +2900,7 @@ export const runDaemon = async (
           content: event.text,
         });
         broadcastTranscriptEntries(courseId, appended.entries);
+        broadcastCourseCollections(courseId);
         return runCourseTurn(course, appended.events, "teaching", turn);
       } catch (error) {
         return textResponse(error instanceof Error ? error.message : "Invalid submit request.", 400);
@@ -2793,9 +2934,22 @@ export const runDaemon = async (
 
     if (action === "nav" && extra === undefined && request.method === "POST") {
       try {
-        const path = await parseNavPath(request);
+        const nav = await parseNavRequest(request);
+        const { path } = nav;
         if (path === REVIEW_WEAK_NAV_PATH) {
-          return runCourseTurn(course, [reviewWeakEvent(courseId)], "teaching");
+          const skipped = withStoreTransaction(store, () => skipLatestActiveCard(courseId));
+          if (skipped !== null) {
+            broadcastCourseCollections(courseId);
+          }
+
+          return runCourseTurn(
+            course,
+            [
+              ...(skipped === null ? [] : [cardSkippedEventFromChange(skipped)]),
+              reviewWeakEvent(courseId),
+            ],
+            "teaching",
+          );
         }
 
         const topic = getTopicByPath(store, courseId, path);
@@ -2804,6 +2958,14 @@ export const runDaemon = async (
         }
 
         if (topic.isCurrent) {
+          if (nav.cardId !== undefined) {
+            const cardId = nav.cardId;
+            withStoreTransaction(store, () => {
+              actOnTopicProposalCard(courseId, cardId);
+            });
+            broadcastCourseCollections(courseId);
+          }
+
           return jsonResponse({ ok: true });
         }
 
@@ -2814,30 +2976,67 @@ export const runDaemon = async (
           }
 
           const turn = nextTurnNumber(store, courseId);
-          const navigation = enterFrontierTopic(store, courseId, path);
+          const frontier = withStoreTransaction(store, () => {
+            const skipped =
+              nav.cardId === undefined ? skipLatestActiveCard(courseId) : null;
+            if (nav.cardId !== undefined) {
+              actOnTopicProposalCard(courseId, nav.cardId);
+            }
+
+            const navigation = enterFrontierTopic(store, courseId, path);
+            const topicChange = navigation.changed
+              ? appendTopicChangeTranscript(store, courseId, {
+                  turn,
+                  topic: navigationResultTopic(navigation),
+                  previous: navigation.previous,
+                  revisit: false,
+                })
+              : null;
+
+            return { navigation, skipped, topicChange };
+          });
+          const { navigation } = frontier;
           if (!navigation.changed) {
+            if (frontier.skipped !== null || nav.cardId !== undefined) {
+              broadcastCourseCollections(courseId);
+            }
             return jsonResponse({ ok: true });
           }
 
           broadcastCourseCollections(courseId);
-          const topicChange = appendTopicChangeTranscript(store, courseId, {
-            turn,
-            topic: navigationResultTopic(navigation),
-            previous: navigation.previous,
-            revisit: false,
-          });
-          sseHub.broadcast("message", { courseId, entry: topicChange });
+          if (frontier.topicChange !== null) {
+            sseHub.broadcast("message", { courseId, entry: frontier.topicChange });
+          }
 
           return runCourseTurn(
             course,
-            [topicEnteredEventFromNavigation(navigation, false)],
+            [
+              ...(frontier.skipped === null
+                ? []
+                : [cardSkippedEventFromChange(frontier.skipped)]),
+              topicEnteredEventFromNavigation(navigation, false),
+            ],
             "teaching",
             turn,
           );
         }
 
-        const navigation = selectVisitedTopic(store, courseId, path);
-        if (navigation.changed) {
+        const visited = withStoreTransaction(store, () => {
+          const skipped =
+            nav.cardId === undefined ? skipLatestActiveCard(courseId) : null;
+          if (nav.cardId !== undefined) {
+            actOnTopicProposalCard(courseId, nav.cardId);
+          }
+
+          const navigation = selectVisitedTopic(store, courseId, path, {
+            cardEvents:
+              skipped === null ? [] : pendingCardSkippedEventsFromChanges([skipped]),
+          });
+
+          return { navigation, skipped };
+        });
+        const { navigation } = visited;
+        if (navigation.changed || visited.skipped !== null || nav.cardId !== undefined) {
           broadcastCourseCollections(courseId);
         }
 
@@ -2848,7 +3047,19 @@ export const runDaemon = async (
     }
 
     if (action === "done" && extra === undefined && request.method === "POST") {
-      return runCourseTurn(course, [{ type: "session-done" }], "wrap-up");
+      const skipped = withStoreTransaction(store, () => skipLatestActiveCard(courseId));
+      if (skipped !== null) {
+        broadcastCourseCollections(courseId);
+      }
+
+      return runCourseTurn(
+        course,
+        [
+          ...(skipped === null ? [] : [cardSkippedEventFromChange(skipped)]),
+          { type: "session-done" },
+        ],
+        "wrap-up",
+      );
     }
 
     if (

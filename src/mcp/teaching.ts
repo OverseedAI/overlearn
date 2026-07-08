@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   appendJournalEntry,
   appendMasteryEvent,
@@ -43,6 +45,7 @@ export const teachingMcpServerName = "overlearn-teaching";
 export type TeachingToolName =
   | "get_course_state"
   | "upsert_topic"
+  | "propose_topics"
   | "emit_demo"
   | "append_lesson_note"
   | "record_mastery"
@@ -71,6 +74,11 @@ export type TeachingWriteAttachment =
       entryId: number;
       topicId: number;
       markdown: string;
+    }>
+  | Readonly<{
+      kind: "topic-proposals";
+      cardId: string;
+      topics: readonly TopicProposal[];
     }>;
 
 export type TeachingWriteEvent = Readonly<{
@@ -109,6 +117,12 @@ type TopicPlacementRow = Readonly<{
   parent_id: number | bigint | null;
   path: string;
   position: number | bigint;
+}>;
+
+type TopicProposal = Readonly<{
+  path: string;
+  title: string;
+  blurb: string;
 }>;
 
 type TeachingToolOutput = Readonly<{
@@ -186,6 +200,24 @@ const inputSchemas: Record<TeachingToolName, McpJsonObject> = {
       ),
     },
     ["path"],
+  ),
+  propose_topics: objectSchema(
+    {
+      topics: {
+        type: "array",
+        minItems: 1,
+        maxItems: 3,
+        items: objectSchema(
+          {
+            path: stringSchema("Stable slash-delimited frontier topic path."),
+            title: stringSchema("Learner-facing topic card title."),
+            blurb: stringSchema("One-sentence reason this topic is a useful next step."),
+          },
+          ["path", "title", "blurb"],
+        ),
+      },
+    },
+    ["topics"],
   ),
   emit_demo: objectSchema(
     {
@@ -483,6 +515,31 @@ const requireStringArray = (
   }
 
   return strings;
+};
+
+const requireTopicProposals = (args: McpJsonObject): readonly TopicProposal[] => {
+  const value = args["topics"];
+  if (!Array.isArray(value)) {
+    throw new Error("topics must be an array.");
+  }
+
+  if (value.length < 1 || value.length > 3) {
+    throw new Error("topics must contain 1 to 3 items.");
+  }
+
+  return value.map((item, index) => {
+    if (!isRecord(item)) {
+      throw new Error(`topics[${index}] must be an object.`);
+    }
+
+    return {
+      path: normalizeTopicPath(
+        normalizeRequiredString(item["path"], `topics[${index}].path`),
+      ),
+      title: normalizeRequiredString(item["title"], `topics[${index}].title`),
+      blurb: normalizeRequiredString(item["blurb"], `topics[${index}].blurb`),
+    };
+  });
 };
 
 const optionalGaps = (args: McpJsonObject): string | undefined => {
@@ -1189,6 +1246,52 @@ const upsertTopicTool = (options: TeachingServerOptions): McpServerTool =>
     },
   });
 
+const proposeTopicsTool = (options: TeachingServerOptions): McpServerTool =>
+  createTeachingTool(options, {
+    name: "propose_topics",
+    description:
+      "Propose 1 to 3 adjacent next topics as clickable learner cards. Use when a natural next-step choice appears, either at a topic conclusion or at a genuine mid-topic fork. These are local frontier suggestions, not a syllabus; do not call twice in a row without teaching in between.",
+    knownKeys: ["topics"],
+    call: (args) => {
+      const proposals = requireTopicProposals(args);
+      const courseId = options.scope.courseId;
+
+      const topics = withStoreTransaction(options.store, () =>
+        proposals.map((proposal) => {
+          const existing = getTopicByPath(options.store, courseId, proposal.path);
+          if (existing !== undefined) {
+            return existing;
+          }
+
+          return upsertTopic(options.store, courseId, {
+            path: proposal.path,
+            title: proposal.title,
+            body: "",
+            isCurrent: false,
+          });
+        }),
+      );
+      const cardId = `topic-proposals-${randomUUID()}`;
+
+      return {
+        result: jsonResult({
+          ok: true,
+          cardId,
+          topics: proposals.map((proposal, index) => ({
+            ...proposal,
+            topicId: topics[index]?.id ?? null,
+          })),
+        }),
+        writeSummary: `proposed ${proposals.length} topic${proposals.length === 1 ? "" : "s"}`,
+        writeAttachment: {
+          kind: "topic-proposals",
+          cardId,
+          topics: proposals,
+        },
+      };
+    },
+  });
+
 const emitDemoTool = (options: TeachingServerOptions): McpServerTool =>
   createTeachingTool(options, {
     name: "emit_demo",
@@ -1462,6 +1565,7 @@ export const createTeachingMcpServer = (
   tools: [
     getCourseStateTool(options),
     upsertTopicTool(options),
+    proposeTopicsTool(options),
     emitDemoTool(options),
     appendLessonNoteTool(options),
     recordMasteryTool(options),

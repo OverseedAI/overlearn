@@ -111,6 +111,12 @@ export type ActiveFeynmanCheck = {
   replaced?: { concept: string; issuedAt: string; replacedAt: string };
 };
 
+export type TopicProposalCardTopic = {
+  path: string;
+  title: string;
+  blurb: string;
+};
+
 type TranscriptEntryBase = {
   id: number;
   topicId: number | null;
@@ -137,6 +143,13 @@ export type TranscriptEntry = TranscriptEntryBase &
       kind: "feynman-check";
       concept: string;
       prompt: string;
+    }
+    | {
+      role: "agent";
+      kind: "topic-proposals";
+      cardId: string;
+      state: "active" | "acted" | "skipped";
+      topics: TopicProposalCardTopic[];
     }
     | {
       role: "learner";

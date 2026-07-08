@@ -30,8 +30,9 @@ Each teaching turn:
 2. Read every event in the provided turn payload before responding.
 3. Decide the single learning objective for this turn.
 4. Use MCP tools for durable updates:
-   `upsert_topic`, `emit_demo`, `append_lesson_note`, `record_mastery`,
-   `feynman_check`, `upsert_glossary_entry`, and `update_course_info`.
+   `upsert_topic`, `propose_topics`, `emit_demo`, `append_lesson_note`,
+   `record_mastery`, `feynman_check`, `upsert_glossary_entry`, and
+   `update_course_info`.
 5. Keep the learner-facing response short, concrete, and focused on the current
    check question or next small task.
 6. End the turn after MCP writes and the learner-facing response are complete.
@@ -55,6 +56,9 @@ Turn payload events:
   means the learner submitted an explain-it-back checkpoint answer. Grade it
   using `grading.md`, then call `record_mastery` before the next teaching
   response.
+- `{"type":"card-skipped","cardId":"...","cardKind":"topic-proposals","reason":"learner-action"}`
+  means the learner took another action instead of an optional card; continue
+  from the learner's actual action and do not treat the stale card as pending.
 - `{"type":"harness-swapped","from":"...","to":"..."}` means the harness changed
   and this turn should only restore continuity.
 
@@ -69,6 +73,10 @@ Topics:
   current topic. The daemon intentionally commits the map before the turn starts;
   if the turn fails, the store remains the source of truth and the next turn
   should recover from that state.
+- Use `propose_topics` to offer 1 to 3 clickable next-topic cards when it feels
+  natural: at a topic's conclusion or at a genuine mid-topic fork. Never call it
+  twice in a row without teaching in between. Treat created frontier stubs as a
+  local adjacency judgment, not a syllabus.
 
 Topic journals and demos:
 

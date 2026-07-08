@@ -208,6 +208,18 @@ export function CourseScreen() {
       api.pageTranscript(courseId, { before: beforeId, limit: 50 }),
     [courseId],
   );
+  const navigateTopicCard = useCallback(
+    async (path: string, cardId: string) => {
+      try {
+        await api.nav(courseId, path, { cardId });
+      } catch (error) {
+        toast.error(
+          error instanceof ApiError ? error.message : "Couldn’t change topic.",
+        );
+      }
+    },
+    [courseId],
+  );
 
   if (store.loading) {
     return (
@@ -275,6 +287,7 @@ export function CourseScreen() {
             showTyping={busy && !store.activity}
             onLoadOlder={loadOlderTranscript}
             onPrependEntries={prependTranscript}
+            onNavigateTopic={navigateTopicCard}
           />
 
           <div className="shrink-0 border-t">

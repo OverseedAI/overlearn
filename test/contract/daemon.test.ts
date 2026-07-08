@@ -1660,6 +1660,241 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
+    "enters a proposed topic card through the existing nav endpoint",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          FAKE_ACP_MCP_CALL: JSON.stringify({
+            server: "overlearn-teaching",
+            tool: "propose_topics",
+            args: {
+              topics: [
+                {
+                  path: "next-topic",
+                  title: "Next Topic",
+                  blurb: "A useful adjacent frontier.",
+                },
+              ],
+            },
+          }),
+        },
+      });
+      const sse = await createSseClient(daemon.url, daemon.token);
+      const store = openStore({
+        env: { OVERLEARN_DATA_DIR: daemon.dataDir },
+      });
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Proposal Nav Course",
+        });
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "offer a next topic",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "proposal turn done",
+        );
+
+        const activeState = await courseState(daemon, course.id);
+        const transcript = Array.isArray(activeState["transcript"])
+          ? activeState["transcript"]
+          : [];
+        const card = transcript.find(
+          (entry) => isRecord(entry) && entry["kind"] === "topic-proposals",
+        );
+        if (!isRecord(card) || typeof card["cardId"] !== "string") {
+          throw new Error("Missing active topic proposal card.");
+        }
+        const cardId = card["cardId"];
+        expect(card["state"]).toBe("active");
+
+        const stub = flattenTopicTree(readTopicTree(store, course.id)).find(
+          (topic) => topic.path === "next-topic",
+        );
+        expect(stub?.enteredAt).toBeNull();
+        expect(stub?.isCurrent).toBe(false);
+
+        const response = await authFetch(daemon, `/api/courses/${course.id}/nav`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ path: "next-topic", cardId }),
+        });
+        expect(response.status).toBe(200);
+        const payload = (await response.json()) as Record<string, unknown>;
+        expect(payload["ok"]).toBe(true);
+        expect(payload["turn"]).toBe(2);
+
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "proposal nav turn done",
+        );
+
+        const entered = flattenTopicTree(readTopicTree(store, course.id)).find(
+          (topic) => topic.path === "next-topic",
+        );
+        expect(entered?.isCurrent).toBe(true);
+        expect(entered?.enteredAt).not.toBeNull();
+
+        const cardRow = pageTranscript(store, course.id, { limit: 20 }).entries.find(
+          (entry) => entry.payload["cardId"] === cardId,
+        );
+        expect(cardRow?.payload["state"]).toBe("acted");
+      } finally {
+        store.close();
+        sse.close();
+      }
+    },
+    20_000,
+  );
+
+  contractTest(
+    "skips an active topic proposal card when the learner types instead",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          FAKE_ACP_MCP_CALL: JSON.stringify({
+            server: "overlearn-teaching",
+            tool: "propose_topics",
+            args: {
+              topics: [
+                {
+                  path: "fork-a",
+                  title: "Fork A",
+                  blurb: "A possible next branch.",
+                },
+              ],
+            },
+          }),
+        },
+      });
+      const firstSse = await createSseClient(daemon.url, daemon.token);
+      const store = openStore({
+        env: { OVERLEARN_DATA_DIR: daemon.dataDir },
+      });
+      let restarted: StartedContractDaemon | undefined;
+      let restartedSse: Awaited<ReturnType<typeof createSseClient>> | undefined;
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Proposal Skip Course",
+        });
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "offer a fork",
+        );
+        await firstSse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "proposal card created",
+        );
+
+        const cardRow = pageTranscript(store, course.id, { limit: 20 }).entries.find(
+          (entry) => entry.kind === "topic-proposals",
+        );
+        const cardId = cardRow?.payload["cardId"];
+        if (typeof cardId !== "string") {
+          throw new Error("Missing topic proposal card id.");
+        }
+        expect(cardRow?.payload["state"]).toBe("active");
+
+        await daemon.stop();
+        restarted = await start({
+          scenario: "normal",
+          extraEnv: {
+            OVERLEARN_DATA_DIR: daemon.dataDir,
+            FAKE_ACP_LOG: daemon.logPath,
+          },
+        });
+        restartedSse = await createSseClient(restarted.url, restarted.token);
+
+        await submitCourseMessage(
+          restarted.url,
+          restarted.token,
+          course.id,
+          "teach this another way instead",
+        );
+        await restartedSse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "proposal skip turn done",
+        );
+
+        const skippedRow = pageTranscript(store, course.id, { limit: 20 }).entries.find(
+          (entry) => entry.payload["cardId"] === cardId,
+        );
+        expect(skippedRow?.payload["state"]).toBe("skipped");
+        const stub = flattenTopicTree(readTopicTree(store, course.id)).find(
+          (topic) => topic.path === "fork-a",
+        );
+        expect(stub?.enteredAt).toBeNull();
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.filter((entry) => entry["event"] === "session/prompt")
+              .length >= 2,
+          "proposal skip prompt log",
+        );
+        const prompts = logs.filter((entry) => entry["event"] === "session/prompt");
+        const secondPrompt = promptText(prompts[1] ?? {});
+        expect(secondPrompt).toContain('"type": "card-skipped"');
+        expect(secondPrompt).toContain(`"cardId": "${cardId}"`);
+        expect(secondPrompt).toContain('"cardKind": "topic-proposals"');
+        expect(secondPrompt).toContain("teach this another way instead");
+      } finally {
+        if (restartedSse !== undefined) {
+          restartedSse.close();
+        }
+        if (restarted !== undefined) {
+          await restarted.cleanup();
+          activeDaemons.delete(restarted);
+        }
+        store.close();
+        firstSse.close();
+      }
+    },
+    20_000,
+  );
+
+  contractTest(
     "uses renamed course metadata in the next prompt without recreating runtime",
     async () => {
       if (!(await ensureLocalhost())) {

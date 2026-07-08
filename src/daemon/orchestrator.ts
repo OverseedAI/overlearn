@@ -14,7 +14,7 @@ import {
   teachingMcpServerName,
   type TeachingToolName,
 } from "../mcp/teaching";
-import type { TopicNodeState } from "../store";
+import type { TopicNodeState, TranscriptCardKind } from "../store";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -32,6 +32,12 @@ export type TurnEvent =
   | Readonly<{ type: "review-weak"; concepts: readonly string[] }>
   | Readonly<{ type: "session-done" }>
   | Readonly<{ type: "harness-swapped"; from: string; to: string }>
+  | Readonly<{
+      type: "card-skipped";
+      cardId: string;
+      cardKind: TranscriptCardKind;
+      reason: "learner-action";
+    }>
   | Readonly<{
       type: "feynman-answer";
       concept: string;
@@ -308,6 +314,7 @@ const permissionRules = (
 const teachingMcpToolNames: readonly TeachingToolName[] = [
   "get_course_state",
   "upsert_topic",
+  "propose_topics",
   "emit_demo",
   "append_lesson_note",
   "record_mastery",
