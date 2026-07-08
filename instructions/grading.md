@@ -37,7 +37,7 @@ small contrast case; do not merely restate the definition.
 
 If key points were provided, each key point must be either satisfied or named as
 a gap. If key points were not provided, infer the expected mechanism from the
-current lesson and topic state, then grade against that mechanism.
+current topic, journal, and mastery state, then grade against that mechanism.
 
 Record mastery before the next teaching turn. Do not advance to a new major
 topic until the gaps have been addressed or deliberately carried forward.
