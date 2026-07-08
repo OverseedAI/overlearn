@@ -21,15 +21,17 @@ These decisions are settled. They are recorded here so implementation does not r
 | D3 | Session visibility | Running agents surfaced in a **bottom status bar** (by course name) plus session state over SSE. |
 | D4 | Lessons | **One-to-one with topics.** A lesson is the topic's **journal**: an append-only sequence of entries (study notes, demo pins, summaries), not a replaceable document. |
 | D5 | Demos | Surfaced in chat **and** pinned into the topic journal as a **link line** at the chronological position they were emitted. One tool call does both. |
-| D6 | Topic discovery | Agent proffers next topics as **clickable cards** (`propose_topics`, 2–3 max), allowed **anytime it feels natural**, not only at topic conclusions. Enforced via system-prompt instructions. |
+| D6 | Topic discovery | Agent proffers next topics as **clickable cards** (`propose_topics`, schema-enforced 1–3 per call; instructions steer toward 2–3), allowed **anytime it feels natural**, not only at topic conclusions. Enforced via system-prompt instructions. |
 | D7 | Turn semantics on nav | Entering a **new** (frontier / never-visited) topic starts an agent turn. Selecting an **already-visited** topic does **not** start a turn — it is a local view change. |
-| D8 | Transition commit | When a learner enters a new topic (card click or sidebar click), the **daemon commits** `entered_at` + `is_current` immediately, then fires the agent turn. The write is safe because the topic data was agent-authored (the proposal); this is the same pre-authorized-commit trick the old accept-plan used. |
+| D8 | Transition commit | When a learner enters a new topic (card click or sidebar click), the **daemon commits** `entered_at` + `is_current` immediately, then fires the agent turn. The write is safe because the topic data was agent-authored (the proposal); this is the same pre-authorized-commit trick the old accept-plan used. Applies to **learner-initiated** entries only — during orientation the mentor creates and enters the first topic itself (D14, US-C1). |
 | D9 | Continuity | **One conversation per course.** The full transcript is retained; topic changes are entries *within* that conversation. Every transcript entry records the current topic. Durable per-topic memory lives in the journal, not the transcript. |
-| D10 | Topic-change rendering | When the user changes topic **and** sends a new message, a small **metadata line** is written into the chat ("topic changed to *X*"). The chat history must contain the complete transcript so a reader can follow the entire education history from chat alone. |
+| D10 | Topic-change rendering | A small **metadata line** ("topic changed to *X*") is written into the chat at the moment the topic change **joins the conversation**: immediately for frontier entries (they start a turn), and at the next learner message for visited-topic selections (a passive selection that is never followed by a message produces no line). The chat history must contain the complete transcript so a reader can follow the entire education history from chat alone. |
 | D11 | Feynman checks | Become **optional / non-blocking**. The learner can answer the card **or** just type a follow-up question. Same "do A or ask B" interaction contract as topic cards. |
 | D12 | Skipped cards | When an optional card (Feynman, topic proposals) is skipped, it is **not shown in chat history** as a stale action item. It disappears; the opportunity resurfaces naturally as learning progresses. |
 | D13 | Migration | **Wipe and start fresh.** Pre-1.0, no external users. Bump schema version, drop incompatible data. No migration code. |
 | D14 | Course creation | **Seed → mentor orients.** Single seed prompt ("What do you want to learn?"). Course is created `active` immediately with a placeholder title. Turn 1: the mentor orients — asks where the learner wants to enter the territory, names the course, and creates the first topic once the learner engages. No review step. |
+
+> Revised 2026-07-08 after an external architecture review (Codex, 20 findings). Revisions are folded inline; the review-driven requirements are FR-26–FR-30.
 
 ## 2. Goals
 
@@ -55,7 +57,11 @@ Explicit teardown list. Each item's removal is in-scope work, including its test
 | `propose_course_plan` MCP tool | `src/mcp/teaching.ts:1343` | `propose_topics` (incremental) |
 | `upsert_lesson` MCP tool (whole-body replace) | `src/mcp/teaching.ts:1201` | `append_lesson_note` (append-only) |
 | `lessons` table + `topics.lesson_id` string ref + `glossary.lesson_id` | `src/store/index.ts:540-553, 564, 603` | `topic_journal_entries` table; `glossary.topic_id` |
-| Blocking Feynman semantics (`clearActiveFeynmanCheck` on answer only, card persists in history) | `src/daemon/index.ts`, `src/mcp/teaching.ts`, transcript rendering | Optional cards (FR-30..FR-34) |
+| Blocking Feynman semantics (`clearActiveFeynmanCheck` on answer only; live checks render in `FeynmanPanel`, outside the transcript) | `src/daemon/index.ts`, `src/mcp/teaching.ts`, `ui/src/screens/course.tsx` | Optional in-transcript cards (FR-22–FR-24, US-E3, US-F1) |
+| Global harness-switch turn guard (`runtime?.runningTurn` blocks switching for *any* course) | `src/daemon/index.ts:2424` | Per-course guard: only the course being switched must be idle |
+| `activeCourseId` in health/courses payloads and as the `/api/harnesses` default scope | `src/daemon/index.ts:1361, 2557` | Health exposes the live-session list (US-A3 payload); `/api/harnesses` requires an explicit course scope |
+| Legacy folder-import support for `lessons/`, lesson refs in transcript/glossary | `src/store/index.ts:3018` | Dropped (D13 wipe policy extends to importers); imports log a warning and skip lesson data |
+| Tutorial course bulk-seeding a planned topic tree | `src/daemon/tutorial.ts:103` | Tutorial rewritten for the emergent model: seeds a small **pre-visited** map (topics with `entered_at` set + journal entries), not a plan |
 
 ## 4. User Stories
 
@@ -83,6 +89,7 @@ Phased. Phases are ordered by dependency: A (concurrency) and B (schema) are ind
 - [ ] A session idle longer than the TTL is ended (`orchestrator.endSession("idle-ttl")`) and removed from the pool.
 - [ ] TTL is configurable via `OVERLEARN_SESSION_IDLE_TTL_MS`; default **30 minutes**. Parsed with the same positive-integer validation as existing env knobs (`orchestrator.ts:112`).
 - [ ] A TTL-expired course resumes transparently: the next turn cold-starts a session and the existing resume machinery (`nextTurnNeedsResumeContext` → resume preamble → `get_course_state`) rebuilds context. No user-visible error.
+- [ ] **TTL expiry must set the resume flag.** `endSession` alone does not set `nextTurnNeedsResumeContext` (`orchestrator.ts:520` — only `resetSession` at `:530` does). TTL expiry must use `resetSession`-equivalent semantics, or the next turn cold-starts *without* the resume preamble and the agent teaches with amnesia. Regression test required.
 - [ ] TTL never fires mid-turn: a running turn counts as activity; expiry checks skip sessions with `runningTurn === true`.
 - [ ] Unit tests cover: expiry after idle, no expiry while running, activity reset on new turn.
 
@@ -94,6 +101,7 @@ Phased. Phases are ordered by dependency: A (concurrency) and B (schema) are ind
 - [ ] Broadcast fires on: session start, turn start, turn end, session end (any reason: wrap-up, TTL, crash, harness swap).
 - [ ] `GET /api/sessions` returns the same payload for initial load.
 - [ ] Courses with no live session are simply absent from the payload (cold is the default state; the UI infers it).
+- [ ] The existing per-course `status` SSE channel is **unchanged** — the composer and failure UI depend on it (`ui/src/lib/course-store.tsx:223`, `ui/src/screens/course.tsx:233`), and it carries states (`agent-failed`, `wrapping-up`, `session-ended`) that `sessions` deliberately does not. `sessions` is additive and drives only session-presence surfaces (status bar, Library).
 
 ### Phase B — Store schema v2 (wipe, no migration)
 
@@ -120,7 +128,8 @@ Phased. Phases are ordered by dependency: A (concurrency) and B (schema) are ind
   ```
   with a CHECK enforcing kind/payload consistency (`demo` ⇔ `demo_id NOT NULL ∧ body_markdown IS NULL`).
 - [ ] `transcript` gains `topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL` — the current topic at the moment the entry was written (D9). Nullable: pre-first-topic entries have none.
-- [ ] `glossary.lesson_id` replaced with `topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL`.
+- [ ] `glossary.lesson_id` replaced with `topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL`. The `upsert_glossary_entry` MCP tool drops its `lessonId` param (`src/mcp/teaching.ts:254`) for an optional `topicPath` defaulting to the current topic; the store's glossary record type (`src/store/index.ts:182`) updates to match.
+- [ ] Tutorial course creation (`src/daemon/tutorial.ts:103`) rewritten to the emergent model: a small pre-visited map (topics with `entered_at`, journal entries, no draft/plan machinery).
 - [ ] `courses.status` CHECK becomes `('active', 'archived')` — `draft` removed.
 - [ ] Store helpers: `appendJournalEntry`, `listJournalEntries(courseId, topicId)`, plus updates to `readTopicTree` consumers.
 - [ ] Course bundle export/import (`src/store/bundle.ts`) updated to the new schema (journals included; lessons section removed).
@@ -140,9 +149,11 @@ Phased. Phases are ordered by dependency: A (concurrency) and B (schema) are ind
 **Description:** As a learner, I want to describe what I want to learn and be inside a live course immediately so that no review step separates me from the mentor.
 
 **Acceptance Criteria:**
-- [ ] `POST /api/courses/ideate` is replaced by `POST /api/courses` accepting `{ seed: string }`.
-- [ ] The course is created with `status: "active"`, placeholder title (`"New course"`), and the seed stored as description and appended to the transcript as the learner's first message.
-- [ ] Turn 1 fires immediately in **orientation** mode (FR-20): the mentor asks where the learner wants to enter the territory, proposes a course title via `update_course_info`, and does **not** create topics until the learner engages (D14).
+- [ ] `POST /api/courses/ideate` is deleted. The existing `POST /api/courses` (manual creation with `title`, `description`, `harnessId`, `attachedDir`, `sourceName` — `src/daemon/index.ts:1974`) gains an optional `seed` field. With `seed`, the course is created `active` with placeholder title and the orientation turn fires; without it, manual creation behaves as today (no turn). One endpoint, both workflows.
+- [ ] With `seed`: the seed is stored as description and appended to the transcript as the learner's first message.
+- [ ] Turn 1 fires immediately in **orientation** mode (FR-20): the mentor asks where the learner wants to enter the territory and proposes a course title via `update_course_info`.
+- [ ] **First topic:** during orientation, once the learner engages, the **mentor itself** creates and enters the first topic — `upsert_topic` may set `entered_at` + `is_current` when the course has no current topic. The D8 daemon-commit path covers learner-initiated entries only; this is the agent-initiated exception, and the only one.
+- [ ] `update_course_info` MCP tool ships **in this story** (not Phase D): `{ title?, description? }`, added to the permission pre-approval list.
 - [ ] Creating a course while other courses have live sessions works (no cross-course gating).
 - [ ] The Library "Brainstorm" dialog copy is updated: same single seed prompt, button navigates straight to the Course screen (Wizard route deleted).
 - [ ] Typecheck passes; verify in browser using dev-browser skill.
@@ -185,11 +196,11 @@ Phased. Phases are ordered by dependency: A (concurrency) and B (schema) are ind
 **Description:** As the mentor agent, I want to proffer 2–3 next directions as clickable cards so that the learner can choose where to walk next or ignore them and keep talking.
 
 **Acceptance Criteria:**
-- [ ] New tool `propose_topics`: `{ topics: Array<{ path, title, blurb }> }`, 1–3 items enforced at the schema level.
+- [ ] New tool `propose_topics`: `{ topics: Array<{ path, title, blurb }> }`, 1–3 items enforced at the schema level (instructions steer toward 2–3, D6).
 - [ ] Each proposed topic is upserted as a **frontier stub** (`entered_at NULL`, not current). Re-proposing an existing path is a no-op upsert, never a duplicate.
 - [ ] The tool emits a card attachment into the transcript (one card group per call) rendered as clickable topic cards with title + blurb.
 - [ ] Proposal cards are **ephemeral** (D12): they render only while they are the latest actionable item. Skipping (see US-E3) removes them from history rendering; the frontier stubs remain on the map.
-- [ ] `update_course_info` tool added alongside: `{ title?, description? }`, so the mentor can name the course during orientation (D14). Both tools added to the permission pre-approval list.
+- [ ] `propose_topics` added to the permission pre-approval list. (`update_course_info` moved to US-C1 — it is a Phase C dependency.)
 - [ ] Unit tests: stub creation, 3-item cap, no-dup upsert.
 
 #### US-D4: Current-topic context in every turn prompt
@@ -197,6 +208,9 @@ Phased. Phases are ordered by dependency: A (concurrency) and B (schema) are ind
 
 **Acceptance Criteria:**
 - [ ] `buildTurnPrompt` includes a position block: current topic path + title, its node state, and — when the turn was triggered by or follows a topic change — `previousTopic` and `revisit: true|false` (revisit = topic already had `entered_at` before this entry).
+- [ ] **Turn-context snapshot:** the daemon snapshots the current topic and turn number at turn start; `append_lesson_note` / `emit_demo` / `upsert_glossary_entry` defaults resolve against the **running turn's snapshot**, not live `is_current`. A visited-topic click mid-turn (allowed per US-E1/US-H1) must never redirect an in-flight turn's writes.
+- [ ] The teaching MCP server scope (currently `courseId`-only, `src/mcp/teaching.ts:53`) gains access to the active turn context (e.g. a `getActiveTurn()` accessor backed by `activeTurnByCourse`), so journal entries and transcript rows are stamped with the turn number **at insert time**, not reconstructed afterwards in `onTeachingWrite`.
+- [ ] `buildTurnPrompt` reads course title/description from the **store at prompt-build time** — the runtime must not cache `courseTitle` at construction (`src/daemon/index.ts:1577`), or `update_course_info` renames never reach the prompt or session payloads.
 - [ ] The `nav`-descendant turn event (see US-E1) carries `path`, `revisit`, `previous`.
 - [ ] Protocol instructions require: on `revisit: true`, read the topic's journal (via `get_course_state` or the journal in its payload) before responding, and greet with where things left off.
 - [ ] `get_course_state` response includes each topic's journal entries (or a bounded recent window with total count — bounded is acceptable; document the bound).
@@ -210,7 +224,7 @@ Phased. Phases are ordered by dependency: A (concurrency) and B (schema) are ind
 - [ ] Clicking a **frontier** topic (sidebar node or proposal card): daemon sets `entered_at` + `is_current` immediately in one transaction, broadcasts the map update, **then** starts an agent turn with a `topic-entered` event (`{ path, revisit: false, previous }`). The mentor kickstarts the topic.
 - [ ] Clicking a **visited** topic: daemon sets `is_current` (no `entered_at` change), broadcasts, and does **not** start a turn. The lesson rail shows that topic's journal. No agent involvement, zero latency.
 - [ ] Clicking the current topic: no-op (existing guard).
-- [ ] The pending-topic-change is remembered (per course, in daemon memory): the next learner message's turn payload includes the topic-change context so the agent knows the ground shifted (`revisit: true`, previous topic) (D10).
+- [ ] The pending-topic-change is **persisted in the store** (e.g. a `pending_nav_json` column on `courses`, cleared when consumed) — not daemon memory — so the context survives daemon restarts, TTL expiry, and harness swaps (D9). The next learner message's turn payload includes it (`revisit: true`, previous topic) (D10).
 - [ ] REST: `POST /api/courses/:id/nav` behavior updated accordingly; UI `TopicTree` no longer disables during agent turns for visited-topic clicks (only frontier entry is gated by `runningTurn`).
 - [ ] Integration tests: frontier click → turn starts + map committed even if turn later fails; visited click → no turn, current pointer moved.
 - [ ] Verify in browser using dev-browser skill.
@@ -230,8 +244,9 @@ Phased. Phases are ordered by dependency: A (concurrency) and B (schema) are ind
 **Description:** As a learner, I don't want stale action items cluttering my chat when I chose to do something else (D12).
 
 **Acceptance Criteria:**
-- [ ] A card (topic proposals, Feynman check) is **actionable** only until the learner takes any other action in that course (sends a message, enters another topic, answers a different card).
-- [ ] Once superseded, the card is not rendered in chat history at all (the transcript row is retained in the store with a `skipped` marker for export fidelity, but the renderer hides it).
+- [ ] **Concrete card model:** every card is a transcript entry whose payload carries `{ cardId, cardKind: "topic-proposals" | "feynman", state: "active" | "acted" | "skipped", ...cardData }`. Feynman checks additionally keep their state table (which gains a `skipped` status, US-F1); topic-proposal cards live entirely in the transcript payload (their durable output is the frontier stubs).
+- [ ] A card is **actionable** only until the learner takes any other action in that course (sends a message, enters another topic, answers a different card). The daemon flips `state` atomically (same transaction as recording the superseding action) — no window where two cards are active.
+- [ ] Once `skipped`, the card is not rendered in chat history at all (the transcript row is retained for export fidelity, but the renderer hides it).
 - [ ] No "expired"/"skipped" placeholder is shown — the item simply isn't there (D12).
 - [ ] The underlying opportunities persist naturally: proposal stubs stay on the map as frontier nodes; the agent may re-issue a Feynman check later.
 - [ ] Verify in browser using dev-browser skill.
@@ -336,6 +351,13 @@ Phased. Phases are ordered by dependency: A (concurrency) and B (schema) are ind
 ### Status bar
 - **FR-25:** A bottom status bar must show live sessions by course name with a turn-running indicator, navigate on click, and disappear when no sessions are live.
 
+### Review-driven requirements (external review, 2026-07-08)
+- **FR-26:** The transcript UI must support loading the full history (pagination or infinite scroll past the current 200-entry tail, `src/daemon/index.ts:1031`) — FR-19's "complete education history" applies to what the user can actually read, not just what the store retains.
+- **FR-27:** Frontier topics (`entered_at IS NULL`) must be excluded from all review surfaces — `dueForReview` in `get_course_state` (`src/mcp/teaching.ts:913`) and the review-weak flow. Unvisited territory is not weak learned material.
+- **FR-28:** Demo journal pins are **live references** to the demo row: re-emitting a demo with the same `(topic, fileName)` updates the demo in place (existing `upsertDemo` semantics, `src/store/index.ts:2128`) and existing pins open the latest version. Re-emitting must not create a duplicate pin for the same demo in the same topic's journal.
+- **FR-29:** Turn prompts and session payloads must read course title/description from the store at build time; no component may cache course metadata at session/runtime construction.
+- **FR-30:** Harness switching must be gated per course (the switched course's turn state only), and `/api/harnesses` must take an explicit course scope — no `activeCourseId` fallback survives anywhere in the API surface.
+
 ## 6. Non-Goals (Out of Scope)
 
 - **No hidden atlas / background planning.** The agent must not pre-generate an unshown course plan (decision D1). If a zoomed-out overview is ever wanted, it is synthesized on demand from the visited map — not stored.
@@ -362,7 +384,8 @@ Phased. Phases are ordered by dependency: A (concurrency) and B (schema) are ind
 - **`get_course_state` payload growth:** journals make state bigger. Bound journal content in the state payload (e.g. last N entries per topic + counts, full journal for the current topic) and document the bound in the tool description.
 - **TTL scheduling:** a single interval sweep (e.g. every 60s) over the pool is sufficient; per-session timers are unnecessary complexity.
 - **Wipe-on-bump:** implement as schema-version check at store open. Keep the bundle export working *before* the bump lands in a release so current test courses can be manually exported if wanted (no converter promised).
-- **Ordering within the plan:** Phase A and Phase B are independent and can land in either order or in parallel worktrees. C–G depend on B. H3 depends on A3. E and F depend on D.
+- **Ordering within the plan:** Phase A and Phase B are independent and can land in either order or in parallel worktrees. C–G depend on B; C also ships `update_course_info` (its own dependency, moved out of D). E and F depend on D. H1/H2 depend on B, D, and E (map states, journals, nav semantics); H3 depends on A3.
+- **TTL + resume coupling:** the idle-TTL sweep must go through `resetSession`-equivalent semantics, not bare `endSession` — see US-A2. This is the difference between transparent resume and silent amnesia.
 
 ## 9. Success Metrics
 
