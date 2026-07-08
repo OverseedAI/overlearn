@@ -85,6 +85,20 @@ const authFetch = (
     ),
   });
 
+const expectNoAccessControlHeaders = (headers: Headers): void => {
+  expect(headers.get("access-control-allow-origin")).toBeNull();
+  expect(headers.get("access-control-allow-credentials")).toBeNull();
+  expect(headers.get("access-control-allow-methods")).toBeNull();
+  expect(headers.get("access-control-allow-headers")).toBeNull();
+};
+
+const expectVaryOrigin = (headers: Headers): void => {
+  const vary = headers.get("vary");
+  expect(vary?.split(",").map((part) => part.trim().toLowerCase())).toContain(
+    "origin",
+  );
+};
+
 const createCourse = async (
   daemon: StartedContractDaemon,
   input: Record<string, unknown>,
@@ -251,6 +265,164 @@ describe(`daemon contract (${runtime.name})`, () => {
       });
       expect(rerun.status).toBe(200);
       await expect(rerun.json()).resolves.toMatchObject({ state: "welcome" });
+    },
+    15_000,
+  );
+
+  contractTest(
+    "answers CORS preflight for allowlisted origins only",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({
+        extraEnv: {
+          OVERLEARN_DEV_ORIGINS: "http://localhost:5173",
+        },
+      });
+
+      const allowed = await fetch(`${daemon.url}/api/health`, {
+        method: "OPTIONS",
+        headers: {
+          origin: "http://localhost:5173",
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization, content-type",
+        },
+      });
+      expect(allowed.status).toBe(204);
+      expect(allowed.headers.get("access-control-allow-origin")).toBe(
+        "http://localhost:5173",
+      );
+      expect(allowed.headers.get("access-control-allow-credentials")).toBe("true");
+      expect(allowed.headers.get("access-control-allow-methods")).toContain("GET");
+      expect(allowed.headers.get("access-control-allow-methods")).toContain(
+        "OPTIONS",
+      );
+      expect(
+        allowed.headers.get("access-control-allow-headers")?.toLowerCase(),
+      ).toContain("authorization");
+      expectVaryOrigin(allowed.headers);
+
+      const denied = await fetch(`${daemon.url}/api/health`, {
+        method: "OPTIONS",
+        headers: {
+          origin: "https://example.invalid",
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization",
+        },
+      });
+      expect(denied.status).toBe(204);
+      expectNoAccessControlHeaders(denied.headers);
+    },
+    15_000,
+  );
+
+  contractTest(
+    "sets CORS headers on allowed-origin API fetches without changing same-origin responses",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+
+      const allowed = await fetch(`${daemon.url}/api/health`, {
+        headers: daemonAuthHeaders(daemon.token, {
+          origin: "tauri://localhost",
+        }),
+      });
+      expect(allowed.status).toBe(200);
+      expect(allowed.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+      expect(allowed.headers.get("access-control-allow-credentials")).toBe("true");
+      expectVaryOrigin(allowed.headers);
+
+      const denied = await fetch(`${daemon.url}/api/health`, {
+        headers: daemonAuthHeaders(daemon.token, {
+          origin: "https://example.invalid",
+        }),
+      });
+      expect(denied.status).toBe(200);
+      expectNoAccessControlHeaders(denied.headers);
+
+      const sameOrigin = await authFetch(daemon, "/api/health");
+      expect(sameOrigin.status).toBe(200);
+      expectNoAccessControlHeaders(sameOrigin.headers);
+      expect(sameOrigin.headers.get("vary")).toBeNull();
+    },
+    15_000,
+  );
+
+  contractTest(
+    "opens SSE streams with query-token auth",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+
+      const response = await fetch(
+        `${daemon.url}/api/events?token=${encodeURIComponent(daemon.token)}`,
+        {
+          headers: {
+            origin: "http://tauri.localhost",
+          },
+        },
+      );
+      try {
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain("text/event-stream");
+        expect(response.headers.get("access-control-allow-origin")).toBe(
+          "http://tauri.localhost",
+        );
+        expectVaryOrigin(response.headers);
+      } finally {
+        await response.body?.cancel();
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
+    "rejects bad query-token SSE auth without enabling query auth elsewhere",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+
+      const badSse = await fetch(`${daemon.url}/api/events?token=not-the-token`, {
+        headers: {
+          origin: "tauri://localhost",
+        },
+      });
+      expect(badSse.status).toBe(401);
+      expect(badSse.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+      await expect(badSse.text()).resolves.toContain(
+        "Overlearn daemon authentication is required.",
+      );
+
+      const otherApi = await fetch(
+        `${daemon.url}/api/health?token=${encodeURIComponent(daemon.token)}`,
+        {
+          headers: {
+            origin: "tauri://localhost",
+          },
+        },
+      );
+      expect(otherApi.status).toBe(401);
+      expect(otherApi.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+      await expect(otherApi.text()).resolves.toContain(
+        "Overlearn daemon authentication is required.",
+      );
     },
     15_000,
   );

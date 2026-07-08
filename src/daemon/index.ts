@@ -251,6 +251,102 @@ const textResponse = (text: string, status: number): Response =>
 
 const emptyResponse = (status = 204): Response => new Response(null, { status });
 
+const CORS_BASE_ALLOWED_ORIGINS = [
+  "tauri://localhost",
+  "http://tauri.localhost",
+] as const;
+const CORS_ALLOWED_METHODS = "GET, POST, PATCH, DELETE, OPTIONS";
+const CORS_ALLOWED_HEADERS = "Authorization, Content-Type";
+
+const parseDevCorsOrigins = (value: string | undefined): readonly string[] =>
+  value === undefined
+    ? []
+    : value
+        .split(",")
+        .map((origin) => origin.trim())
+        .filter((origin) => origin.length > 0);
+
+const corsAllowedOrigins = (env: Env): ReadonlySet<string> =>
+  new Set([
+    ...CORS_BASE_ALLOWED_ORIGINS,
+    ...parseDevCorsOrigins(env["OVERLEARN_DEV_ORIGINS"]),
+  ]);
+
+const addVaryOrigin = (headers: Headers): void => {
+  const vary = headers.get("vary");
+  if (vary === null || vary.trim().length === 0) {
+    headers.set("vary", "Origin");
+    return;
+  }
+
+  const parts = vary.split(",").map((part) => part.trim().toLowerCase());
+  if (!parts.includes("*") && !parts.includes("origin")) {
+    headers.set("vary", `${vary}, Origin`);
+  }
+};
+
+const addCorsHeaders = (
+  headers: Headers,
+  requestHeaders: Headers,
+  allowedOrigins: ReadonlySet<string>,
+  preflight = false,
+): void => {
+  const origin = requestHeaders.get("origin");
+  if (origin === null) {
+    return;
+  }
+
+  addVaryOrigin(headers);
+  if (!allowedOrigins.has(origin)) {
+    return;
+  }
+
+  headers.set("access-control-allow-origin", origin);
+  headers.set("access-control-allow-credentials", "true");
+  if (preflight) {
+    headers.set("access-control-allow-methods", CORS_ALLOWED_METHODS);
+    headers.set("access-control-allow-headers", CORS_ALLOWED_HEADERS);
+  }
+};
+
+const corsHeaderRecord = (
+  requestHeaders: Headers,
+  allowedOrigins: ReadonlySet<string>,
+  preflight = false,
+): Record<string, string> => {
+  const headers = new Headers();
+  addCorsHeaders(headers, requestHeaders, allowedOrigins, preflight);
+  return Object.fromEntries(headers.entries());
+};
+
+const responseWithCorsHeaders = (
+  request: Request,
+  response: Response,
+  allowedOrigins: ReadonlySet<string>,
+): Response => {
+  const headers = new Headers(response.headers);
+  addCorsHeaders(headers, request.headers, allowedOrigins);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+};
+
+const isCorsPreflight = (request: Request): boolean =>
+  request.method === "OPTIONS" &&
+  request.headers.has("origin") &&
+  request.headers.has("access-control-request-method");
+
+const corsPreflightResponse = (
+  request: Request,
+  allowedOrigins: ReadonlySet<string>,
+): Response =>
+  new Response(null, {
+    status: 204,
+    headers: corsHeaderRecord(request.headers, allowedOrigins, true),
+  });
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -372,11 +468,16 @@ const createSseHub = (
     }
   };
 
-  const connect = (_request: IncomingMessage, response: ServerResponse): void => {
+  const connect = (
+    _request: IncomingMessage,
+    response: ServerResponse,
+    headers: Record<string, string> = {},
+  ): void => {
     response.writeHead(200, {
       "cache-control": "no-cache",
       connection: "keep-alive",
       "content-type": "text/event-stream",
+      ...headers,
     });
     subscribers.add(response);
 
@@ -1141,6 +1242,7 @@ export const runDaemon = async (
   const harnessDetectionCache: { value?: Map<string, AdapterDetection> } = {};
   const harnessLoginSpawner =
     options.harnessLoginSpawner ?? defaultHarnessLoginSpawner;
+  const allowedCorsOrigins = corsAllowedOrigins(env);
   let runtime: CourseRuntime | undefined;
   let activeCourseId: number | undefined;
   let port = 0;
@@ -2327,6 +2429,15 @@ export const runDaemon = async (
   };
 
   const handleRequest = async (request: Request): Promise<Response> => {
+    if (isCorsPreflight(request)) {
+      return corsPreflightResponse(request, allowedCorsOrigins);
+    }
+
+    const response = await handleRequestWithoutCors(request);
+    return responseWithCorsHeaders(request, response, allowedCorsOrigins);
+  };
+
+  const handleRequestWithoutCors = async (request: Request): Promise<Response> => {
     const requestUrl = new URL(request.url);
     const method = request.method;
 
@@ -2556,16 +2667,28 @@ export const runDaemon = async (
   };
 
   const server = createServer((incoming, outgoing) => {
-    if (incoming.url === "/api/events" && incoming.method === "GET") {
-      if (!incomingHasDaemonToken(incoming, daemonToken)) {
+    const incomingUrl = new URL(
+      incoming.url ?? "/",
+      `http://${LOCALHOST_BIND_HOST}:${port}`,
+    );
+
+    if (incomingUrl.pathname === "/api/events" && incoming.method === "GET") {
+      const incomingHeaders = headersFromIncoming(incoming);
+      const corsHeaders = corsHeaderRecord(incomingHeaders, allowedCorsOrigins);
+      const queryToken = incomingUrl.searchParams.get("token");
+      if (
+        !incomingHasDaemonToken(incoming, daemonToken) &&
+        queryToken !== daemonToken
+      ) {
         outgoing.writeHead(401, {
           "content-type": "text/plain; charset=utf-8",
+          ...corsHeaders,
         });
         outgoing.end("Overlearn daemon authentication is required.");
         return;
       }
 
-      sseHub.connect(incoming, outgoing);
+      sseHub.connect(incoming, outgoing, corsHeaders);
       for (const replay of agentStreamReplay) {
         outgoing.write(`event: agent-stream\ndata: ${JSON.stringify(replay)}\n\n`);
       }
