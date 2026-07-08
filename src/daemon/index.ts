@@ -241,6 +241,13 @@ type LiveSessionSummary = Readonly<{
   state: "turn-running" | "idle";
 }>;
 
+type SessionSummary = LiveSessionSummary &
+  Readonly<{
+    courseTitle: string;
+    lastActivityAt: string;
+    startedAt: string;
+  }>;
+
 type OnboardingState = "welcome" | "connect-agent" | "tutorial-offer" | "done";
 
 type ProfileResource = Readonly<{
@@ -268,6 +275,7 @@ type CourseRuntime = {
   orchestrator: DaemonTurnOrchestrator;
   runningTurn: boolean;
   lastActivityAt: number;
+  startedAt: number;
 };
 
 type TokenScope = Readonly<{
@@ -630,6 +638,7 @@ const createSseHub = (
   getStatusPayloads: () => readonly UiStatusPayload[],
   getHarnesses: (courseId?: number) => HarnessesPayload,
   getCourses: () => unknown,
+  getSessions: () => unknown,
 ) => {
   const subscribers = new Set<ServerResponse>();
 
@@ -670,6 +679,7 @@ const createSseHub = (
     }
     writeEvent(response, "courses", getCourses());
     writeEvent(response, "harnesses", getHarnesses());
+    writeEvent(response, "sessions", getSessions());
 
     response.on("close", () => {
       subscribers.delete(response);
@@ -1584,11 +1594,14 @@ export const runDaemon = async (
     sseHub.broadcast("status", payload);
   };
 
+  const runtimeHarnessId = (courseRuntime: CourseRuntime): string =>
+    courseRuntime.orchestrator.hasActiveSession()
+      ? courseRuntime.harnessId
+      : selectedHarnessId(store, courseRuntime.courseId, env);
+
   const liveSession = (courseRuntime: CourseRuntime): LiveSessionSummary => ({
     courseId: courseRuntime.courseId,
-    harnessId: courseRuntime.orchestrator.hasActiveSession()
-      ? courseRuntime.harnessId
-      : selectedHarnessId(store, courseRuntime.courseId, env),
+    harnessId: runtimeHarnessId(courseRuntime),
     state: courseRuntime.runningTurn ? "turn-running" : "idle",
   });
 
@@ -1596,6 +1609,26 @@ export const runDaemon = async (
     [...runtimes.values()]
       .sort((left, right) => left.courseId - right.courseId)
       .map(liveSession);
+
+  const sessionSummary = (courseRuntime: CourseRuntime): SessionSummary => {
+    const course = getCourse(store, courseRuntime.courseId);
+
+    return {
+      ...liveSession(courseRuntime),
+      courseTitle: course?.title ?? `Course ${courseRuntime.courseId}`,
+      lastActivityAt: new Date(courseRuntime.lastActivityAt).toISOString(),
+      startedAt: new Date(courseRuntime.startedAt).toISOString(),
+    };
+  };
+
+  const sessionsPayload = (): readonly SessionSummary[] =>
+    [...runtimes.values()]
+      .sort((left, right) => left.courseId - right.courseId)
+      .map(sessionSummary);
+
+  const broadcastSessions = (): void => {
+    sseHub.broadcast("sessions", sessionsPayload());
+  };
 
   const getActiveTurn = (courseId: number): ActiveTeachingTurn | undefined => {
     const turn = activeTurnByCourse.get(courseId);
@@ -1630,6 +1663,7 @@ export const runDaemon = async (
     () => [...statuses.values()],
     (courseId) => harnessesPayload(courseId, false),
     coursesPayload,
+    sessionsPayload,
   );
 
   const sweepIdleSessions = async (): Promise<void> => {
@@ -1646,6 +1680,7 @@ export const runDaemon = async (
         onExpired: () => {
           if (!shuttingDown) {
             sseHub.broadcast("courses", coursesPayload());
+            broadcastSessions();
           }
         },
       });
@@ -1904,17 +1939,29 @@ export const runDaemon = async (
       unregisterTeachingSession,
     });
 
+    const now = Date.now();
     const courseRuntime = {
       courseId: course.id,
       harnessId: selectedHarnessId(store, course.id, env),
       orchestrator,
       runningTurn: false,
-      lastActivityAt: Date.now(),
+      lastActivityAt: now,
+      startedAt: now,
     };
     runtimes.set(course.id, courseRuntime);
     sseHub.broadcast("courses", coursesPayload());
+    broadcastSessions();
 
     return courseRuntime;
+  };
+
+  const removeRuntimeIfCold = (courseRuntime: CourseRuntime): void => {
+    if (
+      !courseRuntime.orchestrator.hasActiveSession() &&
+      runtimes.get(courseRuntime.courseId) === courseRuntime
+    ) {
+      runtimes.delete(courseRuntime.courseId);
+    }
   };
 
   const runCourseTurn = (
@@ -1946,6 +1993,7 @@ export const runDaemon = async (
     activeTurnSnapshotByCourse.set(course.id, turnSnapshot.activeTurn);
     setStatus(course.id, mode === "wrap-up" ? "wrapping-up" : "agent-working");
     sseHub.broadcast("courses", coursesPayload());
+    broadcastSessions();
     appendTurnEvents(store, course.id, {
       turn: turn.turn,
       status: "pending",
@@ -1975,7 +2023,9 @@ export const runDaemon = async (
 
       if (!result.ok) {
         setStatus(course.id, "agent-failed", result.message);
+        removeRuntimeIfCold(currentRuntime);
         sseHub.broadcast("courses", coursesPayload());
+        broadcastSessions();
         return;
       }
 
@@ -1984,11 +2034,13 @@ export const runDaemon = async (
         runtimes.delete(course.id);
         setStatus(course.id, "session-ended");
         sseHub.broadcast("courses", coursesPayload());
+        broadcastSessions();
         return;
       }
 
       setStatus(course.id, "waiting-for-agent");
       sseHub.broadcast("courses", coursesPayload());
+      broadcastSessions();
       broadcastCourseCollections(course.id);
     })().catch((error) => {
       currentRuntime.runningTurn = false;
@@ -2000,7 +2052,9 @@ export const runDaemon = async (
         "agent-failed",
         error instanceof Error ? error.message : "Agent turn failed.",
       );
+      removeRuntimeIfCold(currentRuntime);
       sseHub.broadcast("courses", coursesPayload());
+      broadcastSessions();
     });
 
     return jsonResponse({ ok: true, turn: turn.turn });
@@ -2171,6 +2225,9 @@ export const runDaemon = async (
       });
 
       sseHub.broadcast("courses", coursesPayload());
+      if (runtimes.has(course.id)) {
+        broadcastSessions();
+      }
       broadcastCourseCollections(course.id);
 
       const greeting = runCourseTurn(
@@ -2219,6 +2276,7 @@ export const runDaemon = async (
     statuses.delete(course.id);
     deleteCourse(store, course.id);
     sseHub.broadcast("courses", coursesPayload());
+    broadcastSessions();
     sseHub.broadcast("status", {
       courseId: course.id,
       status: "session-ended",
@@ -2609,6 +2667,9 @@ export const runDaemon = async (
 
           const patched = patchCourse(store, courseId, patch);
           sseHub.broadcast("courses", coursesPayload());
+          if (runtimes.has(courseId)) {
+            broadcastSessions();
+          }
           return jsonResponse(courseResource(patched));
         } catch (error) {
           return textResponse(error instanceof Error ? error.message : "Invalid course patch.", 400);
@@ -2775,6 +2836,7 @@ export const runDaemon = async (
       patchCourse(store, courseId, { harnessId: id });
       if (currentRuntime !== undefined) {
         currentRuntime.harnessId = id;
+        currentRuntime.lastActivityAt = Date.now();
       }
       const hadActiveSession =
         currentRuntime === undefined
@@ -2783,6 +2845,9 @@ export const runDaemon = async (
       const payload = harnessesPayload(courseId, hadActiveSession, true);
       sseHub.broadcast("harnesses", payload);
       sseHub.broadcast("courses", coursesPayload());
+      if (currentRuntime !== undefined) {
+        broadcastSessions();
+      }
 
       if (hadActiveSession) {
         runCourseTurn(
@@ -2800,7 +2865,7 @@ export const runDaemon = async (
     }
 
     if (action === "activate" && extra === undefined && request.method === "POST") {
-      return jsonResponse({ ok: true, session: liveSession(ensureRuntime(course)) });
+      return jsonResponse({ ok: true, session: sessionSummary(ensureRuntime(course)) });
     }
 
     if (action === "demos" && extra !== undefined && request.method === "GET") {
@@ -2837,6 +2902,7 @@ export const runDaemon = async (
     );
     runtimes.clear();
     tokenScopes.clear();
+    broadcastSessions();
     await clearDaemonMetadata(env);
     sseHub.closeAll();
     await new Promise<void>((resolveClose) => {
@@ -2868,6 +2934,10 @@ export const runDaemon = async (
 
     if (method === "GET" && requestUrl.pathname === "/api/health") {
       return jsonResponse(healthPayload());
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/api/sessions") {
+      return jsonResponse(sessionsPayload());
     }
 
     if (method === "POST" && requestUrl.pathname === "/api/shutdown") {

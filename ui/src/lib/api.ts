@@ -8,6 +8,7 @@ import type {
   OnboardingState,
   ProfileResource,
   ServerEvents,
+  SessionSummary,
   TopicTreeInput,
   TranscriptPage,
 } from "./types";
@@ -125,6 +126,7 @@ export const api = {
     get<{ ok: boolean; version: string; liveSessions: LiveSessionSummary[] }>(
       "/api/health",
     ),
+  listSessions: () => get<SessionSummary[]>("/api/sessions"),
 
   // Profile / onboarding
   getProfile: () => get<ProfileResource>("/api/profile"),
