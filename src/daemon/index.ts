@@ -63,6 +63,7 @@ import {
 import {
   createTeachingMcpHttpHandler,
   teachingTokenFromRequestPath,
+  type ActiveTeachingTurn,
   type TeachingWriteEvent,
 } from "../mcp/teaching";
 import { renderMarkdown } from "./markdown";
@@ -74,6 +75,8 @@ import {
   type TurnEvent,
   type TurnPayload,
   type TurnPromptMode,
+  type TurnPositionContext,
+  type TurnPositionTopic,
 } from "./orchestrator";
 import { createTutorialCourse } from "./tutorial";
 
@@ -1343,6 +1346,109 @@ const nextTurnNumber = (store: Store, courseId: number): number => {
   return Math.max(transcriptTurn, eventsTurn) + 1;
 };
 
+const dbNumber = (value: number | bigint): number =>
+  typeof value === "bigint" ? Number(value) : value;
+
+const topicForTurnPosition = (topic: Topic): TurnPositionTopic => ({
+  id: topic.id,
+  path: topic.path,
+  title: topic.title,
+});
+
+const flatTopicsForCourse = (store: Store, courseId: number): readonly Topic[] =>
+  flattenTopicTree(readTopicTree(store, courseId));
+
+const currentTopicForCourse = (
+  store: Store,
+  courseId: number,
+): Topic | null =>
+  flatTopicsForCourse(store, courseId).find((topic) => topic.isCurrent) ?? null;
+
+const snapshotActiveTurn = (
+  store: Store,
+  courseId: number,
+  turn: number,
+): Readonly<{ activeTurn: ActiveTeachingTurn; currentTopic: Topic | null }> => {
+  const currentTopic = currentTopicForCourse(store, courseId);
+
+  return {
+    activeTurn: {
+      turn,
+      topicId: currentTopic?.id ?? null,
+      topicPath: currentTopic?.path ?? null,
+    },
+    currentTopic,
+  };
+};
+
+const previousTranscriptTopic = (
+  store: Store,
+  courseId: number,
+  turn: number,
+): TurnPositionTopic | null | undefined => {
+  const row = store.db
+    .query(
+      `
+        SELECT topic_id
+        FROM transcript
+        WHERE course_id = ?1
+          AND turn < ?2
+        ORDER BY turn DESC, id DESC
+        LIMIT 1
+      `,
+    )
+    .get(courseId, turn) as
+    | { topic_id: number | bigint | null }
+    | null
+    | undefined;
+
+  if (row === null || row === undefined) {
+    return undefined;
+  }
+
+  if (row.topic_id === null) {
+    return null;
+  }
+
+  const topicId = dbNumber(row.topic_id);
+  const topic = flatTopicsForCourse(store, courseId).find(
+    (candidate) => candidate.id === topicId,
+  );
+
+  return topic === undefined ? null : topicForTurnPosition(topic);
+};
+
+const turnPositionContext = (
+  store: Store,
+  courseId: number,
+  turn: number,
+  currentTopic: Topic | null,
+): TurnPositionContext => {
+  if (currentTopic === null) {
+    return { currentTopic: null };
+  }
+
+  const currentPositionTopic = {
+    ...topicForTurnPosition(currentTopic),
+    state: currentTopic.state,
+  };
+  const previousTopic = previousTranscriptTopic(store, courseId, turn);
+  if (previousTopic === undefined) {
+    return { currentTopic: currentPositionTopic };
+  }
+
+  const previousTopicId = previousTopic?.id ?? null;
+  if (previousTopicId === currentTopic.id) {
+    return { currentTopic: currentPositionTopic };
+  }
+
+  return {
+    currentTopic: currentPositionTopic,
+    previousTopic,
+    revisit: currentTopic.enteredAt !== null,
+  };
+};
+
 const appendUiTranscript = (
   store: Store,
   courseId: number,
@@ -1427,6 +1533,7 @@ export const runDaemon = async (
   const tokenScopes = new Map<string, TokenScope>();
   const statuses = new Map<number, UiStatusPayload>();
   const activeTurnByCourse = new Map<number, number>();
+  const activeTurnSnapshotByCourse = new Map<number, ActiveTeachingTurn>();
   const agentStreamReplay: AgentStreamPayload[] = [];
   const harnessDetectionCache: { value?: Map<string, AdapterDetection> } = {};
   const harnessLoginSpawner =
@@ -1489,6 +1596,20 @@ export const runDaemon = async (
     [...runtimes.values()]
       .sort((left, right) => left.courseId - right.courseId)
       .map(liveSession);
+
+  const getActiveTurn = (courseId: number): ActiveTeachingTurn | undefined => {
+    const turn = activeTurnByCourse.get(courseId);
+    if (turn === undefined) {
+      return undefined;
+    }
+
+    const snapshot = activeTurnSnapshotByCourse.get(courseId);
+    if (snapshot !== undefined && snapshot.turn === turn) {
+      return snapshot;
+    }
+
+    return { turn, topicId: null, topicPath: null };
+  };
 
   const coursesPayload = (): Record<string, unknown> => ({
     courses: listCourses(store).map(courseResource),
@@ -1571,14 +1692,16 @@ export const runDaemon = async (
 
   const onTeachingWrite = (event: TeachingWriteEvent): void => {
     flushPendingAgentText(event.courseId);
-    const turn = activeTurnByCourse.get(event.courseId);
+    const activeTurn = event.activeTurn;
     const attachment = event.attachment;
     // Demo and lesson writes render as rich transcript cards; every other
     // teaching write keeps its readable tool-call row.
     const entry =
       attachment?.kind === "demo"
         ? appendUiTranscript(store, event.courseId, {
-            ...(turn === undefined ? {} : { turn }),
+            ...(activeTurn === undefined
+              ? {}
+              : { turn: activeTurn.turn, topicId: activeTurn.topicId }),
             role: "agent",
             kind: "demo",
             content: attachment.file,
@@ -1589,14 +1712,18 @@ export const runDaemon = async (
           })
         : attachment?.kind === "lesson"
           ? appendUiTranscript(store, event.courseId, {
-              ...(turn === undefined ? {} : { turn }),
+              ...(activeTurn === undefined
+                ? {}
+                : { turn: activeTurn.turn, topicId: activeTurn.topicId }),
               role: "agent",
               kind: "lesson",
               content: attachment.lessonId,
               payload: { lessonId: attachment.lessonId },
             })
           : appendUiTranscript(store, event.courseId, {
-              ...(turn === undefined ? {} : { turn }),
+              ...(activeTurn === undefined
+                ? {}
+                : { turn: activeTurn.turn, topicId: activeTurn.topicId }),
               role: "system",
               kind: "tool-call",
               content: event.summary,
@@ -1618,7 +1745,12 @@ export const runDaemon = async (
     store,
     resolveScope: (token) => {
       const scope = tokenScopes.get(token);
-      return scope === undefined ? null : { courseId: scope.courseId };
+      return scope === undefined
+        ? null
+        : {
+            courseId: scope.courseId,
+            getActiveTurn: () => getActiveTurn(scope.courseId),
+          };
     },
     onWrite: onTeachingWrite,
   });
@@ -1672,7 +1804,10 @@ export const runDaemon = async (
   // ACP harnesses stream agent text as per-chunk events; buffer them per
   // course/turn and persist one transcript row per contiguous message so the
   // stored transcript (and exports) aren't fragmented into token deltas.
-  const pendingAgentText = new Map<number, { turn: number; text: string }>();
+  const pendingAgentText = new Map<
+    number,
+    { turn: number; topicId: number | null | undefined; text: string }
+  >();
 
   const flushPendingAgentText = (courseId: number): void => {
     const pending = pendingAgentText.get(courseId);
@@ -1683,6 +1818,7 @@ export const runDaemon = async (
 
     const entry = appendUiTranscript(store, courseId, {
       turn: pending.turn,
+      ...(pending.topicId === undefined ? {} : { topicId: pending.topicId }),
       role: "agent",
       kind: "text",
       content: pending.text,
@@ -1699,8 +1835,11 @@ export const runDaemon = async (
         pending.text += event.text;
       } else {
         flushPendingAgentText(payload.courseId);
+        const activeTurn = getActiveTurn(payload.courseId);
         pendingAgentText.set(payload.courseId, {
           turn: payload.turn,
+          topicId:
+            activeTurn?.turn === payload.turn ? activeTurn.topicId : undefined,
           text: event.text,
         });
       }
@@ -1743,7 +1882,15 @@ export const runDaemon = async (
     const mcpBaseUrl = formatDaemonUrl(port, "");
     const orchestrator = createDaemonTurnOrchestrator({
       courseId: course.id,
-      courseTitle: course.title,
+      getCourseMetadata: () => {
+        const currentCourse = getCourse(store, course.id);
+        return currentCourse === undefined
+          ? undefined
+          : {
+              title: currentCourse.title,
+              description: currentCourse.description,
+            };
+      },
       attachedDir: course.attachedDir,
       cwd: store.dataDir,
       mcpBaseUrl,
@@ -1786,9 +1933,17 @@ export const runDaemon = async (
       createdAt: new Date().toISOString(),
       events,
     };
+    const turnSnapshot = snapshotActiveTurn(store, course.id, turn.turn);
+    const position = turnPositionContext(
+      store,
+      course.id,
+      turn.turn,
+      turnSnapshot.currentTopic,
+    );
     currentRuntime.lastActivityAt = Date.now();
     currentRuntime.runningTurn = true;
     activeTurnByCourse.set(course.id, turn.turn);
+    activeTurnSnapshotByCourse.set(course.id, turnSnapshot.activeTurn);
     setStatus(course.id, mode === "wrap-up" ? "wrapping-up" : "agent-working");
     sseHub.broadcast("courses", coursesPayload());
     appendTurnEvents(store, course.id, {
@@ -1800,7 +1955,11 @@ export const runDaemon = async (
     });
 
     void (async () => {
-      const result = await currentRuntime.orchestrator.runTurn(turn, mode);
+      const result = await currentRuntime.orchestrator.runTurn(
+        turn,
+        mode,
+        position,
+      );
       appendTurnEvents(store, course.id, {
         turn: turn.turn,
         status: "completed",
@@ -1812,6 +1971,7 @@ export const runDaemon = async (
       currentRuntime.runningTurn = false;
       currentRuntime.lastActivityAt = Date.now();
       activeTurnByCourse.delete(course.id);
+      activeTurnSnapshotByCourse.delete(course.id);
 
       if (!result.ok) {
         setStatus(course.id, "agent-failed", result.message);
@@ -1834,6 +1994,7 @@ export const runDaemon = async (
       currentRuntime.runningTurn = false;
       currentRuntime.lastActivityAt = Date.now();
       activeTurnByCourse.delete(course.id);
+      activeTurnSnapshotByCourse.delete(course.id);
       setStatus(
         course.id,
         "agent-failed",

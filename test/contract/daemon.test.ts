@@ -22,6 +22,17 @@ import {
   startContractDaemon,
   type StartedContractDaemon,
 } from "./runtime";
+import {
+  listGlossary,
+  openStore,
+  pageTranscript,
+  patchCourse,
+  upsertTopic,
+} from "../../src/store";
+import {
+  createMcpHttpClient,
+  type McpToolCallResult,
+} from "../../src/mcp/protocol";
 
 const runtime = resolveContractRuntime();
 const runtimeIssue = checkContractRuntime(runtime);
@@ -229,6 +240,17 @@ const parseLoggedMcpResult = (
   const [content] = result["content"];
   if (!isRecord(content) || typeof content["text"] !== "string") {
     throw new Error("Missing logged MCP result text.");
+  }
+
+  return JSON.parse(content["text"]) as Record<string, unknown>;
+};
+
+const parseMcpToolResult = (
+  result: McpToolCallResult,
+): Record<string, unknown> => {
+  const [content] = result.content;
+  if (!isRecord(content) || typeof content["text"] !== "string") {
+    throw new Error("Missing MCP result text.");
   }
 
   return JSON.parse(content["text"]) as Record<string, unknown>;
@@ -1117,6 +1139,194 @@ describe(`daemon contract (${runtime.name})`, () => {
       expect(exhausted.texts).toEqual([]);
       expect(exhausted.payload["hasMore"]).toBe(false);
       expect(exhausted.payload["nextBeforeId"]).toBeNull();
+    },
+    15_000,
+  );
+
+  contractTest(
+    "keeps in-flight MCP defaults and transcript writes on the turn snapshot topic",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+      const daemon = await start({ scenario: "never" });
+      const sse = await createSseClient(daemon.url, daemon.token);
+      const store = openStore({
+        env: { OVERLEARN_DATA_DIR: daemon.dataDir },
+      });
+      let client: ReturnType<typeof createMcpHttpClient> | undefined;
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Snapshot Contract Course",
+        });
+        const clickedTopic = upsertTopic(store, course.id, {
+          path: "clicked-topic",
+          title: "Clicked topic",
+        });
+        const snapshotTopic = upsertTopic(store, course.id, {
+          path: "snapshot-topic",
+          title: "Snapshot topic",
+        });
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "start snapshot turn",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "thinking",
+          "snapshot turn running",
+        );
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.some((entry) => entry["event"] === "session/new"),
+          "snapshot session log",
+        );
+        const mcpUrl = mcpUrlFromLogs(logs);
+
+        upsertTopic(store, course.id, {
+          path: clickedTopic.path,
+          title: clickedTopic.title,
+        });
+
+        client = createMcpHttpClient({
+          name: "overlearn-teaching",
+          url: mcpUrl,
+        });
+        await client.initialize();
+        const glossaryResult = parseMcpToolResult(
+          await client.callTool("upsert_glossary_entry", {
+            term: "Snapshot term",
+            definition: "Should stay on the turn-start topic.",
+          }),
+        );
+
+        expect(glossaryResult).toMatchObject({
+          ok: true,
+          glossaryEntry: {
+            term: "Snapshot term",
+            topicId: snapshotTopic.id,
+          },
+        });
+        expect(listGlossary(store, course.id)).toContainEqual(
+          expect.objectContaining({
+            term: "Snapshot term",
+            topicId: snapshotTopic.id,
+          }),
+        );
+        expect(pageTranscript(store, course.id, { limit: 20 }).entries).toContainEqual(
+          expect.objectContaining({
+            role: "system",
+            kind: "tool-call",
+            turn: 1,
+            topicId: snapshotTopic.id,
+            content: "upserted glossary entry Snapshot term",
+          }),
+        );
+      } finally {
+        if (client !== undefined) {
+          await client.close();
+        }
+        store.close();
+        sse.close();
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
+    "uses renamed course metadata in the next prompt without recreating runtime",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          FAKE_ACP_MESSAGE_CHUNKS: JSON.stringify(["short response"]),
+        },
+      });
+      const sse = await createSseClient(daemon.url, daemon.token);
+      const store = openStore({
+        env: { OVERLEARN_DATA_DIR: daemon.dataDir },
+      });
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Original Prompt Title",
+          description: "Original prompt description.",
+        });
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "first turn",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "first prompt metadata turn done",
+        );
+
+        patchCourse(store, course.id, {
+          title: "Renamed Prompt Title",
+          description: "Renamed prompt description.",
+        });
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "second turn",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "second prompt metadata turn done",
+        );
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.filter((entry) => entry["event"] === "session/prompt")
+              .length >= 2,
+          "renamed prompt logs",
+        );
+        const promptEntries = logs.filter(
+          (entry) => entry["event"] === "session/prompt",
+        );
+        const secondPrompt = promptText(promptEntries.at(-1) ?? {});
+
+        expect(secondPrompt).toContain("Course title: Renamed Prompt Title");
+        expect(secondPrompt).toContain(
+          "Course description: Renamed prompt description.",
+        );
+        expect(secondPrompt).not.toContain("Course title: Original Prompt Title");
+      } finally {
+        store.close();
+        sse.close();
+      }
     },
     15_000,
   );

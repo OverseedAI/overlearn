@@ -48,9 +48,16 @@ export type TeachingToolName =
   | "upsert_glossary_entry"
   | "propose_course_plan";
 
+export type ActiveTeachingTurn = Readonly<{
+  turn: number;
+  topicId: number | null;
+  topicPath: string | null;
+}>;
+
 export type TeachingSessionScope = Readonly<{
   courseId: number;
   sessionToken?: string;
+  getActiveTurn?: () => ActiveTeachingTurn | null | undefined;
 }>;
 
 // Structured detail for writes that surface as rich transcript entries
@@ -63,6 +70,7 @@ export type TeachingWriteEvent = Readonly<{
   tool: TeachingToolName;
   courseId: number;
   summary: string;
+  activeTurn?: ActiveTeachingTurn;
   attachment?: TeachingWriteAttachment;
 }>;
 
@@ -614,6 +622,22 @@ const findCurrentTopicId = (store: Store, courseId: number): number | null => {
   return current?.id ?? null;
 };
 
+const getActiveTurn = (
+  scope: TeachingSessionScope,
+): ActiveTeachingTurn | undefined => scope.getActiveTurn?.() ?? undefined;
+
+const defaultTopicId = (
+  store: Store,
+  scope: TeachingSessionScope,
+): number | null => {
+  const activeTurn = getActiveTurn(scope);
+  if (activeTurn !== undefined) {
+    return activeTurn.topicId;
+  }
+
+  return findCurrentTopicId(store, scope.courseId);
+};
+
 const markCurrentTopic = (
   store: Store,
   courseId: number,
@@ -991,6 +1015,7 @@ const notifyWrite = async (
   courseId: number,
   tool: TeachingToolName,
   summary: string,
+  activeTurn: ActiveTeachingTurn | undefined,
   attachment?: TeachingWriteAttachment,
 ): Promise<void> => {
   if (onWrite === undefined) {
@@ -1002,6 +1027,7 @@ const notifyWrite = async (
       tool,
       courseId,
       summary,
+      ...(activeTurn === undefined ? {} : { activeTurn }),
       ...(attachment === undefined ? {} : { attachment }),
     });
   } catch {
@@ -1024,6 +1050,7 @@ const createTeachingTool = (
   call: async (args) => {
     try {
       assertKnownKeys(args, tool.name, tool.knownKeys);
+      const activeTurn = getActiveTurn(options.scope);
       const output = await tool.call(args);
 
       if (output.result.isError !== true && output.writeSummary !== undefined) {
@@ -1032,6 +1059,7 @@ const createTeachingTool = (
           options.scope.courseId,
           tool.name,
           output.writeSummary,
+          activeTurn,
           output.writeAttachment,
         );
       }
@@ -1300,7 +1328,7 @@ const upsertGlossaryEntryTool = (
       const topicPath = optionalString(args, "topicPath");
       const topicId =
         topicPath === undefined
-          ? findCurrentTopicId(options.store, options.scope.courseId)
+          ? defaultTopicId(options.store, options.scope)
           : resolveTopicId(options.store, options.scope.courseId, topicPath);
       const entry = upsertGlossaryEntry(
         options.store,
