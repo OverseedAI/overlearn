@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{BufRead, BufReader, ErrorKind, Read, Write},
@@ -57,6 +57,12 @@ struct StatusPayload {
     _has_seen_wait: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct DaemonInfo {
+    port: u16,
+    token: String,
+}
+
 #[derive(Default)]
 struct DesktopState {
     window_focused: AtomicBool,
@@ -95,12 +101,29 @@ impl DesktopState {
     fn take_daemon(&self) -> Result<Option<RunningDaemon>, String> {
         Ok(lock_mutex(&self.daemon)?.take())
     }
+
+    fn daemon_info(&self) -> Result<DaemonInfo, String> {
+        let daemon = lock_mutex(&self.daemon)?;
+        let Some(daemon) = daemon.as_ref() else {
+            return Err("Overlearn daemon has not started yet.".to_string());
+        };
+
+        Ok(DaemonInfo {
+            port: daemon.port,
+            token: daemon.token.clone(),
+        })
+    }
 }
 
 fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String> {
     mutex
         .lock()
         .map_err(|_| "Desktop state lock was poisoned.".to_string())
+}
+
+#[tauri::command]
+fn daemon_info(state: tauri::State<'_, DesktopState>) -> Result<DaemonInfo, String> {
+    state.daemon_info()
 }
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -716,6 +739,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(DesktopState::default())
+        .invoke_handler(tauri::generate_handler![daemon_info])
         .setup(setup_app)
         .build(tauri::generate_context!())
         .expect("error while building Tauri application");
