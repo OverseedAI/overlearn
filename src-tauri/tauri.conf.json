@@ -4,7 +4,10 @@
   "version": "0.5.3",
   "identifier": "ai.overseed.overlearn",
   "build": {
-    "frontendDist": "web"
+    "beforeDevCommand": "bun run --cwd ../ui dev",
+    "beforeBuildCommand": "bun run --cwd ../ui build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../ui/dist"
   },
   "app": {
     "withGlobalTauri": true,

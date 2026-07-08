@@ -113,6 +113,42 @@ const createCourse = async (
   return (await response.json()) as CourseResource;
 };
 
+const importDemoCourse = async (
+  daemon: StartedContractDaemon,
+): Promise<Readonly<{ courseId: number; file: string }>> => {
+  const path = join(daemon.dataDir, "query-token-demo-course");
+  const file = "iframe-demo.html";
+
+  await mkdir(join(path, "demos"), { recursive: true });
+  await writeJson(join(path, "course.json"), {
+    title: "Query-token Demo Course",
+    unassignedDemos: [
+      {
+        file,
+        title: "Iframe demo",
+        addedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ],
+  });
+  await writeFile(
+    join(path, "demos", file),
+    "<h1>Iframe demo</h1><script>document.title='iframe';</script>",
+    "utf8",
+  );
+
+  const response = await authFetch(daemon, "/api/import", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  expect(response.status).toBe(200);
+
+  const payload = (await response.json()) as Record<string, unknown>;
+  expect(typeof payload["courseId"]).toBe("number");
+
+  return { courseId: payload["courseId"] as number, file };
+};
+
 const createIdeationCourse = async (
   daemon: StartedContractDaemon,
   seed: string,
@@ -422,6 +458,63 @@ describe(`daemon contract (${runtime.name})`, () => {
       );
       await expect(otherApi.text()).resolves.toContain(
         "Overlearn daemon authentication is required.",
+      );
+    },
+    15_000,
+  );
+
+  contractTest(
+    "allows query-token auth only for demo iframe GETs",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+      const demo = await importDemoCourse(daemon);
+      const demoPath = `/api/courses/${demo.courseId}/demos/${demo.file}`;
+
+      const allowed = await fetch(
+        `${daemon.url}${demoPath}?token=${encodeURIComponent(daemon.token)}`,
+        {
+          headers: {
+            origin: "tauri://localhost",
+          },
+        },
+      );
+      expect(allowed.status).toBe(200);
+      expect(allowed.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+      expect(allowed.headers.get("content-security-policy")).toContain(
+        "default-src 'none'",
+      );
+      await expect(allowed.text()).resolves.toContain("<h1>Iframe demo</h1>");
+
+      const badToken = await fetch(`${daemon.url}${demoPath}?token=not-the-token`, {
+        headers: {
+          origin: "tauri://localhost",
+        },
+      });
+      expect(badToken.status).toBe(401);
+      expect(badToken.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
+      );
+      await expect(badToken.text()).resolves.toContain(
+        "Overlearn daemon authentication is required.",
+      );
+
+      const nonDemo = await fetch(
+        `${daemon.url}/api/courses?token=${encodeURIComponent(daemon.token)}`,
+        {
+          headers: {
+            origin: "tauri://localhost",
+          },
+        },
+      );
+      expect(nonDemo.status).toBe(401);
+      expect(nonDemo.headers.get("access-control-allow-origin")).toBe(
+        "tauri://localhost",
       );
     },
     15_000,

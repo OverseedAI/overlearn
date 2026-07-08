@@ -69,6 +69,21 @@ const eventSourceUrl = (apiRuntime: ApiRuntime): string => {
   return url.toString();
 };
 
+const demoFileUrl = (
+  courseId: number,
+  file: string,
+  apiRuntime: ApiRuntime = runtime,
+): string => {
+  const path = `/api/courses/${courseId}/demos/${encodeURIComponent(file)}`;
+  if (!apiRuntime.token) {
+    return apiUrl(path, apiRuntime);
+  }
+
+  const url = new URL(apiUrl(path, apiRuntime), window.location.href);
+  url.searchParams.set("token", apiRuntime.token);
+  return url.toString();
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const apiRuntime = await apiReady;
   const headers = new Headers(init?.headers);
@@ -213,8 +228,7 @@ export const api = {
   exportCourse: (id: number, includeTranscript: boolean) =>
     post<unknown>(`/api/courses/${id}/export`, { includeTranscript }),
 
-  demoUrl: (courseId: number, file: string) =>
-    apiUrl(`/api/courses/${courseId}/demos/${encodeURIComponent(file)}`),
+  demoUrl: demoFileUrl,
 };
 
 export type ServerEventHandlers = {

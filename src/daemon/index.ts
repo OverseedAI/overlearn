@@ -630,6 +630,33 @@ const requestHasDaemonToken = (request: Request, daemonToken: string): boolean =
   parseCookieHeader(request.headers.get("cookie")).get(DAEMON_AUTH_COOKIE) ===
     daemonToken;
 
+const isDemoFileApiRequest = (requestUrl: URL, method: string): boolean => {
+  if (method !== "GET") {
+    return false;
+  }
+
+  const segments = requestUrl.pathname.split("/").filter((segment) => segment.length > 0);
+  if (
+    segments.length !== 5 ||
+    segments[0] !== "api" ||
+    segments[1] !== "courses" ||
+    segments[3] !== "demos"
+  ) {
+    return false;
+  }
+
+  const courseId = Number(segments[2]);
+  return Number.isInteger(courseId) && courseId > 0 && (segments[4]?.length ?? 0) > 0;
+};
+
+const requestHasDemoQueryToken = (
+  requestUrl: URL,
+  method: string,
+  daemonToken: string,
+): boolean =>
+  isDemoFileApiRequest(requestUrl, method) &&
+  requestUrl.searchParams.get("token") === daemonToken;
+
 const incomingHasDaemonToken = (
   request: IncomingMessage,
   daemonToken: string,
@@ -2452,7 +2479,8 @@ export const runDaemon = async (
 
     if (
       requestUrl.pathname.startsWith("/api/") &&
-      !requestHasDaemonToken(request, daemonToken)
+      !requestHasDaemonToken(request, daemonToken) &&
+      !requestHasDemoQueryToken(requestUrl, method, daemonToken)
     ) {
       return unauthorizedResponse();
     }
