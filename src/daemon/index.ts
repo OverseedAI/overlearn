@@ -2160,7 +2160,9 @@ export const runDaemon = async (
   const flushPendingAgentText = (courseId: number): void => {
     const pending = pendingAgentText.get(courseId);
     pendingAgentText.delete(courseId);
-    if (pending === undefined || pending.text.length === 0) {
+    // Whitespace-only buffers (e.g. a stray newline chunk streamed before a
+    // tool call) must not persist as empty transcript bubbles.
+    if (pending === undefined || pending.text.trim().length === 0) {
       return;
     }
 
