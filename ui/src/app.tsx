@@ -33,20 +33,24 @@ function AppContent() {
 
   if (loading) {
     return (
-      <div className="grid min-h-dvh place-items-center">
-        <Skeleton className="h-8 w-40" />
+      <div className="h-dvh overflow-y-auto">
+        <div className="grid min-h-full place-items-center">
+          <Skeleton className="h-8 w-40" />
+        </div>
       </div>
     );
   }
 
   if (error !== undefined || profile === undefined) {
     return (
-      <div className="grid min-h-dvh place-items-center p-8">
-        <div className="max-w-sm text-center">
-          <h1 className="text-lg font-semibold">Can’t reach the daemon</h1>
-          <p className="mt-2 text-sm text-pretty text-muted-foreground">
-            {error ?? "The Overlearn daemon did not respond."}
-          </p>
+      <div className="h-dvh overflow-y-auto p-8">
+        <div className="grid min-h-full place-items-center">
+          <div className="max-w-sm text-center">
+            <h1 className="text-lg font-semibold">Can’t reach the daemon</h1>
+            <p className="mt-2 text-sm text-pretty text-muted-foreground">
+              {error ?? "The Overlearn daemon did not respond."}
+            </p>
+          </div>
         </div>
       </div>
     );

@@ -714,7 +714,7 @@ export function LibraryScreen() {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="min-h-0 flex-1 overflow-y-auto p-6">
         <div className="mx-auto max-w-5xl space-y-8">
           {drafts.length > 0 && (
             <section>

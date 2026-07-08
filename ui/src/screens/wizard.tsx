@@ -450,8 +450,8 @@ export function WizardScreen() {
         </div>
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[1fr_1fr]">
-        <section className="flex min-h-0 flex-col border-b lg:border-r lg:border-b-0">
+      <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] overflow-hidden lg:grid-cols-[1fr_1fr] lg:grid-rows-1">
+        <section className="flex min-h-0 flex-col overflow-hidden border-b lg:border-r lg:border-b-0">
           <div className="flex-1 space-y-4 overflow-y-auto p-4">
             {transcript.length === 0 ? (
               <p className="text-sm text-muted-foreground">

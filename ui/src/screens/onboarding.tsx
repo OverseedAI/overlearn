@@ -254,12 +254,14 @@ export function OnboardingScreen() {
   const step = profile.onboardingState;
 
   return (
-    <div className="grid min-h-dvh place-items-center p-8">
-      <div className="w-full max-w-md">
-        {step === "done" ? null : <StepIndicator step={step} />}
-        {step === "welcome" ? <WelcomeStep /> : null}
-        {step === "connect-agent" ? <ConnectAgentStep /> : null}
-        {step === "tutorial-offer" ? <TutorialOfferStep /> : null}
+    <div className="h-dvh overflow-y-auto p-8">
+      <div className="grid min-h-full place-items-center">
+        <div className="w-full max-w-md">
+          {step === "done" ? null : <StepIndicator step={step} />}
+          {step === "welcome" ? <WelcomeStep /> : null}
+          {step === "connect-agent" ? <ConnectAgentStep /> : null}
+          {step === "tutorial-offer" ? <TutorialOfferStep /> : null}
+        </div>
       </div>
     </div>
   );

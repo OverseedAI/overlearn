@@ -181,12 +181,14 @@ export function SettingsScreen() {
         <SidebarTrigger />
         <h1 className="text-sm font-medium">Settings</h1>
       </header>
-      <div className="mx-auto w-full max-w-2xl px-4 py-10">
-        <div className="divide-y divide-border [&>section]:py-10 [&>section:first-child]:pt-0 [&>section:last-child]:pb-0">
-          <ProfileSection />
-          <AgentSection />
-          {profile ? <DataSection dataDir={dataDir} /> : null}
-          <OnboardingSection />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-2xl px-4 py-10">
+          <div className="divide-y divide-border [&>section]:py-10 [&>section:first-child]:pt-0 [&>section:last-child]:pb-0">
+            <ProfileSection />
+            <AgentSection />
+            {profile ? <DataSection dataDir={dataDir} /> : null}
+            <OnboardingSection />
+          </div>
         </div>
       </div>
     </>
