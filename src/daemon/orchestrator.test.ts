@@ -355,6 +355,55 @@ describe("daemon turn orchestrator", () => {
     expect(endedSessions).toEqual(["session-1", "session-2"]);
   });
 
+  test("fails with denied-permission detail when a turn ends without output", async () => {
+    const adapter: HarnessAdapter = {
+      id: "claude-code",
+      name: "Claude Code",
+      detect: () => ({ installed: true, authenticated: true }),
+      newSession: async () => ({
+        id: "session",
+        adapterId: "claude-code",
+        cwd: "/tmp",
+        processId: 1,
+      }),
+      prompt: async function* (): AsyncIterable<AgentEvent> {
+        yield {
+          type: "permission-request",
+          request: {
+            id: "1",
+            action: "mcp",
+            resource: "overlearn-teaching.get_course_state",
+          },
+          decision: { allowed: false, reason: "Not pre-approved." },
+        };
+        yield { type: "done", reason: "complete" };
+      },
+      cancel: async () => undefined,
+      end: async () => undefined,
+    };
+
+    const orchestrator = createDaemonTurnOrchestrator({
+      courseId: 42,
+      getCourseMetadata: () => undefined,
+      cwd: "/tmp",
+      mcpBaseUrl: "http://127.0.0.1:1234",
+      adapter,
+      onAgentEvent: () => undefined,
+      registerTeachingSession: () => ({ token: "token" }),
+      unregisterTeachingSession: () => undefined,
+    });
+
+    const result = await orchestrator.runTurn(turn, "teaching", noTopicPosition);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("no-output");
+      expect(result.message).toContain(
+        "denied permission for: overlearn-teaching.get_course_state",
+      );
+    }
+  });
+
   test("reads course metadata for each prompt attempt", async () => {
     const prompts: string[] = [];
     let metadata = {
@@ -374,6 +423,7 @@ describe("daemon turn orchestrator", () => {
       }),
       prompt: async function* (_session, prompt): AsyncIterable<AgentEvent> {
         prompts.push(prompt);
+        yield { type: "text", text: "Reply." };
         yield { type: "done", reason: "complete" };
       },
       cancel: async () => undefined,

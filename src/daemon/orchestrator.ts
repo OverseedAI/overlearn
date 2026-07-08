@@ -95,7 +95,7 @@ export type OrchestratorResult =
   | Readonly<{ ok: true }>
   | Readonly<{
       ok: false;
-      reason: "agent-crashed" | "timeout";
+      reason: "agent-crashed" | "timeout" | "no-output";
       message: string;
     }>;
 
@@ -471,18 +471,32 @@ export const buildTurnPrompt = (input: TurnPromptInput): string =>
     .filter((section) => section.length > 0)
     .join("\n\n");
 
+// Keep the underlying failure detail so the learner can act on it (wrong
+// binary, auth expired, denied permission) instead of a generic retry hint.
 const attemptFailureMessage = (
   result: OrchestratorResult,
-): OrchestratorResult =>
-  result.ok
-    ? result
-    : {
-        ...result,
-        message:
-          result.reason === "timeout"
-            ? "The agent timed out. You can submit again to retry."
-            : "The agent crashed. You can submit again to retry.",
-      };
+): OrchestratorResult => {
+  if (result.ok) {
+    return result;
+  }
+
+  const detail = result.message.trim().replace(/\.+$/, "");
+  const summary =
+    result.reason === "timeout"
+      ? "The agent timed out"
+      : result.reason === "no-output"
+        ? detail.length > 0
+          ? detail
+          : "The agent finished without sending a response"
+        : detail.length > 0
+          ? `The agent crashed: ${detail}`
+          : "The agent crashed";
+
+  return {
+    ...result,
+    message: `${summary}. You can submit again to retry.`,
+  };
+};
 
 const terminalError = (event: AgentEvent): OrchestratorResult | undefined =>
   event.type === "error"
@@ -493,6 +507,21 @@ const terminalError = (event: AgentEvent): OrchestratorResult | undefined =>
       }
     : undefined;
 
+// A turn that ends having produced nothing — no response text and no completed
+// tool call — is a failure the UI must explain, not a silent success; most
+// often the harness stopped after a denied permission. Turns that only made
+// MCP writes still count as productive.
+const noOutputFailure = (
+  deniedPermissions: readonly string[],
+): OrchestratorResult => ({
+  ok: false,
+  reason: "no-output",
+  message:
+    deniedPermissions.length > 0
+      ? `The agent stopped without responding after it was denied permission for: ${[...new Set(deniedPermissions)].join(", ")}`
+      : "The agent finished without sending a response",
+});
+
 const consumePrompt = async (
   events: AsyncIterable<AgentEvent>,
   courseId: number,
@@ -501,6 +530,9 @@ const consumePrompt = async (
   shouldBroadcast: () => boolean,
   onAgentEvent: (payload: AgentStreamPayload) => void,
 ): Promise<OrchestratorResult> => {
+  let sawOutput = false;
+  const deniedPermissions: string[] = [];
+
   try {
     for await (const event of events) {
       if (shouldBroadcast()) {
@@ -512,17 +544,32 @@ const consumePrompt = async (
         });
       }
 
+      if (
+        (event.type === "text" && event.text.trim().length > 0) ||
+        (event.type === "tool-call" && event.status === "completed")
+      ) {
+        sawOutput = true;
+      }
+
+      if (event.type === "permission-request" && !event.decision.allowed) {
+        deniedPermissions.push(
+          event.request.resource ?? event.request.action,
+        );
+      }
+
       const failure = terminalError(event);
       if (failure !== undefined) {
         return failure;
       }
 
       if (event.type === "done") {
-        return { ok: true };
+        return sawOutput || event.reason === "cancelled"
+          ? { ok: true }
+          : noOutputFailure(deniedPermissions);
       }
     }
 
-    return { ok: true };
+    return sawOutput ? { ok: true } : noOutputFailure(deniedPermissions);
   } catch (error) {
     return {
       ok: false,
