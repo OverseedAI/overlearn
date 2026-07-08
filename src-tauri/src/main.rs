@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     sync::{
@@ -9,7 +9,7 @@ use std::{
         Mutex,
     },
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use tauri::{
     image::Image,
@@ -25,6 +25,8 @@ use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(30);
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HTTP_TIMEOUT: Duration = Duration::from_millis(800);
+const STALE_DAEMON_TERM_TIMEOUT: Duration = Duration::from_secs(3);
+const STALE_DAEMON_KILL_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 struct RunningDaemon {
@@ -115,11 +117,12 @@ fn read_daemon_metadata(data_dir: &Path) -> Result<Option<DaemonMetadata>, Strin
         return Ok(None);
     }
 
-    let contents = fs::read_to_string(&path)
-        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
-    serde_json::from_str(&contents)
-        .map(Some)
-        .map_err(|error| format!("Invalid daemon metadata in {}: {error}", path.display()))
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Failed to read {}: {error}", path.display())),
+    };
+    Ok(serde_json::from_str(&contents).ok())
 }
 
 fn read_live_daemon(data_dir: &Path) -> Result<Option<RunningDaemon>, String> {
@@ -169,9 +172,7 @@ fn start_app_daemon(app: &AppHandle) -> Result<RunningDaemon, String> {
     fs::create_dir_all(&data_dir)
         .map_err(|error| format!("Failed to create {}: {error}", data_dir.display()))?;
 
-    if let Some(daemon) = read_live_daemon(&data_dir)? {
-        return Ok(daemon);
-    }
+    terminate_existing_daemon(&data_dir)?;
 
     let (mut rx, child) = app
         .shell()
@@ -207,6 +208,88 @@ fn start_app_daemon(app: &AppHandle) -> Result<RunningDaemon, String> {
     });
 
     wait_for_live_daemon(&data_dir)
+}
+
+fn terminate_existing_daemon(data_dir: &Path) -> Result<(), String> {
+    let Some(metadata) = read_daemon_metadata(data_dir)? else {
+        remove_daemon_metadata(data_dir);
+        return Ok(());
+    };
+
+    if !pid_is_alive(metadata.pid) {
+        remove_daemon_metadata(data_dir);
+        return Ok(());
+    }
+
+    terminate_pid(metadata.pid)?;
+    remove_daemon_metadata(data_dir);
+    Ok(())
+}
+
+fn terminate_pid(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        signal_pid(pid, libc::SIGTERM, "SIGTERM")?;
+        if wait_for_pid_exit(pid, STALE_DAEMON_TERM_TIMEOUT) {
+            return Ok(());
+        }
+
+        signal_pid(pid, libc::SIGKILL, "SIGKILL")?;
+        if wait_for_pid_exit(pid, STALE_DAEMON_KILL_TIMEOUT) {
+            return Ok(());
+        }
+
+        Err(format!("Daemon pid {pid} did not exit after SIGKILL."))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn signal_pid(pid: u32, signal: libc::c_int, signal_name: &str) -> Result<(), String> {
+    let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Failed to send {signal_name} to daemon pid {pid}: {error}"
+    ))
+}
+
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let started_at = Instant::now();
+
+    while started_at.elapsed() < timeout {
+        if !pid_is_alive(pid) {
+            return true;
+        }
+
+        thread::sleep(DAEMON_POLL_INTERVAL);
+    }
+
+    !pid_is_alive(pid)
+}
+
+fn remove_daemon_metadata(data_dir: &Path) {
+    let path = daemon_metadata_path(data_dir);
+    if let Err(error) = fs::remove_file(&path) {
+        if error.kind() != ErrorKind::NotFound {
+            eprintln!(
+                "Failed to remove stale daemon metadata {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 fn pid_is_alive(pid: u32) -> bool {
