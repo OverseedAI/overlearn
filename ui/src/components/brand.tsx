@@ -37,7 +37,7 @@ export function OverlearnWordmark({ className }: { className?: string }) {
       )}
     >
       over
-      <SproutMark className="mx-[-0.03em] h-[1.08em] w-auto self-end text-success" />
+      <SproutMark className="mx-[-0.03em] h-[1.08em] w-auto text-success" />
       earn
     </span>
   );
