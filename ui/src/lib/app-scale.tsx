@@ -45,6 +45,18 @@ function readStoredScale(): number {
   return Number.isFinite(value) ? clampScale(value) : DEFAULT_SCALE;
 }
 
+function isZoomInShortcut(event: KeyboardEvent): boolean {
+  return event.key === "+" || event.key === "=" || event.code === "NumpadAdd";
+}
+
+function isZoomOutShortcut(event: KeyboardEvent): boolean {
+  return event.key === "-" || event.code === "NumpadSubtract";
+}
+
+function isZoomResetShortcut(event: KeyboardEvent): boolean {
+  return event.key === "0" || event.code === "Numpad0";
+}
+
 export function AppScaleProvider({ children }: { children: ReactNode }) {
   const [scale, setScaleState] = useState(readStoredScale);
 
@@ -80,6 +92,34 @@ export function AppScaleProvider({ children }: { children: ReactNode }) {
   const resetScale = useCallback(() => {
     setScale(DEFAULT_SCALE);
   }, [setScale]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((!event.metaKey && !event.ctrlKey) || event.altKey) {
+        return;
+      }
+
+      if (isZoomInShortcut(event)) {
+        event.preventDefault();
+        zoomIn();
+        return;
+      }
+
+      if (isZoomOutShortcut(event)) {
+        event.preventDefault();
+        zoomOut();
+        return;
+      }
+
+      if (isZoomResetShortcut(event)) {
+        event.preventDefault();
+        resetScale();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [resetScale, zoomIn, zoomOut]);
 
   const value = useMemo(
     () => ({

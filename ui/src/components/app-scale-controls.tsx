@@ -29,7 +29,7 @@ export function AppScaleControls() {
             <ZoomOut className="size-4" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>Zoom out</TooltipContent>
+        <TooltipContent>Zoom out (Cmd/Ctrl -)</TooltipContent>
       </Tooltip>
 
       <Tooltip>
@@ -46,7 +46,7 @@ export function AppScaleControls() {
             <RotateCcw className="size-4" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>Reset zoom ({scaleLabel})</TooltipContent>
+        <TooltipContent>Reset zoom ({scaleLabel}, Cmd/Ctrl 0)</TooltipContent>
       </Tooltip>
 
       <Tooltip>
@@ -63,7 +63,7 @@ export function AppScaleControls() {
             <ZoomIn className="size-4" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>Zoom in</TooltipContent>
+        <TooltipContent>Zoom in (Cmd/Ctrl +)</TooltipContent>
       </Tooltip>
     </div>
   );
