@@ -136,7 +136,14 @@
     font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01", "ss03";
   }
 
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
   body {
     @apply bg-background text-foreground;
+    overflow: hidden;
   }
 }

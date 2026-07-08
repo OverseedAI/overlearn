@@ -755,6 +755,12 @@ fn to_boxed_error(message: String) -> Box<dyn std::error::Error> {
 }
 
 fn main() {
+    // Finder-launched apps inherit launchd's minimal PATH; import the login
+    // shell's environment so the sidecar can find harness binaries.
+    if let Err(error) = fix_path_env::fix() {
+        eprintln!("Failed to import login shell environment: {error}");
+    }
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
