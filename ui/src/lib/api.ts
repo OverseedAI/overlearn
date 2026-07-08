@@ -9,6 +9,7 @@ import type {
   ProfileResource,
   ServerEvents,
   TopicTreeInput,
+  TranscriptPage,
 } from "./types";
 
 type DaemonInfo = {
@@ -188,6 +189,23 @@ export const api = {
 
   // Courses — item
   getCourse: (id: number) => get<CourseState>(`/api/courses/${id}`),
+  pageTranscript: (
+    id: number,
+    opts: { before?: number; limit?: number } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (opts.before !== undefined) {
+      params.set("before", String(opts.before));
+    }
+    if (opts.limit !== undefined) {
+      params.set("limit", String(opts.limit));
+    }
+
+    const query = params.toString();
+    return get<TranscriptPage>(
+      `/api/courses/${id}/transcript${query.length > 0 ? `?${query}` : ""}`,
+    );
+  },
   patchCourse: (
     id: number,
     body: Partial<{

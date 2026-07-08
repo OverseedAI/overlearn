@@ -29,6 +29,7 @@ import {
   listTurnEvents,
   openStore,
   pageTranscript,
+  pageTranscriptBefore,
   patchCourse,
   patchProfile,
   readTopicTree,
@@ -372,12 +373,12 @@ describe("store query API", () => {
           ),
       ).toThrow();
 
-      appendTranscriptEntry(store, course.id, {
+      const firstTranscriptEntry = appendTranscriptEntry(store, course.id, {
         role: "learner",
         content: "What is the rule?",
         ts: "2026-01-07T00:00:00.000Z",
       });
-      appendTranscriptEntry(store, course.id, {
+      const secondTranscriptEntry = appendTranscriptEntry(store, course.id, {
         role: "agent",
         kind: "lesson",
         content: "01-rule-of-72",
@@ -399,6 +400,13 @@ describe("store query API", () => {
           limit: 10,
         }).entries,
       ).toHaveLength(1);
+      const beforeTranscriptPage = pageTranscriptBefore(store, course.id, {
+        beforeId: secondTranscriptEntry.id,
+        limit: 1,
+      });
+      expect(beforeTranscriptPage.entries).toEqual([firstTranscriptEntry]);
+      expect(beforeTranscriptPage.hasMore).toBe(false);
+      expect(beforeTranscriptPage.nextBeforeId).toBe(firstTranscriptEntry.id);
 
       const session = startSession(store, {
         courseId: course.id,

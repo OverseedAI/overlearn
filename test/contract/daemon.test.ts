@@ -972,6 +972,156 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
+    "pages transcript history before a cursor",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start();
+
+      const emptyCourse = await createCourse(daemon, {
+        title: "Empty Transcript Course",
+      });
+      const emptyResponse = await authFetch(
+        daemon,
+        `/api/courses/${emptyCourse.id}/transcript?limit=20`,
+      );
+      expect(emptyResponse.status).toBe(200);
+      await expect(emptyResponse.json()).resolves.toMatchObject({
+        entries: [],
+        hasMore: false,
+        nextBeforeId: null,
+      });
+
+      const path = join(daemon.dataDir, "paged-transcript-course");
+      await mkdir(path, { recursive: true });
+      await writeJson(join(path, "course.json"), {
+        title: "Paged Transcript Course",
+      });
+      await writeFile(
+        join(path, "transcript.jsonl"),
+        Array.from({ length: 260 }, (_, index) =>
+          JSON.stringify({
+            role: index % 2 === 0 ? "learner" : "agent",
+            kind: "text",
+            text: `entry ${index + 1}`,
+            at: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+          }),
+        ).join("\n") + "\n",
+        "utf8",
+      );
+
+      const imported = await authFetch(daemon, "/api/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      expect(imported.status).toBe(200);
+      const importedPayload = (await imported.json()) as Record<string, unknown>;
+      expect(typeof importedPayload["courseId"]).toBe("number");
+      const courseId = importedPayload["courseId"] as number;
+
+      const state = await courseState(daemon, courseId);
+      const tail = state["transcript"];
+      expect(Array.isArray(tail)).toBe(true);
+      expect(tail).toHaveLength(200);
+
+      const numberField = (
+        value: unknown,
+        field: string,
+        label: string,
+      ): number => {
+        const fieldValue = isRecord(value) ? value[field] : undefined;
+        if (typeof fieldValue !== "number") {
+          throw new Error(`${label} did not include a numeric ${field}.`);
+        }
+
+        return fieldValue;
+      };
+
+      const firstTailEntry = tail[0];
+      const lastTailEntry = tail.at(-1);
+      // Bun 1.3.14 mutates received objects when expect.any is used inside
+      // toMatchObject, so read cursor fields before shape assertions.
+      const firstTailId = numberField(firstTailEntry, "id", "Tail entry");
+      numberField(lastTailEntry, "id", "Final tail entry");
+
+      expect(firstTailEntry).toMatchObject({
+        topicId: null,
+        text: "entry 61",
+      });
+      expect(lastTailEntry).toMatchObject({
+        topicId: null,
+        text: "entry 260",
+      });
+
+      const pageTexts = async (
+        beforeId: number,
+      ): Promise<Readonly<{ texts: readonly string[]; payload: Record<string, unknown> }>> => {
+        const response = await authFetch(
+          daemon,
+          `/api/courses/${courseId}/transcript?before=${beforeId}&limit=20`,
+        );
+        expect(response.status).toBe(200);
+        const payload = (await response.json()) as Record<string, unknown>;
+        const entries = payload["entries"];
+        if (!Array.isArray(entries)) {
+          throw new Error("Transcript page did not include entries.");
+        }
+
+        return {
+          payload,
+          texts: entries.map((entry) =>
+            isRecord(entry) && typeof entry["text"] === "string"
+              ? entry["text"]
+              : "",
+          ),
+        };
+      };
+
+      const firstPage = await pageTexts(firstTailId);
+      expect(firstPage.texts).toEqual(
+        Array.from({ length: 20 }, (_, index) => `entry ${index + 41}`),
+      );
+      expect(firstPage.payload["hasMore"]).toBe(true);
+      const firstPageNextBeforeId = numberField(
+        firstPage.payload,
+        "nextBeforeId",
+        "First transcript page",
+      );
+
+      const secondPage = await pageTexts(firstPageNextBeforeId);
+      expect(secondPage.texts).toEqual(
+        Array.from({ length: 20 }, (_, index) => `entry ${index + 21}`),
+      );
+      expect(secondPage.payload["hasMore"]).toBe(true);
+      const secondPageNextBeforeId = numberField(
+        secondPage.payload,
+        "nextBeforeId",
+        "Second transcript page",
+      );
+
+      const lastPage = await pageTexts(secondPageNextBeforeId);
+      expect(lastPage.texts).toEqual(
+        Array.from({ length: 20 }, (_, index) => `entry ${index + 1}`),
+      );
+      expect(lastPage.payload["hasMore"]).toBe(false);
+      const lastPageNextBeforeId = numberField(
+        lastPage.payload,
+        "nextBeforeId",
+        "Last transcript page",
+      );
+
+      const exhausted = await pageTexts(lastPageNextBeforeId);
+      expect(exhausted.texts).toEqual([]);
+      expect(exhausted.payload["hasMore"]).toBe(false);
+      expect(exhausted.payload["nextBeforeId"]).toBeNull();
+    },
+    15_000,
+  );
+
+  contractTest(
     "exports bundle directories and imports bundle or legacy course folders",
     async () => {
       if (!(await ensureLocalhost())) {

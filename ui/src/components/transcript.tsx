@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   BookOpenText,
   Check,
@@ -17,7 +17,7 @@ import { DemoCard } from "@/components/demo-card";
 import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
 import type { AgentActivity, ToolActivity } from "@/lib/course-store";
-import type { TranscriptEntry } from "@/lib/types";
+import type { TranscriptEntry, TranscriptPage } from "@/lib/types";
 
 const CHAT_TEXT_CLASS = "text-[15pt] leading-[1.55]";
 
@@ -277,15 +277,80 @@ export function Transcript({
   activity,
   showTyping,
   onOpenLesson,
+  onLoadOlder,
+  onPrependEntries,
 }: {
   entries: TranscriptEntry[];
   courseId: number;
   activity?: AgentActivity | undefined;
   showTyping: boolean;
   onOpenLesson: (lessonId: string) => void;
+  onLoadOlder?: (beforeId: number) => Promise<TranscriptPage>;
+  onPrependEntries?: (entries: TranscriptEntry[]) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
+  const prependAnchor = useRef<
+    { scrollHeight: number; scrollTop: number } | undefined
+  >(undefined);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [historyExhausted, setHistoryExhausted] = useState(false);
+
+  useEffect(() => {
+    setHistoryExhausted(false);
+  }, [courseId]);
+
+  const loadOlder = useCallback(async () => {
+    const node = scrollRef.current;
+    const beforeId = entries[0]?.id;
+    if (
+      !node ||
+      beforeId === undefined ||
+      loadingOlder ||
+      historyExhausted ||
+      onLoadOlder === undefined ||
+      onPrependEntries === undefined
+    ) {
+      return;
+    }
+
+    const scrollHeight = node.scrollHeight;
+    const scrollTop = node.scrollTop;
+    setLoadingOlder(true);
+
+    try {
+      const page = await onLoadOlder(beforeId);
+      if (page.entries.length > 0) {
+        prependAnchor.current = { scrollHeight, scrollTop };
+        onPrependEntries(page.entries);
+      }
+      if (!page.hasMore || page.entries.length === 0) {
+        setHistoryExhausted(true);
+      }
+    } catch (error) {
+      console.warn("Unable to load earlier transcript entries.", error);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [
+    entries,
+    historyExhausted,
+    loadingOlder,
+    onLoadOlder,
+    onPrependEntries,
+  ]);
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchor.current;
+    const node = scrollRef.current;
+    if (!anchor || !node) {
+      return;
+    }
+
+    node.scrollTop =
+      anchor.scrollTop + (node.scrollHeight - anchor.scrollHeight);
+    prependAnchor.current = undefined;
+  }, [entries]);
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -295,10 +360,13 @@ export function Transcript({
     const onScroll = () => {
       pinnedToBottom.current =
         node.scrollHeight - node.scrollTop - node.clientHeight < 120;
+      if (node.scrollTop < 80) {
+        void loadOlder();
+      }
     };
     node.addEventListener("scroll", onScroll, { passive: true });
     return () => node.removeEventListener("scroll", onScroll);
-  }, []);
+  }, [loadOlder]);
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -313,6 +381,15 @@ export function Transcript({
       className="min-h-0 flex-1 overflow-y-auto"
       aria-live="polite"
     >
+      {loadingOlder ? (
+        <div
+          className="sticky top-2 z-10 flex h-0 justify-center"
+          aria-live="polite"
+        >
+          <Loader2 className="size-4 animate-spin text-muted-foreground" />
+          <span className="sr-only">Loading earlier transcript entries</span>
+        </div>
+      ) : null}
       <div className="mx-auto w-full max-w-3xl space-y-6 px-6 py-8">
         {entries.length === 0 && !activity && !showTyping ? (
           <div className="py-24 text-center">
@@ -323,9 +400,9 @@ export function Transcript({
             </p>
           </div>
         ) : null}
-        {coalesceAgentText(entries).map((entry, index) => (
+        {coalesceAgentText(entries).map((entry) => (
           <Entry
-            key={`${entry.at}-${index}`}
+            key={entry.id}
             entry={entry}
             courseId={courseId}
             onOpenLesson={onOpenLesson}
