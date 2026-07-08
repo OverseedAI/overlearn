@@ -51,6 +51,7 @@
   --app-titlebar-safe-leading: 0px;
   --app-traffic-light-safe-width: 5.5rem;
   --app-window-control-space: 2.125rem;
+  --app-sidebar-titlebar-space: 1.125rem;
 }
 
 .dark {
@@ -165,7 +166,7 @@
 
   html[data-window-chrome="macos-overlay"] .app-sidebar-titlebar-space {
     display: block;
-    height: var(--app-window-control-space);
+    height: var(--app-sidebar-titlebar-space);
     flex: 0 0 auto;
   }
 
