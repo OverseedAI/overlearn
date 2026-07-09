@@ -29,11 +29,31 @@ describe("agent reasoning text cleanup", () => {
     });
   });
 
-  test("only splits leading internal paragraphs", () => {
+  test("extracts screenshot-style planning from anywhere in a short reply", () => {
     const text = [
-      "Let's start with one tiny example.",
+      "Great — we can turn your French background into a focused course.",
       "",
-      "The learner state is visible here, but this is not a leading scratchpad.",
+      "First, I need to run rebuild-course-state and inspect the draft-course payload before responding.",
+      "",
+      "What would you most like to be able to do in French?",
+    ].join("\n");
+
+    expect(splitLeadingLeakedThinking(text)).toEqual({
+      thinking:
+        "First, I need to run rebuild-course-state and inspect the draft-course payload before responding.",
+      text: [
+        "Great — we can turn your French background into a focused course.",
+        "",
+        "What would you most like to be able to do in French?",
+      ].join("\n"),
+    });
+  });
+
+  test("keeps normal course-drafting replies untouched", () => {
+    const text = [
+      "We'll shape the course around the situations you care about most.",
+      "",
+      "I need to understand your goal before I draft the first lesson. Is conversation, travel, or reading most important to you?",
     ].join("\n");
 
     expect(splitLeadingLeakedThinking(text)).toEqual({

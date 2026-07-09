@@ -28,12 +28,26 @@ function flattenTopics(topics: readonly TopicNode[]): TopicNode[] {
   return topics.flatMap((topic) => [topic, ...flattenTopics(topic.children)]);
 }
 
-function StatusDot({ status }: { status: UiStatus | undefined }) {
+function StatusDot({
+  status,
+  message,
+}: {
+  status: UiStatus | undefined;
+  message?: string | undefined;
+}) {
   const { color, label, pulse } =
     status === "agent-working"
-      ? { color: "bg-warning", label: "Agent working", pulse: true }
+      ? {
+          color: "bg-warning",
+          label: message ?? "Preparing your next step…",
+          pulse: true,
+        }
       : status === "wrapping-up"
-        ? { color: "bg-warning", label: "Wrapping up", pulse: true }
+        ? {
+            color: "bg-warning",
+            label: message ?? "Saving your progress…",
+            pulse: true,
+          }
         : status === "agent-failed"
           ? { color: "bg-destructive", label: "Agent failed", pulse: false }
           : status === "session-ended"
@@ -254,7 +268,9 @@ export function CourseScreen() {
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <AppHeader
         title={course.title}
-        afterTitle={<StatusDot status={store.status} />}
+        afterTitle={
+          <StatusDot status={store.status} message={store.statusMessage} />
+        }
         actionsClassName="gap-1"
       >
         <AppScaleControls />
@@ -284,6 +300,7 @@ export function CourseScreen() {
             courseId={courseId}
             activity={store.activity}
             showTyping={busy && !store.activity}
+            loadingMessage={store.statusMessage ?? "Preparing your next step…"}
             cardActionsDisabled={composerDisabled}
             onLoadOlder={loadOlderTranscript}
             onPrependEntries={prependTranscript}
@@ -308,7 +325,9 @@ export function CourseScreen() {
                   courseId={courseId}
                   disabled={composerDisabled}
                   placeholder={
-                    busy ? "The agent is working…" : "Ask, answer, or explore…"
+                    busy
+                      ? (store.statusMessage ?? "Preparing your next step…")
+                      : "Ask, answer, or explore…"
                   }
                 />
               )}

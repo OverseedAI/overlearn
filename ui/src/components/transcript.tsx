@@ -78,15 +78,32 @@ function ToolLine({ tool }: { tool: ToolActivity }) {
   );
 }
 
+function ToolActivityBlock({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="overflow-hidden rounded-lg border bg-muted/30">
+      <p className="flex items-center gap-2 px-3 py-2 font-mono text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+        <Wrench className="size-4 shrink-0" />
+        Tool activity
+      </p>
+      <div className="space-y-1.5 border-t px-3 py-2.5">{children}</div>
+    </div>
+  );
+}
+
 function ThinkingBlock({ text }: { text: string }) {
   return (
-    <Collapsible>
-      <CollapsibleTrigger className="group/thinking flex items-center gap-1 text-xs text-muted-foreground/80 italic">
-        <ChevronRight className="size-3 shrink-0 transition-transform group-data-[state=open]/thinking:rotate-90" />
-        Thinking…
+    <Collapsible className="overflow-hidden rounded-lg border bg-muted/30">
+      <CollapsibleTrigger className="group/thinking flex w-full items-center gap-2 px-3 py-2 font-mono text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+        <Sparkles className="size-4 shrink-0" />
+        Thinking
+        <ChevronRight className="ml-auto size-3 shrink-0 transition-transform group-data-[state=open]/thinking:rotate-90" />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <p className="mt-1 border-l-2 pl-3 text-sm whitespace-pre-wrap text-muted-foreground italic">
+        <p className="border-t px-3 py-2.5 font-mono text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground">
           {text}
         </p>
       </CollapsibleContent>
@@ -193,11 +210,11 @@ export function LiveActivity({ activity }: { activity: AgentActivity }) {
           <ThinkingBlock text={activity.thinking} />
         ) : null}
         {activity.tools.length > 0 ? (
-          <div className="space-y-1">
+          <ToolActivityBlock>
             {activity.tools.map((tool) => (
               <ToolLine key={tool.id} tool={tool} />
             ))}
-          </div>
+          </ToolActivityBlock>
         ) : null}
         {activity.text.length > 0 ? (
           <Markdown text={activity.text} className={CHAT_TEXT_CLASS} />
@@ -213,17 +230,23 @@ export function LiveActivity({ activity }: { activity: AgentActivity }) {
   );
 }
 
-export function TypingIndicator() {
+export function TypingIndicator({ message }: { message: string }) {
   return (
     <EntryShell label="Agent">
-      <div className="flex gap-1 py-1" aria-label="Agent is responding">
-        {[0, 150, 300].map((delay) => (
-          <span
-            key={delay}
-            className="size-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-duration:900ms]"
-            style={{ animationDelay: `${delay}ms` }}
-          />
-        ))}
+      <div
+        className="flex items-center gap-2 py-1 text-sm text-muted-foreground"
+        aria-label={message}
+      >
+        <span className="flex gap-1" aria-hidden="true">
+          {[0, 150, 300].map((delay) => (
+            <span
+              key={delay}
+              className="size-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-duration:900ms]"
+              style={{ animationDelay: `${delay}ms` }}
+            />
+          ))}
+        </span>
+        <span>{message}</span>
       </div>
     </EntryShell>
   );
@@ -256,10 +279,12 @@ function Entry({
 
   if (kind === "tool-call" && entry.role === "system") {
     return (
-      <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground/70">
-        <Wrench className="size-4 shrink-0" />
-        <span className="truncate">{"text" in entry ? entry.text : ""}</span>
-      </div>
+      <ToolActivityBlock>
+        <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
+          <Check className="size-4 shrink-0 text-success" />
+          <span className="truncate">{"text" in entry ? entry.text : ""}</span>
+        </div>
+      </ToolActivityBlock>
     );
   }
 
@@ -397,6 +422,7 @@ export function Transcript({
   courseId,
   activity,
   showTyping,
+  loadingMessage,
   cardActionsDisabled,
   onLoadOlder,
   onPrependEntries,
@@ -406,6 +432,7 @@ export function Transcript({
   courseId: number;
   activity?: AgentActivity | undefined;
   showTyping: boolean;
+  loadingMessage: string;
   cardActionsDisabled: boolean;
   onLoadOlder?: (beforeId: number) => Promise<TranscriptPage>;
   onPrependEntries?: (entries: TranscriptEntry[]) => void;
@@ -533,7 +560,7 @@ export function Transcript({
           />
         ))}
         {activity ? <LiveActivity activity={activity} /> : null}
-        {showTyping ? <TypingIndicator /> : null}
+        {showTyping ? <TypingIndicator message={loadingMessage} /> : null}
       </div>
     </div>
   );

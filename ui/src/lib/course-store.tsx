@@ -117,6 +117,18 @@ function selectedTopicPathForLoadedState(
   return currentTopicPath(state.topics) ?? firstTopicPath(state.topics);
 }
 
+function defaultStatusMessage(status: UiStatus): string | undefined {
+  if (status === "agent-working") {
+    return "Preparing your next step…";
+  }
+
+  if (status === "wrapping-up") {
+    return "Saving your progress…";
+  }
+
+  return undefined;
+}
+
 function applyAgentStream(
   store: CourseStore,
   payload: AgentStreamPayload,
@@ -185,9 +197,7 @@ function reduce(store: CourseStore, action: Action): CourseStore {
       return {
         ...store,
         status: action.status,
-        ...(action.message !== undefined
-          ? { statusMessage: action.message }
-          : { statusMessage: undefined }),
+        statusMessage: action.message ?? defaultStatusMessage(action.status),
         // A finished turn means live activity is stale.
         ...(action.status === "waiting-for-agent" || action.status === "session-ended"
           ? { activity: undefined }

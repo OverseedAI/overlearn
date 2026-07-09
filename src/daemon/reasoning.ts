@@ -4,19 +4,28 @@ export type SplitAgentText = Readonly<{
 }>;
 
 const internalCourseTerms =
-  /\b(fresh course|course state|store state|current topic|no topics yet|transcript|turn payload|orientation|calibrat\w*|entry point|durable|mcp|tool call|topic snapshot|learner-facing)\b/i;
+  /\b(fresh course|course[- ]state|store[- ]state|rebuild(?:ing)? (?:the )?course (?:state|context)|current topic|no topics yet|transcript|turn payload|draft[- ]course payload|orientation|calibrat\w*|entry point|durable|mcp|tool call|topic snapshot|learner-facing|system prompt|scratchpad|reasoning channel|internal plan\w*)\b/i;
 
 const internalPlanningTerms =
-  /\b(I|we)\s+(need|should|must|will|would|can|have to)\b/i;
+  /\b(I|we)(?:\s+|['’](?:ll|d)\s+)(need|should|must|will|would|can|have to|first need to)\b/i;
 
 const thirdPersonLearnerTerms =
-  /\b(the learner|learner just|learner has|learner wants|learner asked|learner selected)\b/i;
+  /\b(the learner|learner['’]s|learner just|learner has|learner wants|learner asked|learner selected|learner profile)\b/i;
+
+const internalCommandTerms =
+  /\b(rebuild[- ]course[- ]state|get[-_ ]course[-_ ]state)\b/i;
+
+const shortReplyMaxCharacters = 2_000;
 
 const looksLikeLeakedThinking = (paragraph: string): boolean => {
   const trimmed = paragraph.trim();
 
   if (trimmed.length === 0) {
     return false;
+  }
+
+  if (internalCommandTerms.test(trimmed)) {
+    return true;
   }
 
   if (thirdPersonLearnerTerms.test(trimmed) && internalCourseTerms.test(trimmed)) {
@@ -28,27 +37,35 @@ const looksLikeLeakedThinking = (paragraph: string): boolean => {
 
 export const splitLeadingLeakedThinking = (text: string): SplitAgentText => {
   const normalized = text.replaceAll("\r\n", "\n");
-  const parts = normalized.split(/(\n\s*\n)/);
-  let index = 0;
+  const paragraphs = normalized.split(/\n\s*\n/);
+  const leakedIndexes = new Set<number>();
 
-  while (index < parts.length) {
-    const paragraph = parts[index] ?? "";
-    if (!looksLikeLeakedThinking(paragraph)) {
-      break;
+  for (const [index, paragraph] of paragraphs.entries()) {
+    if (looksLikeLeakedThinking(paragraph)) {
+      leakedIndexes.add(index);
+      continue;
     }
 
-    index += 1;
-    if (index < parts.length && /^\n\s*\n$/.test(parts[index] ?? "")) {
-      index += 1;
+    // Long teaching replies only trim a leading scratchpad. In short draft
+    // and orientation replies, inspect every paragraph because harnesses can
+    // interleave a planning note with otherwise learner-facing prose.
+    if (normalized.length > shortReplyMaxCharacters) {
+      break;
     }
   }
 
-  if (index === 0) {
+  if (leakedIndexes.size === 0) {
     return { thinking: "", text };
   }
 
-  const thinking = parts.slice(0, index).join("").trim();
-  const visible = parts.slice(index).join("").trimStart();
+  const thinking = paragraphs
+    .filter((_, index) => leakedIndexes.has(index))
+    .map((paragraph) => paragraph.trim())
+    .join("\n\n");
+  const visible = paragraphs
+    .filter((_, index) => !leakedIndexes.has(index))
+    .join("\n\n")
+    .trimStart();
 
   return {
     thinking,

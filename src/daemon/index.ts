@@ -2336,7 +2336,19 @@ export const runDaemon = async (
     currentRuntime.runningTurn = true;
     activeTurnByCourse.set(course.id, turn.turn);
     activeTurnSnapshotByCourse.set(course.id, turnSnapshot.activeTurn);
-    setStatus(course.id, mode === "wrap-up" ? "wrapping-up" : "agent-working");
+    const progressMessage =
+      mode === "orientation"
+        ? "Drafting your course…"
+        : mode === "wrap-up"
+          ? "Saving your progress…"
+          : mode === "greeting"
+            ? "Getting your course ready…"
+            : "Preparing your next step…";
+    setStatus(
+      course.id,
+      mode === "wrap-up" ? "wrapping-up" : "agent-working",
+      progressMessage,
+    );
     sseHub.broadcast("courses", coursesPayload());
     broadcastSessions();
     appendTurnEvents(store, course.id, {
