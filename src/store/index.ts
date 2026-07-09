@@ -55,6 +55,8 @@ export type Course = Readonly<{
   title: string;
   description: string | null;
   harnessId: string | null;
+  model: string | null;
+  effort: string | null;
   attachedDir: string | null;
   status: CourseStatus;
   sourceName: string | null;
@@ -98,6 +100,8 @@ export type CourseInput = Readonly<{
   title: string;
   description?: string | null;
   harnessId?: string | null;
+  model?: string | null;
+  effort?: string | null;
   attachedDir?: string | null;
   status?: CourseStatus;
   sourceName?: string | null;
@@ -110,6 +114,8 @@ export type CoursePatch = Readonly<{
   title?: string;
   description?: string | null;
   harnessId?: string | null;
+  model?: string | null;
+  effort?: string | null;
   attachedDir?: string | null;
   status?: CourseStatus;
   sourceName?: string | null;
@@ -402,6 +408,8 @@ type CourseRow = Readonly<{
   title: string;
   description: string | null;
   harness_id: string | null;
+  model: string | null;
+  effort: string | null;
   attached_dir: string | null;
   status: CourseStatus;
   source_name: string | null;
@@ -576,13 +584,13 @@ type FolderImportPayload = Readonly<{
 }>;
 
 const STORE_FILE_NAME = "overlearn.sqlite";
-export const STORE_SCHEMA_VERSION = 5;
+export const STORE_SCHEMA_VERSION = 6;
 const courseStatusCheckSql =
   "status TEXT NOT NULL CHECK (status IN ('active', 'archived'))";
 
 const migrations: readonly Migration[] = [
   {
-    id: STORE_SCHEMA_VERSION,
+    id: 5,
     name: "store_schema_v5",
     up: (db) => {
       db.exec(`
@@ -795,6 +803,16 @@ const migrations: readonly Migration[] = [
       ).run(now);
     },
   },
+  {
+    id: STORE_SCHEMA_VERSION,
+    name: "store_schema_v6_agent_config",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE courses ADD COLUMN model TEXT;
+        ALTER TABLE courses ADD COLUMN effort TEXT;
+      `);
+    },
+  },
 ];
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -978,9 +996,12 @@ const applyMigrations = (db: Database): void => {
     );
   }
 
+  const baseMigrationId = migrations[0]?.id;
   if (
     latestKnown > 0 &&
-    ((appliedRows.length > 0 && !applied.has(latestKnown)) ||
+    ((appliedRows.length > 0 &&
+      baseMigrationId !== undefined &&
+      !applied.has(baseMigrationId)) ||
       (appliedRows.length === 0 && hadUserSchema))
   ) {
     console.warn(
@@ -1095,6 +1116,8 @@ const courseFromRow = (row: CourseRow): Course => ({
   title: row.title,
   description: row.description,
   harnessId: row.harness_id,
+  model: row.model,
+  effort: row.effort,
   attachedDir: row.attached_dir,
   status: row.status,
   sourceName: row.source_name,
@@ -1286,6 +1309,8 @@ const insertCourse = (store: Store, input: CourseInput): Course => {
           title,
           description,
           harness_id,
+          model,
+          effort,
           attached_dir,
           status,
           source_name,
@@ -1293,13 +1318,15 @@ const insertCourse = (store: Store, input: CourseInput): Course => {
           created_at,
           updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
       `,
     )
     .run(
       normalizeText(input.title, "Course title"),
       nullableText(input.description),
       nullableText(input.harnessId),
+      nullableText(input.model),
+      nullableText(input.effort),
       nullableText(input.attachedDir),
       input.status ?? "active",
       nullableText(input.sourceName),
@@ -1359,12 +1386,14 @@ export const patchCourse = (
           title = ?1,
           description = ?2,
           harness_id = ?3,
-          attached_dir = ?4,
-          status = ?5,
-          source_name = ?6,
-          manifest_extra_json = ?7,
-          updated_at = ?8
-        WHERE id = ?9
+          model = ?4,
+          effort = ?5,
+          attached_dir = ?6,
+          status = ?7,
+          source_name = ?8,
+          manifest_extra_json = ?9,
+          updated_at = ?10
+        WHERE id = ?11
       `,
     )
     .run(
@@ -1377,6 +1406,8 @@ export const patchCourse = (
       patch.harnessId === undefined
         ? existing.harnessId
         : nullableText(patch.harnessId),
+      patch.model === undefined ? existing.model : nullableText(patch.model),
+      patch.effort === undefined ? existing.effort : nullableText(patch.effort),
       patch.attachedDir === undefined
         ? existing.attachedDir
         : nullableText(patch.attachedDir),
@@ -3330,6 +3361,8 @@ const importCourseInput = (
     "name",
     "createdAt",
     "harness",
+    "model",
+    "effort",
     "topics",
     "unassignedDemos",
     "title",
@@ -3347,6 +3380,8 @@ const importCourseInput = (
     title,
     description: stringField(record, "description"),
     harnessId: stringField(record, "harness"),
+    model: stringField(record, "model"),
+    effort: stringField(record, "effort"),
     attachedDir: stringField(record, "workingDirectory"),
     status: "active",
     sourceName,

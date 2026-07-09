@@ -20,14 +20,19 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AppScaleControls } from "@/components/app-scale-controls";
 import { StudyRail, type RailTab } from "@/components/study-rail";
 import { Transcript } from "@/components/transcript";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, subscribeEvents } from "@/lib/api";
 import {
   ATTACHMENT_ACCEPT,
   attachmentKind,
@@ -107,6 +112,18 @@ function HarnessPicker({
 
   useEffect(() => load(), [load]);
 
+  useEffect(
+    () =>
+      subscribeEvents({
+        harnesses: (payload) => {
+          if (payload.courseId === courseId) {
+            setHarnesses(payload.harnesses);
+          }
+        },
+      }),
+    [courseId],
+  );
+
   const selected = harnesses.find((harness) => harness.selected);
 
   const choose = async (id: string) => {
@@ -116,6 +133,22 @@ function HarnessPicker({
     } catch (error) {
       toast.error(
         error instanceof ApiError ? error.message : "Couldn’t switch agent.",
+      );
+    }
+  };
+
+  const configure = async (config: {
+    model: string | null;
+    effort: string | null;
+  }) => {
+    try {
+      await api.setCourseAgentConfig(courseId, config);
+      load();
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Couldn’t update agent settings.",
       );
     }
   };
@@ -131,7 +164,7 @@ function HarnessPicker({
           <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
+      <DropdownMenuContent align="end" className="w-64">
         <DropdownMenuLabel>Teaching agent</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {harnesses.map((harness) => (
@@ -152,6 +185,72 @@ function HarnessPicker({
             </span>
           </DropdownMenuItem>
         ))}
+        {selected &&
+        (selected.models.length > 0 || selected.efforts.length > 0) ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Turn settings</DropdownMenuLabel>
+            {selected.models.length > 0 ? (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <span className="flex-1">Model</span>
+                  <span className="max-w-28 truncate text-xs text-muted-foreground">
+                    {selected.models.find(
+                      (model) => model.id === selected.selectedModel,
+                    )?.label ?? selected.selectedModel}
+                  </span>
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="w-52">
+                  <DropdownMenuRadioGroup value={selected.selectedModel ?? ""}>
+                    {selected.models.map((model) => (
+                      <DropdownMenuRadioItem
+                        key={model.id}
+                        value={model.id}
+                        onSelect={() =>
+                          void configure({
+                            model: model.id,
+                            effort: selected.selectedEffort,
+                          })
+                        }
+                      >
+                        {model.label}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            ) : null}
+            {selected.efforts.length > 0 ? (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <span className="flex-1">Effort</span>
+                  <span className="capitalize text-xs text-muted-foreground">
+                    {selected.selectedEffort}
+                  </span>
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  <DropdownMenuRadioGroup value={selected.selectedEffort ?? ""}>
+                    {selected.efforts.map((effort) => (
+                      <DropdownMenuRadioItem
+                        key={effort}
+                        value={effort}
+                        className="capitalize"
+                        onSelect={() =>
+                          void configure({
+                            model: selected.selectedModel,
+                            effort,
+                          })
+                        }
+                      >
+                        {effort}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            ) : null}
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

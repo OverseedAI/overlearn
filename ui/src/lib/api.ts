@@ -178,6 +178,8 @@ export const api = {
     title: string;
     description?: string;
     harnessId?: string;
+    model?: string;
+    effort?: string;
     attachedDir?: string;
     sourceName?: string;
   }) => post<CourseResource>("/api/courses", body),
@@ -252,6 +254,14 @@ export const api = {
     post<{ ok: true; harness: string; swapped: boolean }>(
       `/api/courses/${id}/harness`,
       { id: harnessId },
+    ),
+  setCourseAgentConfig: (
+    id: number,
+    body: { model?: string | null; effort?: string | null },
+  ) =>
+    post<{ ok: true; model: string | null; effort: string | null }>(
+      `/api/courses/${id}/agent-config`,
+      body,
     ),
   exportCourse: (id: number, includeTranscript: boolean) =>
     post<unknown>(`/api/courses/${id}/export`, { includeTranscript }),

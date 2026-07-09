@@ -756,6 +756,8 @@ for await (const line of input) {
       mcpServers: receivedMcpServers,
       parsedMcpServers: configuredMcpServers,
       sessionId,
+      codexConfig: process.env["CODEX_CONFIG"] ?? null,
+      anthropicModel: process.env["ANTHROPIC_MODEL"] ?? null,
     });
     respond(message.id, { sessionId });
     continue;

@@ -196,6 +196,8 @@ function NewCourseDialog({
   const [description, setDescription] = useState("");
   const [attachedDir, setAttachedDir] = useState("");
   const [harnessId, setHarnessId] = useState<string | undefined>(defaultHarness);
+  const [model, setModel] = useState<string>();
+  const [effort, setEffort] = useState<string>();
   const [harnesses, setHarnesses] = useState<HarnessSummary[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
@@ -217,6 +219,12 @@ function NewCourseDialog({
     };
   }, [open]);
 
+  const selectedHarness =
+    harnesses.find((harness) => harness.id === harnessId) ??
+    harnesses.find((harness) => harness.selected);
+  const selectedModel = model ?? selectedHarness?.defaultModel ?? undefined;
+  const selectedEffort = effort ?? selectedHarness?.defaultEffort ?? undefined;
+
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     const trimmedTitle = title.trim();
@@ -236,6 +244,12 @@ function NewCourseDialog({
       }
       if (harnessId !== undefined) {
         body.harnessId = harnessId;
+      }
+      if (selectedModel !== undefined) {
+        body.model = selectedModel;
+      }
+      if (selectedEffort !== undefined) {
+        body.effort = selectedEffort;
       }
       const course = await api.createCourse(body);
       onCreated(course);
@@ -282,9 +296,11 @@ function NewCourseDialog({
             <Label htmlFor="new-course-harness">Harness</Label>
             <Select
               value={harnessId ?? "__default__"}
-              onValueChange={(value) =>
-                setHarnessId(value === "__default__" ? undefined : value)
-              }
+              onValueChange={(value) => {
+                setHarnessId(value === "__default__" ? undefined : value);
+                setModel(undefined);
+                setEffort(undefined);
+              }}
             >
               <SelectTrigger id="new-course-harness" className="w-full">
                 <SelectValue />
@@ -299,6 +315,40 @@ function NewCourseDialog({
               </SelectContent>
             </Select>
           </div>
+          {selectedHarness && selectedHarness.models.length > 0 ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="new-course-model">Model</Label>
+              <Select value={selectedModel ?? ""} onValueChange={setModel}>
+                <SelectTrigger id="new-course-model" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {selectedHarness.models.map((option) => (
+                    <SelectItem key={option.id} value={option.id}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
+          {selectedHarness && selectedHarness.efforts.length > 0 ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="new-course-effort">Effort</Label>
+              <Select value={selectedEffort ?? ""} onValueChange={setEffort}>
+                <SelectTrigger id="new-course-effort" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {selectedHarness.efforts.map((option) => (
+                    <SelectItem key={option} value={option}>
+                      <span className="capitalize">{option}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
           <div className="space-y-1.5">
             <Label htmlFor="new-course-attached-dir">Attached folder</Label>
             <Input

@@ -53,6 +53,8 @@ type CourseResource = Readonly<{
   status: string;
   description?: string | null;
   harnessId?: string | null;
+  model?: string | null;
+  effort?: string | null;
   sourceName?: string | null;
 }>;
 
@@ -2669,6 +2671,195 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
+    "persists, validates, and applies course model and effort changes",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const fakeHarness = await withFakeHarnessPath();
+      const daemon = await start({
+        scenario: "normal",
+        extraEnv: {
+          PATH: fakeHarness.path,
+          OPENAI_API_KEY: "test-openai",
+          GEMINI_API_KEY: "test-gemini",
+        },
+      });
+      const sse = await createSseClient(daemon.url, daemon.token);
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Configured Agent Course",
+          harnessId: "codex",
+          model: "gpt-5.5",
+          effort: "high",
+        });
+        expect(course).toMatchObject({
+          harnessId: "codex",
+          model: "gpt-5.5",
+          effort: "high",
+        });
+
+        const harnessesResponse = await authFetch(
+          daemon,
+          `/api/harnesses?courseId=${course.id}`,
+        );
+        expect(harnessesResponse.status).toBe(200);
+        const harnesses = (await harnessesResponse.json()) as unknown;
+        expect(harnessById(harnesses, "codex")).toMatchObject({
+          models: [
+            { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+            { id: "gpt-5.5", label: "GPT-5.5" },
+          ],
+          efforts: ["low", "medium", "high"],
+          defaultModel: "gpt-5.6-sol",
+          defaultEffort: "medium",
+          selectedModel: "gpt-5.5",
+          selectedEffort: "high",
+        });
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "use the first config",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "first configured turn done",
+        );
+        const firstLogs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) => entries.some((entry) => entry["event"] === "session/new"),
+          "first configured session",
+        );
+        const firstSession = firstLogs.find(
+          (entry) => entry["event"] === "session/new",
+        );
+        const firstConfig = JSON.parse(
+          typeof firstSession?.["codexConfig"] === "string"
+            ? firstSession["codexConfig"]
+            : "{}",
+        ) as Record<string, unknown>;
+        expect(firstConfig).toMatchObject({
+          model: "gpt-5.5",
+          model_reasoning_effort: "high",
+        });
+        const firstPid = firstSession?.["pid"];
+
+        const update = await authFetch(
+          daemon,
+          `/api/courses/${course.id}/agent-config`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model: "gpt-5.6-sol", effort: "low" }),
+          },
+        );
+        expect(update.status).toBe(200);
+        await expect(update.json()).resolves.toEqual({
+          ok: true,
+          model: "gpt-5.6-sol",
+          effort: "low",
+        });
+        expect((await courseState(daemon, course.id))["course"]).toMatchObject({
+          model: "gpt-5.6-sol",
+          effort: "low",
+        });
+        if (typeof firstPid === "number") {
+          await waitForPidStopped(firstPid);
+        }
+
+        const invalid = await authFetch(
+          daemon,
+          `/api/courses/${course.id}/agent-config`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model: "unknown-model" }),
+          },
+        );
+        expect(invalid.status).toBe(400);
+        await expect(invalid.text()).resolves.toContain("Unknown model for codex");
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "use the updated config",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "second configured turn done",
+        );
+        const secondLogs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.filter((entry) => entry["event"] === "session/new").length >= 2,
+          "updated configured session",
+        );
+        const secondSession = secondLogs.filter(
+          (entry) => entry["event"] === "session/new",
+        )[1];
+        const secondConfig = JSON.parse(
+          typeof secondSession?.["codexConfig"] === "string"
+            ? secondSession["codexConfig"]
+            : "{}",
+        ) as Record<string, unknown>;
+        expect(secondConfig).toMatchObject({
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "low",
+        });
+
+        const unsupported = await createCourse(daemon, {
+          title: "Unsupported Config Course",
+          harnessId: "gemini",
+        });
+        const unsupportedHarnesses = (await (
+          await authFetch(daemon, `/api/harnesses?courseId=${unsupported.id}`)
+        ).json()) as unknown;
+        expect(harnessById(unsupportedHarnesses, "gemini")).toMatchObject({
+          models: [],
+          efforts: [],
+          defaultModel: null,
+          defaultEffort: null,
+          selectedModel: null,
+          selectedEffort: null,
+        });
+        const unsupportedUpdate = await authFetch(
+          daemon,
+          `/api/courses/${unsupported.id}/agent-config`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model: "gemini-anything" }),
+          },
+        );
+        expect(unsupportedUpdate.status).toBe(400);
+        await expect(unsupportedUpdate.text()).resolves.toContain(
+          "does not support model selection",
+        );
+      } finally {
+        sse.close();
+        await rm(fakeHarness.binDir, { force: true, recursive: true });
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
     "swaps active harnesses and runs a continuity greeting turn",
     async () => {
       if (!(await ensureLocalhost())) {
@@ -2934,6 +3125,20 @@ describe(`daemon contract (${runtime.name})`, () => {
         expect(response.status).toBe(409);
         await expect(response.text()).resolves.toContain(
           "Cannot change harness while a turn is running",
+        );
+
+        const configResponse = await authFetch(
+          daemon,
+          `/api/courses/${course.id}/agent-config`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model: "claude-opus-4-8" }),
+          },
+        );
+        expect(configResponse.status).toBe(409);
+        await expect(configResponse.text()).resolves.toContain(
+          "Cannot change model or effort while a turn is running",
         );
 
         const idleResponse = await authFetch(

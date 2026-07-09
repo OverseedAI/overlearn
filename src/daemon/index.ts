@@ -12,6 +12,7 @@ import packageJson from "../../package.json";
 import {
   getHarnessAdapterDefinition,
   listHarnessAdapters,
+  resolveHarnessAgentSelection,
   type HarnessCommand,
 } from "../adapter/registry";
 import type { AdapterDetection, HarnessAdapterId } from "../adapter/types";
@@ -279,6 +280,12 @@ type HarnessSummary = Readonly<{
   authenticated: boolean;
   version?: string;
   selected: boolean;
+  models: readonly Readonly<{ id: string; label: string }>[];
+  efforts: readonly string[];
+  defaultModel: string | null;
+  defaultEffort: string | null;
+  selectedModel: string | null;
+  selectedEffort: string | null;
   login: Readonly<{
     command: string;
     manual: boolean;
@@ -359,6 +366,8 @@ type CourseCreateInput = {
   title: string;
   description?: string | null;
   harnessId?: string | null;
+  model?: string | null;
+  effort?: string | null;
   attachedDir?: string | null;
   sourceName?: string | null;
   status?: StoreCourseStatus;
@@ -1066,6 +1075,8 @@ const courseResource = (course: Course): Record<string, unknown> => ({
   title: course.title,
   description: course.description,
   harnessId: course.harnessId,
+  model: course.model,
+  effort: course.effort,
   attachedDir: course.attachedDir,
   status: course.status,
   sourceName: course.sourceName,
@@ -1465,6 +1476,48 @@ const selectedHarnessId = (
   );
 };
 
+export type AgentConfigPatch = Readonly<{
+  model: string | null;
+  effort: string | null;
+}>;
+
+export const parseAgentConfigPatch = (
+  harnessId: HarnessAdapterId,
+  body: unknown,
+): AgentConfigPatch => {
+  if (!isRecord(body)) {
+    throw new Error("Agent config body must be an object.");
+  }
+
+  const definition = getHarnessAdapterDefinition(harnessId);
+  if (definition === undefined) {
+    throw new Error(`Unknown harness adapter: ${harnessId}`);
+  }
+
+  const model = optionalStringField(body, "model") ?? null;
+  const effort = optionalStringField(body, "effort") ?? null;
+  const models = definition.capabilities?.models ?? [];
+  const efforts = definition.capabilities?.efforts ?? [];
+
+  if (model !== null && !models.some((candidate) => candidate.id === model)) {
+    throw new Error(
+      models.length === 0
+        ? `Harness ${harnessId} does not support model selection.`
+        : `Unknown model for ${harnessId}: ${model}`,
+    );
+  }
+
+  if (effort !== null && !efforts.includes(effort)) {
+    throw new Error(
+      efforts.length === 0
+        ? `Harness ${harnessId} does not support effort selection.`
+        : `Unknown effort for ${harnessId}: ${effort}`,
+    );
+  }
+
+  return { model, effort };
+};
+
 const detectHarnesses = (): Map<string, AdapterDetection> => {
   const detections = new Map<string, AdapterDetection>();
 
@@ -1487,6 +1540,7 @@ const harnessSummaries = (
   }
 
   const selected = selectedHarnessId(store, courseId, env);
+  const course = courseId === undefined ? undefined : getCourse(store, courseId);
 
   return listHarnessAdapters().map((adapter) => {
     const definition = getHarnessAdapterDefinition(adapter.id);
@@ -1497,6 +1551,11 @@ const harnessSummaries = (
     if (definition === undefined) {
       throw new Error(`Missing harness adapter definition: ${adapter.id}`);
     }
+    const capabilities = definition.capabilities ?? {};
+    const selection = resolveHarnessAgentSelection(adapter.id, {
+      model: adapter.id === selected ? course?.model : null,
+      effort: adapter.id === selected ? course?.effort : null,
+    });
 
     return {
       id: adapter.id,
@@ -1505,6 +1564,12 @@ const harnessSummaries = (
       authenticated: detection.authenticated,
       ...(detection.version === undefined ? {} : { version: detection.version }),
       selected: adapter.id === selected,
+      models: capabilities.models ?? [],
+      efforts: capabilities.efforts ?? [],
+      defaultModel: capabilities.defaultModel ?? null,
+      defaultEffort: capabilities.defaultEffort ?? null,
+      selectedModel: selection.model ?? null,
+      selectedEffort: selection.effort ?? null,
       login: {
         command: formatCommand(definition.loginCommand),
         manual: definition.loginCommand.interactive,
@@ -2293,6 +2358,8 @@ export const runDaemon = async (
         const harnessId = getCourse(store, course.id)?.harnessId;
         return harnessId ?? getProfile(store).preferredHarness ?? undefined;
       },
+      getSelectedModel: () => getCourse(store, course.id)?.model,
+      getSelectedEffort: () => getCourse(store, course.id)?.effort,
       onAgentEvent,
       registerTeachingSession,
       unregisterTeachingSession,
@@ -2610,11 +2677,16 @@ export const runDaemon = async (
           const harnessId = optionalStringField(body, "harnessId");
           const attachedDir = optionalStringField(body, "attachedDir");
           const sourceName = optionalStringField(body, "sourceName");
+          const agentConfig = parseAgentConfigPatch(
+            (harnessId ?? selectedHarnessId(store, undefined, env)) as HarnessAdapterId,
+            body,
+          );
           const course = createCourse(store, {
             title: "New course",
             description: seed,
             status: "active",
             ...(harnessId === undefined ? {} : { harnessId }),
+            ...agentConfig,
             ...(attachedDir === undefined ? {} : { attachedDir }),
             ...(sourceName === undefined ? {} : { sourceName }),
           });
@@ -2649,6 +2721,10 @@ export const runDaemon = async (
         };
         const description = optionalStringField(body, "description");
         const harnessId = optionalStringField(body, "harnessId");
+        const agentConfig = parseAgentConfigPatch(
+          (harnessId ?? selectedHarnessId(store, undefined, env)) as HarnessAdapterId,
+          body,
+        );
         const attachedDir = optionalStringField(body, "attachedDir");
         const sourceName = optionalStringField(body, "sourceName");
 
@@ -2658,6 +2734,8 @@ export const runDaemon = async (
         if (harnessId !== undefined) {
           input.harnessId = harnessId;
         }
+        input.model = agentConfig.model;
+        input.effort = agentConfig.effort;
         if (attachedDir !== undefined) {
           input.attachedDir = attachedDir;
         }
@@ -3218,6 +3296,51 @@ export const runDaemon = async (
       }
     }
 
+    if (
+      action === "agent-config" &&
+      extra === undefined &&
+      request.method === "POST"
+    ) {
+      const currentRuntime = runtimes.get(courseId);
+      if (currentRuntime?.runningTurn === true) {
+        return textResponse(
+          "Cannot change model or effort while a turn is running. Try again after the agent stops.",
+          409,
+        );
+      }
+
+      try {
+        const harnessId = selectedHarnessId(store, courseId, env) as HarnessAdapterId;
+        const agentConfig = parseAgentConfigPatch(
+          harnessId,
+          await readJsonBody(request),
+        );
+        const patched = patchCourse(store, courseId, agentConfig);
+        if (currentRuntime !== undefined) {
+          currentRuntime.lastActivityAt = Date.now();
+          await currentRuntime.orchestrator.resetSession("agent-config-change");
+        }
+
+        const selection = resolveHarnessAgentSelection(harnessId, patched);
+        sseHub.broadcast("courses", coursesPayload());
+        sseHub.broadcast("harnesses", harnessesPayload(courseId, false));
+        if (currentRuntime !== undefined) {
+          broadcastSessions();
+        }
+
+        return jsonResponse({
+          ok: true,
+          model: selection.model ?? null,
+          effort: selection.effort ?? null,
+        });
+      } catch (error) {
+        return textResponse(
+          error instanceof Error ? error.message : "Invalid agent config.",
+          400,
+        );
+      }
+    }
+
     if (action === "harness" && extra === undefined && request.method === "POST") {
       const body = await readJsonBody(request);
       if (!isRecord(body)) {
@@ -3239,7 +3362,7 @@ export const runDaemon = async (
       }
 
       const previousHarnessId = selectedHarnessId(store, courseId, env);
-      patchCourse(store, courseId, { harnessId: id });
+      patchCourse(store, courseId, { harnessId: id, model: null, effort: null });
       if (currentRuntime !== undefined) {
         currentRuntime.harnessId = id;
         currentRuntime.lastActivityAt = Date.now();

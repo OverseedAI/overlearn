@@ -16,6 +16,7 @@ import {
   endSession,
   flattenTopicTree,
   getActiveFeynmanCheck,
+  getCourse,
   getProfile,
   getStorePath,
   importCourseFolder,
@@ -87,7 +88,8 @@ describe("store migrations", () => {
         .query("SELECT id, name FROM migrations ORDER BY id")
         .all();
       expect(migrations).toEqual([
-        { id: STORE_SCHEMA_VERSION, name: "store_schema_v5" },
+        { id: 5, name: "store_schema_v5" },
+        { id: STORE_SCHEMA_VERSION, name: "store_schema_v6_agent_config" },
       ]);
 
       expect(getProfile(store)).toMatchObject({
@@ -118,7 +120,7 @@ describe("store migrations", () => {
         .query("SELECT COUNT(*) AS count FROM migrations")
         .get() as { count: number };
 
-      expect(migrationCount.count).toBe(1);
+      expect(migrationCount.count).toBe(2);
       expect(listCourses(second)).toMatchObject([
         {
           id: course.id,
@@ -175,6 +177,38 @@ describe("store migrations", () => {
       await rm(dir, { force: true, recursive: true });
     }
   });
+
+  test("additively migrates v5 courses without losing data", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "overlearn-v5-migration-"));
+    const databasePath = join(dir, "store.sqlite");
+    const first = openStore({ databasePath });
+    const course = createCourse(first, { title: "Keep me", harnessId: "codex" });
+    first.db.exec(`
+      DELETE FROM migrations WHERE id = 6;
+      ALTER TABLE courses DROP COLUMN model;
+      ALTER TABLE courses DROP COLUMN effort;
+    `);
+    first.close();
+
+    const migrated = openStore({ databasePath });
+    try {
+      expect(getCourse(migrated, course.id)).toMatchObject({
+        title: "Keep me",
+        harnessId: "codex",
+        model: null,
+        effort: null,
+      });
+      expect(
+        migrated.db.query("SELECT id, name FROM migrations ORDER BY id").all(),
+      ).toEqual([
+        { id: 5, name: "store_schema_v5" },
+        { id: 6, name: "store_schema_v6_agent_config" },
+      ]);
+    } finally {
+      migrated.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
 });
 
 describe("store query API", () => {
@@ -198,9 +232,18 @@ describe("store query API", () => {
         description: "Mental math",
         status: "active",
         harnessId: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
       });
       const activeCourse = patchCourse(store, course.id, { description: "Mental math." });
       expect(activeCourse.status).toBe("active");
+      expect(activeCourse).toMatchObject({
+        model: "gpt-5.6-sol",
+        effort: "high",
+      });
+      expect(
+        patchCourse(store, course.id, { model: null, effort: "low" }),
+      ).toMatchObject({ model: null, effort: "low" });
 
       const firstTopic = upsertTopic(store, course.id, {
         path: "finance/rule-of-72",

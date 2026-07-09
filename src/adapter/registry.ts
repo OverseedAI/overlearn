@@ -28,10 +28,33 @@ export type HarnessLoginCommand = HarnessCommand &
     note: string;
   }>;
 
+export type HarnessModel = Readonly<{
+  id: string;
+  label: string;
+}>;
+
+export type HarnessCapabilities = Readonly<{
+  models?: readonly HarnessModel[];
+  efforts?: readonly string[];
+  defaultModel?: string;
+  defaultEffort?: string;
+}>;
+
+export type HarnessAgentSelection = Readonly<{
+  model?: string | null | undefined;
+  effort?: string | null | undefined;
+}>;
+
+export type ResolvedHarnessAgentSelection = Readonly<{
+  model?: string;
+  effort?: string;
+}>;
+
 export type HarnessAdapterDefinition = AcpAdapterDefinition &
   Readonly<{
     install: HarnessInstallGuidance;
     loginCommand: HarnessLoginCommand;
+    capabilities?: HarnessCapabilities;
   }>;
 
 const userHome = (env: Env): string => resolve(env["HOME"] ?? homedir());
@@ -94,6 +117,13 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
       env: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
       paths: claudeAuthPaths,
     },
+    capabilities: {
+      models: [
+        { id: "claude-opus-4-8", label: "Claude Opus 4.8" },
+        { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
+      ],
+      defaultModel: "claude-sonnet-5",
+    },
   },
   {
     id: "codex",
@@ -121,6 +151,15 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
       env: ["OPENAI_API_KEY"],
       paths: codexAuthPaths,
     },
+    capabilities: {
+      models: [
+        { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+        { id: "gpt-5.5", label: "GPT-5.5" },
+      ],
+      efforts: ["low", "medium", "high"],
+      defaultModel: "gpt-5.6-sol",
+      defaultEffort: "medium",
+    },
   },
   {
     id: "gemini",
@@ -143,8 +182,105 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
       env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
       paths: geminiAuthPaths,
     },
+    capabilities: {},
   },
 ];
+
+const availableModel = (
+  capabilities: HarnessCapabilities,
+  model: string | null | undefined,
+): string | undefined => {
+  const models = capabilities.models ?? [];
+  const selected = models.find((candidate) => candidate.id === model)?.id;
+
+  return (
+    selected ??
+    models.find((candidate) => candidate.id === capabilities.defaultModel)?.id
+  );
+};
+
+const availableEffort = (
+  capabilities: HarnessCapabilities,
+  effort: string | null | undefined,
+): string | undefined => {
+  const efforts = capabilities.efforts ?? [];
+
+  return efforts.includes(effort ?? "")
+    ? (effort ?? undefined)
+    : efforts.find((candidate) => candidate === capabilities.defaultEffort);
+};
+
+export const resolveHarnessAgentSelection = (
+  id: HarnessAdapterId,
+  selection: HarnessAgentSelection = {},
+): ResolvedHarnessAgentSelection => {
+  const capabilities = getHarnessAdapterDefinition(id)?.capabilities ?? {};
+  const model = availableModel(capabilities, selection.model);
+  const effort = availableEffort(capabilities, selection.effort);
+
+  return {
+    ...(model === undefined ? {} : { model }),
+    ...(effort === undefined ? {} : { effort }),
+  };
+};
+
+const parseCodexConfig = (value: string | undefined): Record<string, unknown> => {
+  if (value === undefined || value.trim().length === 0) {
+    return {};
+  }
+
+  const parsed = JSON.parse(value) as unknown;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("CODEX_CONFIG must be a JSON object.");
+  }
+
+  return parsed as Record<string, unknown>;
+};
+
+export const harnessAgentSpawnOverride = (
+  id: HarnessAdapterId,
+  selection: HarnessAgentSelection = {},
+  env: Env = process.env,
+): HarnessAdapterRegistryOverride => {
+  const capabilities = getHarnessAdapterDefinition(id)?.capabilities ?? {};
+  const selectedModel = capabilities.models?.find(
+    (candidate) => candidate.id === selection.model,
+  )?.id;
+  const selectedEffort = capabilities.efforts?.find(
+    (candidate) => candidate === selection.effort,
+  );
+
+  if (selectedModel === undefined && selectedEffort === undefined) {
+    return {};
+  }
+
+  if (id === "codex") {
+    // TODO(verify): confirm codex-acp honors CODEX_CONFIG (model /
+    // model_reasoning_effort) against the real bridge; mechanism centralized
+    // here for easy correction.
+    return {
+      env: {
+        CODEX_CONFIG: JSON.stringify({
+          ...parseCodexConfig(env["CODEX_CONFIG"]),
+          ...(selectedModel === undefined
+            ? {}
+            : { model: selectedModel }),
+          ...(selectedEffort === undefined
+            ? {}
+            : { model_reasoning_effort: selectedEffort }),
+        }),
+      },
+    };
+  }
+
+  if (id === "claude-code" && selectedModel !== undefined) {
+    // TODO(verify): confirm claude-agent-acp honors ANTHROPIC_MODEL against the
+    // real bridge; mechanism centralized here for easy correction.
+    return { env: { ANTHROPIC_MODEL: selectedModel } };
+  }
+
+  return {};
+};
 
 export const listHarnessAdapters = (
   overrides: Readonly<

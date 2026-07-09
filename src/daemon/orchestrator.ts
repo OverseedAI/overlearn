@@ -1,6 +1,9 @@
 import { resolve } from "node:path";
 
-import { getHarnessAdapter } from "../adapter/registry";
+import {
+  getHarnessAdapter,
+  harnessAgentSpawnOverride,
+} from "../adapter/registry";
 import type {
   AgentEvent,
   HarnessAdapter,
@@ -129,6 +132,8 @@ type CreateDaemonTurnOrchestratorOptions = Readonly<{
   env?: Env;
   adapter?: HarnessAdapter;
   getHarnessId?: () => string | undefined;
+  getSelectedModel?: () => string | null | undefined;
+  getSelectedEffort?: () => string | null | undefined;
   timeoutMs?: number;
   onAgentEvent: (payload: AgentStreamPayload) => void;
   registerTeachingSession: (
@@ -285,6 +290,8 @@ const maybeCommandOverride = (
 export const resolveHarnessAdapter = (
   env: Env = process.env,
   courseHarnessId?: string,
+  selectedModel?: string | null,
+  selectedEffort?: string | null,
 ): HarnessAdapter => {
   const id = (courseHarnessId ??
     env["OVERLEARN_HARNESS"] ??
@@ -294,8 +301,17 @@ export const resolveHarnessAdapter = (
     env["OVERLEARN_HARNESS_REQUEST_TIMEOUT_MS"],
     "OVERLEARN_HARNESS_REQUEST_TIMEOUT_MS",
   );
+  const agentOverride = harnessAgentSpawnOverride(
+    id,
+    { model: selectedModel, effort: selectedEffort },
+    env,
+  );
   const adapter = getHarnessAdapter(id, {
-    env: nestedSessionEnvOverride(),
+    env: {
+      ...nestedSessionEnvOverride(),
+      ...(agentOverride.env ?? {}),
+    },
+    ...(agentOverride.args === undefined ? {} : { args: agentOverride.args }),
     ...(commandOverride === undefined ? {} : commandOverride),
     ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
   });
@@ -678,7 +694,13 @@ export const createDaemonTurnOrchestrator = (
     }
 
     const adapter =
-      options.adapter ?? resolveHarnessAdapter(env, options.getHarnessId?.());
+      options.adapter ??
+      resolveHarnessAdapter(
+        env,
+        options.getHarnessId?.(),
+        options.getSelectedModel?.(),
+        options.getSelectedEffort?.(),
+      );
     const teachingSession = options.registerTeachingSession({
       courseId: options.courseId,
       harnessId: adapter.id,

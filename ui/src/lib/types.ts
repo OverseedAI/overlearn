@@ -18,6 +18,8 @@ export type CourseResource = {
   title: string;
   description: string | null;
   harnessId: string | null;
+  model: string | null;
+  effort: string | null;
   attachedDir: string | null;
   status: CourseStatus;
   sourceName: string | null;
@@ -49,6 +51,12 @@ export type HarnessSummary = {
   authenticated: boolean;
   version?: string;
   selected: boolean;
+  models: { id: string; label: string }[];
+  efforts: string[];
+  defaultModel: string | null;
+  defaultEffort: string | null;
+  selectedModel: string | null;
+  selectedEffort: string | null;
   login: { command: string; manual: boolean; note: string };
   install: { command: string; docsUrl: string };
 };

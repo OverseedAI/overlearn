@@ -198,6 +198,8 @@ describe("course bundle export/import", () => {
         title: "Rule of 72",
         description: "Mental compound-interest math.",
         harnessId: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
         attachedDir: "/tmp/source",
         status: "active",
         sourceName: "rule-of-72",

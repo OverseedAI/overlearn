@@ -7,6 +7,7 @@ import {
   daemonMetadataPath,
   expireIdleSessions,
   isLegalOnboardingTransition,
+  parseAgentConfigPatch,
   parseMessageTurnEvent,
   resolveSessionIdleTtlMs,
 } from "./index";
@@ -41,6 +42,38 @@ const testRuntime = (
 });
 
 describe("app daemon helpers", () => {
+  test("validates course agent config against harness capabilities", () => {
+    expect(
+      parseAgentConfigPatch("codex", {
+        model: "gpt-5.6-sol",
+        effort: "high",
+      }),
+    ).toEqual({ model: "gpt-5.6-sol", effort: "high" });
+    expect(parseAgentConfigPatch("codex", {})).toEqual({
+      model: null,
+      effort: null,
+    });
+    expect(() =>
+      parseAgentConfigPatch("codex", { model: "not-a-model" }),
+    ).toThrow("Unknown model for codex: not-a-model");
+    expect(() =>
+      parseAgentConfigPatch("codex", { effort: "extreme" }),
+    ).toThrow("Unknown effort for codex: extreme");
+  });
+
+  test("uses safe empty defaults for harnesses without agent config support", () => {
+    expect(parseAgentConfigPatch("gemini", {})).toEqual({
+      model: null,
+      effort: null,
+    });
+    expect(() =>
+      parseAgentConfigPatch("gemini", { model: "gemini-anything" }),
+    ).toThrow("Harness gemini does not support model selection.");
+    expect(() =>
+      parseAgentConfigPatch("gemini", { effort: "high" }),
+    ).toThrow("Harness gemini does not support effort selection.");
+  });
+
   test("validates submit attachments while preserving the learner text", () => {
     const data = Buffer.from("image bytes").toString("base64");
 

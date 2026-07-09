@@ -65,6 +65,8 @@ type BundleCourse = Readonly<{
   description: string | null;
   status: CourseStatus;
   harnessId: string | null;
+  model: string | null;
+  effort: string | null;
   attachedDir: string | null;
   sourceName: string | null;
   manifestExtra: JsonRecord;
@@ -367,6 +369,8 @@ const courseForManifest = (course: Course): BundleCourse => ({
   description: course.description,
   status: course.status,
   harnessId: course.harnessId,
+  model: course.model,
+  effort: course.effort,
   attachedDir: course.attachedDir,
   sourceName: course.sourceName,
   manifestExtra: course.manifestExtra,
@@ -631,6 +635,8 @@ const parseBundleCourse = (value: unknown): CourseInput => {
     description: optionalStringValue(value, "description"),
     status: parseCourseStatus(value["status"]),
     harnessId: optionalStringValue(value, "harnessId"),
+    model: optionalStringValue(value, "model"),
+    effort: optionalStringValue(value, "effort"),
     attachedDir: optionalStringValue(value, "attachedDir"),
     sourceName: optionalStringValue(value, "sourceName"),
     manifestExtra: jsonRecord(value["manifestExtra"]),
