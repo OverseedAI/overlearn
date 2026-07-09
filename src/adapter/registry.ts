@@ -45,6 +45,12 @@ export type HarnessAgentSelection = Readonly<{
   effort?: string | null | undefined;
 }>;
 
+export type ManagedBridgeDefinition = Readonly<{
+  package: string;
+  version: string;
+  bin: string;
+}>;
+
 export type ResolvedHarnessAgentSelection = Readonly<{
   model?: string;
   effort?: string;
@@ -54,6 +60,7 @@ export type HarnessAdapterDefinition = AcpAdapterDefinition &
   Readonly<{
     install: HarnessInstallGuidance;
     loginCommand: HarnessLoginCommand;
+    managedBridge?: ManagedBridgeDefinition;
     capabilities?: HarnessCapabilities;
   }>;
 
@@ -97,14 +104,14 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
     commandFallbacks: ["claude-code-acp"],
     args: [],
     versionArgs: ["--version"],
+    managedBridge: {
+      package: "@agentclientprotocol/claude-agent-acp",
+      version: "0.55.0",
+      bin: "claude-agent-acp",
+    },
     install: {
       command: "npm",
-      args: [
-        "install",
-        "-g",
-        "@anthropic-ai/claude-code",
-        "@agentclientprotocol/claude-agent-acp",
-      ],
+      args: ["install", "-g", "@anthropic-ai/claude-code"],
       docsUrl: "https://docs.anthropic.com/en/docs/claude-code/setup",
     },
     loginCommand: {
@@ -131,14 +138,14 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
     command: "codex-acp",
     args: [],
     versionArgs: ["--version"],
+    managedBridge: {
+      package: "@agentclientprotocol/codex-acp",
+      version: "1.1.0",
+      bin: "codex-acp",
+    },
     install: {
       command: "npm",
-      args: [
-        "install",
-        "-g",
-        "@openai/codex",
-        "@agentclientprotocol/codex-acp",
-      ],
+      args: ["install", "-g", "@openai/codex"],
       docsUrl: "https://developers.openai.com/codex/cli/",
     },
     loginCommand: {

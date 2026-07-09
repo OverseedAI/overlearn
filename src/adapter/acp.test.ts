@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,7 @@ import {
 import {
   buildAcpPromptBlocks,
   createAcpHarnessAdapter,
+  resolveInstalledCommandLine,
   type AcpAdapterDefinition,
 } from "./acp";
 import { evaluatePermissionRequest } from "./permissions";
@@ -170,6 +171,43 @@ afterEach(async () => {
 });
 
 describe("ACP harness adapter detection", () => {
+  test("resolves override before managed bridge before PATH", async () => {
+    const directory = await createTempDir();
+    tempDirs.push(directory);
+    const pathBridge = join(directory, "fake-path-bridge");
+    const overrideBridge = join(directory, "fake-override-bridge");
+    const managedBridge = join(directory, "fake-managed-bridge.js");
+    await Promise.all(
+      [pathBridge, overrideBridge].map(async (path) => {
+        await writeFile(path, "#!/bin/sh\nexit 0\n", "utf8");
+        await chmod(path, 0o755);
+      }),
+    );
+    await writeFile(managedBridge, "process.exit(0);\n", "utf8");
+    const definition: AcpAdapterDefinition = {
+      id: "fake-resolution",
+      name: "Fake resolution",
+      command: "fake-path-bridge",
+      args: [],
+    };
+    const env = { PATH: directory };
+    const managed = [process.execPath, managedBridge];
+
+    expect(resolveInstalledCommandLine(definition, {}, env)).toEqual([
+      "fake-path-bridge",
+    ]);
+    expect(
+      resolveInstalledCommandLine(definition, { managedCommand: managed }, env),
+    ).toEqual(managed);
+    expect(
+      resolveInstalledCommandLine(
+        definition,
+        { command: overrideBridge, managedCommand: managed },
+        env,
+      ),
+    ).toEqual([overrideBridge]);
+  });
+
   test("reports a missing binary without attempting auth", () => {
     const adapter = createAcpHarnessAdapter(
       {

@@ -63,8 +63,17 @@ function ProfileSection() {
 }
 
 function AgentSection() {
-  const { harnesses, loading, load, loggingInId, select, login, selectedId } =
-    useHarnesses();
+  const {
+    harnesses,
+    loading,
+    load,
+    loggingInId,
+    retryingBridgeId,
+    select,
+    login,
+    retryBridge,
+    selectedId,
+  } = useHarnesses();
 
   return (
     <section>
@@ -98,8 +107,10 @@ function AgentSection() {
               idPrefix="harness"
               selected={selectedId === harness.id}
               loggingIn={loggingInId === harness.id}
+              retryingBridge={retryingBridgeId === harness.id}
               onSelect={() => void select(harness.id)}
               onLogin={() => void login(harness.id)}
+              onRetryBridge={() => void retryBridge(harness.id)}
             />
           </div>
         ))}

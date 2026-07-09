@@ -1,6 +1,20 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   canBindLocalhost,
@@ -11,6 +25,7 @@ import {
   harnessPayloadHasSelected,
   isRecord,
   promptText,
+  sleep,
   submitCourseDone,
   submitCourseMessage,
   waitForLogEntries,
@@ -91,6 +106,124 @@ const withFakeHarnessPath = async (): Promise<
       : `${binDir}:${existingPath}`;
 
   return { binDir, path };
+};
+
+const createFakeBridgeRegistry = async (): Promise<
+  Readonly<{
+    url: string;
+    requests: string[];
+    close: () => Promise<void>;
+  }>
+> => {
+  const root = await mkdtemp(join(tmpdir(), "overlearn-contract-registry-"));
+  const packageDirectory = join(root, "package");
+  const archive = join(root, "bridge.tgz");
+  const fakeAgent = fileURLToPath(
+    new URL("../fixtures/fake-acp-agent.ts", import.meta.url),
+  );
+  await mkdir(join(packageDirectory, "dist"), { recursive: true });
+  await writeFile(
+    join(packageDirectory, "package.json"),
+    JSON.stringify({
+      name: "fake-managed-bridge",
+      version: "1.0.0",
+      type: "module",
+      bin: {
+        "claude-agent-acp": "dist/index.js",
+        "codex-acp": "dist/index.js",
+      },
+    }),
+    "utf8",
+  );
+  await writeFile(
+    join(packageDirectory, "dist", "index.js"),
+    [
+      "import { spawn } from 'node:child_process';",
+      "if (process.argv.includes('--version')) {",
+      "  console.log('fake-managed-bridge 9.9.9');",
+      "} else {",
+      "  const runtime = process.env.FAKE_MANAGED_BRIDGE_RUNTIME;",
+      "  if (!runtime) throw new Error('Missing fake managed bridge runtime.');",
+      `  const child = spawn(runtime, [${JSON.stringify(fakeAgent)}], { stdio: 'inherit', env: process.env });`,
+      "  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));",
+      "  process.exitCode = await new Promise((resolve) => child.once('exit', (code) => resolve(code ?? 1)));",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const tar = Bun.spawn(["tar", "-czf", archive, "-C", root, "package"], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [tarExit, tarError] = await Promise.all([
+    tar.exited,
+    new Response(tar.stderr).text(),
+  ]);
+  if (tarExit !== 0) {
+    throw new Error(`Could not build fake bridge tarball: ${tarError}`);
+  }
+  const tarball = new Uint8Array(await Bun.file(archive).arrayBuffer());
+  const integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
+  const requests: string[] = [];
+
+  let baseUrl = "";
+  const server = createServer((request, response) => {
+    const path = request.url ?? "/";
+    requests.push(path);
+    if (path === "/bridge.tgz") {
+      response.writeHead(200, { "content-type": "application/octet-stream" });
+      response.end(tarball);
+      return;
+    }
+
+    const packageName = decodeURIComponent(path.slice(1));
+    const isClaude = packageName.endsWith("claude-agent-acp");
+    const version = isClaude ? "0.55.0" : "1.1.0";
+    const bin = isClaude ? "claude-agent-acp" : "codex-acp";
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        name: packageName,
+        "dist-tags": { latest: version },
+        time: { [version]: "2020-01-01T00:00:00.000Z" },
+        versions: {
+          [version]: {
+            name: packageName,
+            version,
+            bin: { [bin]: "dist/index.js" },
+            dependencies: {},
+            dist: { tarball: `${baseUrl}/bridge.tgz`, integrity },
+          },
+        },
+      }),
+    );
+  });
+  await new Promise<void>((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = server.address() as AddressInfo;
+  baseUrl = `http://127.0.0.1:${address.port}`;
+
+  return {
+    url: baseUrl,
+    requests,
+    close: async () => {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+      await rm(root, { force: true, recursive: true });
+    },
+  };
+};
+
+const managedBridgeTestPath = async (binDir: string): Promise<string> => {
+  const node = Bun.which("node");
+  if (node === null) {
+    throw new Error("Managed bridge contract requires system Node.");
+  }
+  await symlink(node, join(binDir, "node"));
+  return `${binDir}:/usr/bin:/bin`;
 };
 
 const start = async (
@@ -758,6 +891,186 @@ describe(`daemon contract (${runtime.name})`, () => {
         );
         expect(firstPrompt).toContain("Learning Overlearn");
         expect(firstPrompt).toContain("Teach me how the Overlearn tutorial works.");
+      } finally {
+        sse.close();
+        await rm(fakeHarness.binDir, { force: true, recursive: true });
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
+    "downloads a managed bridge on connect and uses it for a teaching turn",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const fakeHarness = await withFakeHarnessPath();
+      await Promise.all([
+        rm(join(fakeHarness.binDir, "codex-acp"), { force: true }),
+        rm(join(fakeHarness.binDir, "claude-code-acp"), { force: true }),
+      ]);
+      const harnessPath = await managedBridgeTestPath(fakeHarness.binDir);
+      const registry = await createFakeBridgeRegistry();
+      const daemon = await start({
+        scenario: "normal",
+        useHarnessOverride: false,
+        extraEnv: {
+          PATH: harnessPath,
+          OVERLEARN_DISABLE_MANAGED_BRIDGES: "0",
+          OVERLEARN_NPM_REGISTRY_URL: registry.url,
+          OVERLEARN_HARNESS: "codex",
+          OPENAI_API_KEY: "test-openai",
+          FAKE_MANAGED_BRIDGE_RUNTIME: process.execPath,
+        },
+      });
+      const sse = await createSseClient(daemon.url, daemon.token);
+
+      try {
+        const connect = await authFetch(daemon, "/api/onboarding", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ state: "connect-agent" }),
+        });
+        expect(connect.status).toBe(200);
+
+        let codexHarness: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const response = await authFetch(
+            daemon,
+            "/api/harnesses?scope=profile",
+          );
+          const harnesses = (await response.json()) as unknown;
+          codexHarness = harnessById(harnesses, "codex");
+          if (
+            isRecord(codexHarness["bridge"]) &&
+            codexHarness["bridge"]["state"] === "ready"
+          ) {
+            break;
+          }
+          await sleep(25);
+        }
+
+        expect(codexHarness).toMatchObject({
+          installed: true,
+          authenticated: true,
+          bridge: { state: "ready" },
+          install: { command: "npm install -g @openai/codex" },
+        });
+        expect(
+          await stat(
+            join(
+              daemon.dataDir,
+              "bridges",
+              "codex-acp",
+              "1.1.0",
+              "dist",
+              "index.js",
+            ),
+          ),
+        ).toBeDefined();
+        expect(
+          registry.requests.some((path) =>
+            decodeURIComponent(path).includes(
+              "@agentclientprotocol/codex-acp",
+            ),
+          ),
+        ).toBe(true);
+        expect(registry.requests).toContain("/bridge.tgz");
+
+        const course = await createCourse(daemon, {
+          title: "Managed bridge course",
+          harnessId: "codex",
+        });
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "teach through the managed bridge",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "managed bridge teaching turn done",
+        );
+      } finally {
+        sse.close();
+        await rm(fakeHarness.binDir, { force: true, recursive: true });
+        await registry.close();
+      }
+    },
+    20_000,
+  );
+
+  contractTest(
+    "surfaces managed bridge download failures with retry and PATH fallback guidance",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const fakeHarness = await withFakeHarnessPath();
+      await Promise.all([
+        rm(join(fakeHarness.binDir, "codex-acp"), { force: true }),
+        rm(join(fakeHarness.binDir, "claude-code-acp"), { force: true }),
+      ]);
+      const harnessPath = await managedBridgeTestPath(fakeHarness.binDir);
+      const unavailableRegistry = await createFakeBridgeRegistry();
+      const registryUrl = unavailableRegistry.url;
+      await unavailableRegistry.close();
+      const daemon = await start({
+        useHarnessOverride: false,
+        extraEnv: {
+          PATH: harnessPath,
+          OVERLEARN_DISABLE_MANAGED_BRIDGES: "0",
+          OVERLEARN_NPM_REGISTRY_URL: registryUrl,
+          OVERLEARN_HARNESS: "codex",
+        },
+      });
+      const sse = await createSseClient(daemon.url, daemon.token);
+
+      try {
+        const connect = await authFetch(daemon, "/api/onboarding", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ state: "connect-agent" }),
+        });
+        expect(connect.status).toBe(200);
+
+        await sse.waitFor(
+          "harnesses",
+          (data) => {
+            if (!isRecord(data) || !Array.isArray(data["harnesses"])) {
+              return false;
+            }
+            const codex = data["harnesses"].find(
+              (candidate) => isRecord(candidate) && candidate["id"] === "codex",
+            );
+            return (
+              isRecord(codex) &&
+              isRecord(codex["bridge"]) &&
+              codex["bridge"]["state"] === "error" &&
+              typeof codex["bridge"]["message"] === "string"
+            );
+          },
+          "managed bridge error summary",
+        );
+
+        const retry = await authFetch(daemon, "/api/harnesses/codex/bridge", {
+          method: "POST",
+        });
+        expect(retry.status).toBe(503);
+        const message = await retry.text();
+        expect(message).toContain("Could not prepare the Codex bridge");
+        expect(message).toContain("Retry");
+        expect(message).toContain(
+          "npm install -g @agentclientprotocol/codex-acp",
+        );
       } finally {
         sse.close();
         await rm(fakeHarness.binDir, { force: true, recursive: true });

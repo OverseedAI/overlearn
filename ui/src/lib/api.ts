@@ -168,6 +168,10 @@ export const api = {
     post<{ manual: boolean; spawned: boolean; command: string; note: string }>(
       `/api/harnesses/${encodeURIComponent(id)}/login`,
     ),
+  retryHarnessBridge: (id: string) =>
+    post<{ ready: boolean }>(
+      `/api/harnesses/${encodeURIComponent(id)}/bridge`,
+    ),
 
   // Courses — collection
   listCourses: (status?: CourseStatus) =>

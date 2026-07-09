@@ -90,8 +90,17 @@ function WelcomeStep() {
 
 function ConnectAgentStep() {
   const { refresh } = useProfile();
-  const { harnesses, loading, load, loggingInId, select, login, selectedId } =
-    useHarnesses();
+  const {
+    harnesses,
+    loading,
+    load,
+    loggingInId,
+    retryingBridgeId,
+    select,
+    login,
+    retryBridge,
+    selectedId,
+  } = useHarnesses();
   const [busy, setBusy] = useState(false);
 
   const goBack = useCallback(async () => {
@@ -156,8 +165,10 @@ function ConnectAgentStep() {
               idPrefix="onboarding-harness"
               selected={selectedId === harness.id}
               loggingIn={loggingInId === harness.id}
+              retryingBridge={retryingBridgeId === harness.id}
               onSelect={() => void select(harness.id)}
               onLogin={() => void login(harness.id)}
+              onRetryBridge={() => void retryBridge(harness.id)}
             />
           </Card>
         ))}

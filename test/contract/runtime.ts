@@ -52,6 +52,7 @@ export type StartedContractDaemon = Readonly<{
 type StartContractOptions = Readonly<{
   scenario?: string;
   extraEnv?: ContractExtraEnv;
+  useHarnessOverride?: boolean;
 }>;
 
 const repoRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
@@ -171,6 +172,7 @@ const contractEnv = (
   context: ContractEnvContext,
   scenario: string,
   extra: Record<string, string>,
+  useHarnessOverride: boolean,
 ): Record<string, string> => {
   const env: Record<string, string> = {};
 
@@ -181,11 +183,14 @@ const contractEnv = (
   }
 
   env["OVERLEARN_DATA_DIR"] = context.dataDir;
-  env["OVERLEARN_HARNESS_CMD"] = JSON.stringify([
-    process.execPath,
-    fixturePath,
-    scenario,
-  ]);
+  if (useHarnessOverride) {
+    env["OVERLEARN_HARNESS_CMD"] = JSON.stringify([
+      process.execPath,
+      fixturePath,
+      scenario,
+    ]);
+  }
+  env["OVERLEARN_DISABLE_MANAGED_BRIDGES"] = "1";
   env["FAKE_ACP_LOG"] = context.logPath;
   env["CLAUDECODE"] = "nested-agent";
   env["NO_COLOR"] = "1";
@@ -267,7 +272,12 @@ export const startContractDaemon = async (
     typeof options.extraEnv === "function"
       ? options.extraEnv(context)
       : (options.extraEnv ?? {});
-  const env = contractEnv(context, scenario, extra);
+  const env = contractEnv(
+    context,
+    scenario,
+    extra,
+    options.useHarnessOverride !== false,
+  );
 
   const child = Bun.spawn([...runtime.command, "daemon"], {
     env,

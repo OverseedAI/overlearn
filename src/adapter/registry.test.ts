@@ -7,6 +7,26 @@ import {
 } from "./registry";
 
 describe("harness agent configuration", () => {
+  test("pins app-managed bridges separately from harness install guidance", () => {
+    expect(getHarnessAdapterDefinition("claude-code")).toMatchObject({
+      managedBridge: {
+        package: "@agentclientprotocol/claude-agent-acp",
+        version: "0.55.0",
+        bin: "claude-agent-acp",
+      },
+      install: { args: ["install", "-g", "@anthropic-ai/claude-code"] },
+    });
+    expect(getHarnessAdapterDefinition("codex")).toMatchObject({
+      managedBridge: {
+        package: "@agentclientprotocol/codex-acp",
+        version: "1.1.0",
+        bin: "codex-acp",
+      },
+      install: { args: ["install", "-g", "@openai/codex"] },
+    });
+    expect(getHarnessAdapterDefinition("gemini")?.managedBridge).toBeUndefined();
+  });
+
   test("keeps selectable values centralized in harness capabilities", () => {
     expect(getHarnessAdapterDefinition("codex")?.capabilities).toEqual({
       models: [

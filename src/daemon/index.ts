@@ -9,8 +9,11 @@ import { dirname, join } from "node:path";
 import { spawn as spawnChildProcess } from "node:child_process";
 
 import packageJson from "../../package.json";
+import { detectAcpAuthentication } from "../adapter/acp";
 import {
+  getHarnessAdapter,
   getHarnessAdapterDefinition,
+  harnessAdapterDefinitions,
   listHarnessAdapters,
   resolveHarnessAgentSelection,
   type HarnessCommand,
@@ -78,7 +81,14 @@ import {
 } from "../mcp/teaching";
 import { renderMarkdown } from "./markdown";
 import {
+  createManagedBridgeService,
+  managedBridgeCommand,
+  type ManagedBridgeService,
+  type ManagedBridgeStatus,
+} from "./bridges";
+import {
   createDaemonTurnOrchestrator,
+  resolveHarnessAdapter,
   type ActiveTeachingSessionRegistration,
   type AgentStreamPayload,
   type DaemonTurnOrchestrator,
@@ -286,6 +296,11 @@ type HarnessSummary = Readonly<{
   defaultEffort: string | null;
   selectedModel: string | null;
   selectedEffort: string | null;
+  bridge?: Readonly<{
+    state: ManagedBridgeStatus["state"];
+    message?: string;
+    manualInstallCommand: string;
+  }>;
   login: Readonly<{
     command: string;
     manual: boolean;
@@ -1519,11 +1534,34 @@ export const parseAgentConfigPatch = (
   return { model, effort };
 };
 
-const detectHarnesses = (): Map<string, AdapterDetection> => {
+const commandInstalled = (command: string, env: Env): boolean => {
+  const path = env["PATH"];
+  return (path === undefined ? Bun.which(command) : Bun.which(command, { PATH: path })) !== null;
+};
+
+const detectHarnesses = (
+  env: Env,
+  bridges: ManagedBridgeService,
+): Map<string, AdapterDetection> => {
   const detections = new Map<string, AdapterDetection>();
 
-  for (const adapter of listHarnessAdapters()) {
-    detections.set(adapter.id, adapter.detect());
+  for (const definition of harnessAdapterDefinitions) {
+    const entry = bridges.entry(definition);
+    const managedCommand =
+      entry === undefined ? undefined : managedBridgeCommand(entry, env);
+    const adapter = getHarnessAdapter(definition.id, {
+      env,
+      ...(managedCommand === undefined ? {} : { managedCommand }),
+    });
+    const bridgeDetection = adapter?.detect();
+    const detection = {
+      installed: commandInstalled(definition.loginCommand.command, env),
+      authenticated: detectAcpAuthentication(definition, env),
+      ...(bridgeDetection?.version === undefined
+        ? {}
+        : { version: bridgeDetection.version }),
+    };
+    detections.set(definition.id, detection);
   }
 
   return detections;
@@ -1533,11 +1571,12 @@ const harnessSummaries = (
   store: Store,
   courseId: number | undefined,
   env: Env,
+  bridges: ManagedBridgeService,
   cache: { value?: Map<string, AdapterDetection> },
   refresh = false,
 ): readonly HarnessSummary[] => {
   if (cache.value === undefined || refresh) {
-    cache.value = detectHarnesses();
+    cache.value = detectHarnesses(env, bridges);
   }
 
   const selected = selectedHarnessId(store, courseId, env);
@@ -1557,6 +1596,20 @@ const harnessSummaries = (
       model: adapter.id === selected ? course?.model : null,
       effort: adapter.id === selected ? course?.effort : null,
     });
+    const bridgeStatus = bridges.status(definition);
+    const pathBridgeAvailable = [
+      definition.command,
+      ...(definition.commandFallbacks ?? []),
+    ].some((command) => commandInstalled(command, env));
+    const managedRuntimeMissing =
+      bridgeStatus?.state === "ready" &&
+      bridges.entry(definition) !== undefined &&
+      managedBridgeCommand(bridges.entry(definition) ?? "", env) === undefined &&
+      !pathBridgeAvailable;
+    const effectiveBridgeStatus =
+      pathBridgeAvailable && bridgeStatus?.state === "error"
+        ? ({ state: "ready" } as const)
+        : bridgeStatus;
 
     return {
       id: adapter.id,
@@ -1571,6 +1624,23 @@ const harnessSummaries = (
       defaultEffort: capabilities.defaultEffort ?? null,
       selectedModel: selection.model ?? null,
       selectedEffort: selection.effort ?? null,
+      ...(definition.managedBridge === undefined
+        ? {}
+        : {
+            bridge: {
+              ...(managedRuntimeMissing
+                ? {
+                    state: "error" as const,
+                    message:
+                      "The managed bridge needs Node.js, and no bridge was found on PATH.",
+                  }
+                : (effectiveBridgeStatus ?? { state: "downloading" as const })),
+              manualInstallCommand: formatCommand({
+                command: "npm",
+                args: ["install", "-g", definition.managedBridge.package],
+              }),
+            },
+          }),
       login: {
         command: formatCommand(definition.loginCommand),
         manual: definition.loginCommand.interactive,
@@ -1867,6 +1937,20 @@ const routeHarnessLoginRequest = (path: string): string | undefined => {
   return segments[2] === undefined ? undefined : decodeURIComponent(segments[2]);
 };
 
+const routeHarnessBridgeRequest = (path: string): string | undefined => {
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  if (
+    segments.length !== 4 ||
+    segments[0] !== "api" ||
+    segments[1] !== "harnesses" ||
+    segments[3] !== "bridge"
+  ) {
+    return undefined;
+  }
+
+  return segments[2] === undefined ? undefined : decodeURIComponent(segments[2]);
+};
+
 const demoResponse = (store: Store, courseId: number, file: string): Response => {
   const demo = listDemos(store, courseId).find((candidate) => demoFileKey(candidate) === file);
   if (demo === undefined) {
@@ -1910,6 +1994,19 @@ export const runDaemon = async (
   const activeTurnSnapshotByCourse = new Map<number, ActiveTeachingTurn>();
   const agentStreamReplay: AgentStreamPayload[] = [];
   const harnessDetectionCache: { value?: Map<string, AdapterDetection> } = {};
+  let publishBridgeStatus = (): void => {};
+  const managedBridgesDisabled =
+    env["OVERLEARN_DISABLE_MANAGED_BRIDGES"] === "1";
+  const bridges = createManagedBridgeService({
+    dataDir: store.dataDir,
+    ...(env["OVERLEARN_NPM_REGISTRY_URL"] === undefined
+      ? {}
+      : { registryUrl: env["OVERLEARN_NPM_REGISTRY_URL"] }),
+    onStatus: () => {
+      delete harnessDetectionCache.value;
+      publishBridgeStatus();
+    },
+  });
   const harnessLoginSpawner =
     options.harnessLoginSpawner ?? defaultHarnessLoginSpawner;
   const allowedCorsOrigins = corsAllowedOrigins(env);
@@ -2012,7 +2109,14 @@ export const runDaemon = async (
     refresh = false,
   ): HarnessesPayload => ({
     ...(courseId === undefined ? { scope: "profile" as const } : { courseId }),
-    harnesses: harnessSummaries(store, courseId, env, harnessDetectionCache, refresh),
+    harnesses: harnessSummaries(
+      store,
+      courseId,
+      env,
+      bridges,
+      harnessDetectionCache,
+      refresh,
+    ),
     switched,
   });
 
@@ -2022,6 +2126,31 @@ export const runDaemon = async (
     coursesPayload,
     sessionsPayload,
   );
+
+  publishBridgeStatus = () => {
+    sseHub.broadcast("harnesses", harnessesPayload(undefined, false, true));
+    for (const courseId of runtimes.keys()) {
+      sseHub.broadcast("harnesses", harnessesPayload(courseId, false, true));
+    }
+  };
+
+  const startManagedBridgeEnsures = (): void => {
+    if (
+      managedBridgesDisabled ||
+      env["OVERLEARN_HARNESS_CMD"] !== undefined
+    ) {
+      return;
+    }
+
+    for (const definition of harnessAdapterDefinitions) {
+      if (
+        definition.managedBridge !== undefined &&
+        commandInstalled(definition.loginCommand.command, env)
+      ) {
+        void bridges.ensure(definition).catch(() => undefined);
+      }
+    }
+  };
 
   const sweepIdleSessions = async (): Promise<void> => {
     if (shuttingDown || sweepingIdleSessions) {
@@ -2357,6 +2486,73 @@ export const runDaemon = async (
       cwd: store.dataDir,
       mcpBaseUrl,
       env,
+      resolveAdapter: async () => {
+        const harnessId = selectedHarnessId(
+          store,
+          course.id,
+          env,
+        ) as HarnessAdapterId;
+        const currentCourse = getCourse(store, course.id);
+        const definition = getHarnessAdapterDefinition(harnessId);
+        if (
+          definition === undefined ||
+          definition.managedBridge === undefined ||
+          managedBridgesDisabled ||
+          env["OVERLEARN_HARNESS_CMD"] !== undefined
+        ) {
+          return resolveHarnessAdapter(
+            env,
+            harnessId,
+            currentCourse?.model,
+            currentCourse?.effort,
+          );
+        }
+
+        try {
+          const entry = await bridges.ensure(definition);
+          const managedCommand =
+            entry === undefined ? undefined : managedBridgeCommand(entry, env);
+          if (managedCommand !== undefined) {
+            return resolveHarnessAdapter(
+              env,
+              harnessId,
+              currentCourse?.model,
+              currentCourse?.effort,
+              managedCommand,
+            );
+          }
+
+          const fallback = resolveHarnessAdapter(
+            env,
+            harnessId,
+            currentCourse?.model,
+            currentCourse?.effort,
+          );
+          if (fallback.detect().installed) {
+            return fallback;
+          }
+          throw new Error(
+            "The managed bridge needs Node.js, and no bridge was found on PATH.",
+          );
+        } catch (error) {
+          const fallback = resolveHarnessAdapter(
+            env,
+            harnessId,
+            currentCourse?.model,
+            currentCourse?.effort,
+          );
+          if (fallback.detect().installed) {
+            return fallback;
+          }
+
+          const message =
+            error instanceof Error ? error.message : "Managed bridge download failed.";
+          throw new Error(
+            `Could not prepare the ${definition.name} bridge: ${message} Retry from the agent card, or install ${definition.managedBridge.package} on PATH manually.`,
+            { cause: error },
+          );
+        }
+      },
       getHarnessId: () => {
         const harnessId = getCourse(store, course.id)?.harnessId;
         return harnessId ?? getProfile(store).preferredHarness ?? undefined;
@@ -2857,6 +3053,9 @@ export const runDaemon = async (
     }
 
     const profile = patchProfileResource({ onboardingState: state });
+    if (state === "connect-agent") {
+      startManagedBridgeEnsures();
+    }
     return jsonResponse({ state: profile.onboardingState, profile });
   };
 
@@ -2912,7 +3111,7 @@ export const runDaemon = async (
     };
   };
 
-  const handleHarnessLoginApi = (harnessId: string): Response => {
+  const handleHarnessLoginApi = async (harnessId: string): Promise<Response> => {
     const definition = getHarnessAdapterDefinition(harnessId as HarnessAdapterId);
     if (definition === undefined) {
       return textResponse(`Unknown harness adapter: ${harnessId}`, 404);
@@ -2922,11 +3121,29 @@ export const runDaemon = async (
       store,
       undefined,
       env,
+      bridges,
       harnessDetectionCache,
       true,
     ).filter((candidate) => candidate.id === definition.id);
     if (summary?.installed !== true) {
       return textResponse(`${definition.name} is not installed.`, 409);
+    }
+
+    if (
+      definition.managedBridge !== undefined &&
+      !managedBridgesDisabled &&
+      env["OVERLEARN_HARNESS_CMD"] === undefined
+    ) {
+      try {
+        await bridges.ensure(definition);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Managed bridge download failed.";
+        return textResponse(
+          `Could not prepare the ${definition.name} bridge: ${message} Retry, or run npm install -g ${definition.managedBridge.package} to put the bridge on PATH manually.`,
+          503,
+        );
+      }
     }
 
     const displayCommand = formatCommand(definition.loginCommand);
@@ -2976,6 +3193,30 @@ export const runDaemon = async (
       return textResponse(
         error instanceof Error ? error.message : "Harness login failed.",
         500,
+      );
+    }
+  };
+
+  const handleHarnessBridgeApi = async (
+    harnessId: string,
+  ): Promise<Response> => {
+    const definition = getHarnessAdapterDefinition(harnessId as HarnessAdapterId);
+    if (definition === undefined) {
+      return textResponse(`Unknown harness adapter: ${harnessId}`, 404);
+    }
+    if (definition.managedBridge === undefined) {
+      return textResponse(`${definition.name} has no managed bridge.`, 400);
+    }
+
+    try {
+      const entry = await bridges.ensure(definition);
+      return jsonResponse({ ready: entry !== undefined });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Managed bridge download failed.";
+      return textResponse(
+        `Could not prepare the ${definition.name} bridge: ${message} Retry, or run npm install -g ${definition.managedBridge.package} to put the bridge on PATH manually.`,
+        503,
       );
     }
   };
@@ -3552,10 +3793,16 @@ export const runDaemon = async (
 
     const harnessLoginId = routeHarnessLoginRequest(requestUrl.pathname);
     if (harnessLoginId !== undefined && method === "POST") {
-      return handleHarnessLoginApi(harnessLoginId);
+      return await handleHarnessLoginApi(harnessLoginId);
+    }
+
+    const harnessBridgeId = routeHarnessBridgeRequest(requestUrl.pathname);
+    if (harnessBridgeId !== undefined && method === "POST") {
+      return await handleHarnessBridgeApi(harnessBridgeId);
     }
 
     if (method === "GET" && requestUrl.pathname === "/api/harnesses") {
+      startManagedBridgeEnsures();
       const courseIdParam = requestUrl.searchParams.get("courseId");
       const scope = requestUrl.searchParams.get("scope");
       if (courseIdParam !== null && scope !== null) {
@@ -3579,6 +3826,7 @@ export const runDaemon = async (
             store,
             courseId,
             env,
+            bridges,
             harnessDetectionCache,
             requestUrl.searchParams.get("refresh") === "1",
           ),
@@ -3594,6 +3842,7 @@ export const runDaemon = async (
           store,
           undefined,
           env,
+          bridges,
           harnessDetectionCache,
           requestUrl.searchParams.get("refresh") === "1",
         ),

@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, subscribeEvents } from "@/lib/api";
 import { useProfile } from "@/lib/profile";
 import type { HarnessSummary } from "@/lib/types";
 
@@ -19,6 +19,7 @@ export function useHarnesses() {
   const [harnesses, setHarnesses] = useState<HarnessSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loggingInId, setLoggingInId] = useState<string>();
+  const [retryingBridgeId, setRetryingBridgeId] = useState<string>();
 
   const load = useCallback(async (refresh?: boolean) => {
     setLoading(true);
@@ -38,6 +39,18 @@ export function useHarnesses() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(
+    () =>
+      subscribeEvents({
+        harnesses: (payload) => {
+          if (payload.scope === "profile") {
+            setHarnesses(payload.harnesses);
+          }
+        },
+      }),
+    [],
+  );
 
   const select = useCallback(
     async (id: string) => {
@@ -74,7 +87,33 @@ export function useHarnesses() {
     profile?.preferredHarness ??
     harnesses.find((harness) => harness.selected && harness.installed)?.id;
 
-  return { harnesses, loading, load, loggingInId, select, login, selectedId };
+  const retryBridge = useCallback(
+    async (id: string) => {
+      setRetryingBridgeId(id);
+      try {
+        await api.retryHarnessBridge(id);
+        toast.success("Agent bridge is ready.");
+      } catch (cause) {
+        toast.error(errorMessage(cause));
+      } finally {
+        setRetryingBridgeId(undefined);
+        void load();
+      }
+    },
+    [load],
+  );
+
+  return {
+    harnesses,
+    loading,
+    load,
+    loggingInId,
+    retryingBridgeId,
+    select,
+    login,
+    retryBridge,
+    selectedId,
+  };
 }
 
 // Detection reports the raw first line of `--version` output (e.g.
@@ -141,15 +180,19 @@ export function HarnessItem({
   idPrefix,
   selected,
   loggingIn,
+  retryingBridge,
   onSelect,
   onLogin,
+  onRetryBridge,
 }: {
   harness: HarnessSummary;
   idPrefix: string;
   selected: boolean;
   loggingIn: boolean;
+  retryingBridge: boolean;
   onSelect: () => void;
   onLogin: () => void;
+  onRetryBridge: () => void;
 }) {
   if (!harness.installed) {
     return (
@@ -162,6 +205,21 @@ export function HarnessItem({
 
   const inputId = `${idPrefix}-${harness.id}`;
   const version = harnessVersion(harness.version);
+  const bridgeError = harness.bridge?.state === "error";
+  const bridgeDownloading = harness.bridge?.state === "downloading";
+
+  const copyBridgeInstall = async () => {
+    const command = harness.bridge?.manualInstallCommand;
+    if (command === undefined) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(command);
+      toast.success("Copied.");
+    } catch (cause) {
+      toast.error(errorMessage(cause));
+    }
+  };
 
   return (
     <>
@@ -188,7 +246,15 @@ export function HarnessItem({
           ) : null}
         </div>
         <div className="mt-1">
-          {harness.authenticated ? (
+          {bridgeError ? (
+            <Badge variant="secondary" className="bg-destructive/15 text-destructive">
+              Bridge unavailable
+            </Badge>
+          ) : bridgeDownloading ? (
+            <Badge variant="secondary" className="bg-warning/15 text-warning">
+              Preparing bridge…
+            </Badge>
+          ) : harness.authenticated ? (
             <Badge variant="secondary" className="bg-success/15 text-success">
               Ready
             </Badge>
@@ -198,13 +264,47 @@ export function HarnessItem({
             </Badge>
           )}
         </div>
+        {bridgeError && harness.bridge ? (
+          <div className="mt-2">
+            <p className="text-xs text-destructive">{harness.bridge.message}</p>
+            <div className="mt-1.5 flex items-center gap-1">
+              <code
+                className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 text-xs text-muted-foreground"
+                title={harness.bridge.manualInstallCommand}
+              >
+                {harness.bridge.manualInstallCommand}
+              </code>
+              <Button
+                type="button"
+                size="xs"
+                variant="ghost"
+                onClick={() => void copyBridgeInstall()}
+              >
+                Copy
+              </Button>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Manual fallback: put this bridge on PATH, then refresh.
+            </p>
+          </div>
+        ) : null}
       </div>
-      {!harness.authenticated ? (
+      {bridgeError ? (
         <Button
           type="button"
           size="sm"
           variant="secondary"
-          disabled={loggingIn}
+          disabled={retryingBridge}
+          onClick={onRetryBridge}
+        >
+          {retryingBridge ? "Retrying…" : "Retry"}
+        </Button>
+      ) : !harness.authenticated ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          disabled={loggingIn || bridgeDownloading}
           onClick={onLogin}
         >
           {loggingIn ? "Logging in…" : "Log in"}

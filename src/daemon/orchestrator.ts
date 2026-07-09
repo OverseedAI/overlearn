@@ -132,6 +132,7 @@ type CreateDaemonTurnOrchestratorOptions = Readonly<{
   mcpBaseUrl: string;
   env?: Env;
   adapter?: HarnessAdapter;
+  resolveAdapter?: () => Promise<HarnessAdapter>;
   getHarnessId?: () => string | undefined;
   getSelectedModel?: () => string | null | undefined;
   getSelectedEffort?: () => string | null | undefined;
@@ -293,6 +294,7 @@ export const resolveHarnessAdapter = (
   courseHarnessId?: string,
   selectedModel?: string | null,
   selectedEffort?: string | null,
+  managedCommand?: readonly string[],
 ): HarnessAdapter => {
   const id = (courseHarnessId ??
     env["OVERLEARN_HARNESS"] ??
@@ -313,6 +315,7 @@ export const resolveHarnessAdapter = (
       ...(agentOverride.env ?? {}),
     },
     ...(agentOverride.args === undefined ? {} : { args: agentOverride.args }),
+    ...(managedCommand === undefined ? {} : { managedCommand }),
     ...(commandOverride === undefined ? {} : commandOverride),
     ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
   });
@@ -709,12 +712,14 @@ export const createDaemonTurnOrchestrator = (
 
     const adapter =
       options.adapter ??
-      resolveHarnessAdapter(
-        env,
-        options.getHarnessId?.(),
-        options.getSelectedModel?.(),
-        options.getSelectedEffort?.(),
-      );
+      (options.resolveAdapter === undefined
+        ? resolveHarnessAdapter(
+            env,
+            options.getHarnessId?.(),
+            options.getSelectedModel?.(),
+            options.getSelectedEffort?.(),
+          )
+        : await options.resolveAdapter());
     const teachingSession = options.registerTeachingSession({
       courseId: options.courseId,
       harnessId: adapter.id,
