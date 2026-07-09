@@ -242,7 +242,9 @@ const inputSchemas: Record<TeachingToolName, McpJsonObject> = {
   ),
   append_lesson_note: objectSchema(
     {
-      markdown: stringSchema("Study note markdown to append to the topic journal."),
+      markdown: stringSchema(
+        "User-facing study note markdown to append to the topic journal. Address the person directly as \"you\"; do not write about \"the learner\" in third person.",
+      ),
       topicPath: stringSchema(
         "Optional topic path override for tangents. Defaults to the running turn's snapshot topic.",
       ),

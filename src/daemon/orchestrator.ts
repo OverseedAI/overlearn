@@ -451,6 +451,8 @@ export const buildTurnPrompt = (input: TurnPromptInput): string =>
     "",
     "The daemon owns the event loop for this course. Your durable interface is only the overlearn-teaching MCP server plus the conversation with the learner.",
     "Do not write course files directly. Use only the MCP tools and the conversation response; no sidecar callback commands are available.",
+    "Conversation responses and study notes are user-visible. Address the person directly as \"you\"; do not refer to them as \"the learner\" in user-facing prose.",
+    "Do not put internal planning, calibration notes, course-state summaries, or scratchpad reasoning in the conversation response. If your harness has a thinking/reasoning channel, put that material there; otherwise keep it private.",
     `Course id: ${input.courseId}`,
     `Course title: ${input.courseTitle}`,
     `Course description: ${input.courseDescription ?? "(none)"}`,

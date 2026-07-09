@@ -965,7 +965,7 @@ const applyMigrations = (db: Database): void => {
   );
   db.exec(migrationTableSql);
 
-  let appliedRows = db
+  const appliedRows = db
     .query("SELECT id FROM migrations ORDER BY id")
     .all() as readonly { id: number }[];
   let applied = new Set(appliedRows.map((row) => row.id));
@@ -988,7 +988,6 @@ const applyMigrations = (db: Database): void => {
     );
     wipeDatabase(db);
     db.exec(migrationTableSql);
-    appliedRows = [];
     applied = new Set();
   }
 

@@ -86,6 +86,7 @@ import {
   type TurnPositionContext,
   type TurnPositionTopic,
 } from "./orchestrator";
+import { splitLeadingLeakedThinking } from "./reasoning";
 import { createTutorialCourse } from "./tutorial";
 
 export type DaemonEndpoint = Readonly<{
@@ -218,6 +219,11 @@ type TranscriptEntry = TranscriptEntryBase &
       role: "learner" | "agent";
       text: string;
       kind?: "text";
+    }>
+    | Readonly<{
+      role: "agent";
+      kind: "thinking";
+      text: string;
     }>
     | Readonly<{
       role: "agent";
@@ -1247,6 +1253,15 @@ const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
     };
   }
 
+  if (entry.kind === "thinking") {
+    return {
+      ...base,
+      role: "agent",
+      kind: "thinking",
+      text: entry.content,
+    };
+  }
+
   if (entry.kind === "journal-note") {
     const markdown = payload["markdown"];
     return {
@@ -1840,13 +1855,6 @@ export const runDaemon = async (
     patch: ProfilePatchInput,
   ): ProfileResource => profileResource(patchProfile(store, patch), store.dataDir);
 
-  const statusForCourse = (courseId: number): UiStatusPayload =>
-    statuses.get(courseId) ?? {
-      courseId,
-      status: "waiting-for-agent",
-      hasSeenWait: true,
-    };
-
   const setStatus = (
     courseId: number,
     status: UiStatus,
@@ -2166,14 +2174,35 @@ export const runDaemon = async (
       return;
     }
 
-    const entry = appendUiTranscript(store, courseId, {
+    const split = splitLeadingLeakedThinking(pending.text);
+    const baseInput = {
       turn: pending.turn,
       ...(pending.topicId === undefined ? {} : { topicId: pending.topicId }),
-      role: "agent",
-      kind: "text",
-      content: pending.text,
-    });
-    sseHub.broadcast("message", { courseId, entry });
+      role: "agent" as const,
+    };
+
+    if (split.thinking.trim().length > 0) {
+      const thinkingEntry = appendUiTranscript(store, courseId, {
+        ...baseInput,
+        kind: "thinking",
+        content: split.thinking,
+        payload: {
+          role: "agent",
+          kind: "thinking",
+          text: split.thinking,
+        },
+      });
+      sseHub.broadcast("message", { courseId, entry: thinkingEntry });
+    }
+
+    if (split.text.trim().length > 0) {
+      const entry = appendUiTranscript(store, courseId, {
+        ...baseInput,
+        kind: "text",
+        content: split.text,
+      });
+      sseHub.broadcast("message", { courseId, entry });
+    }
   };
 
   const appendAgentEventTranscript = (payload: AgentStreamPayload): void => {

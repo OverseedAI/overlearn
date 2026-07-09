@@ -133,6 +133,11 @@ export type TranscriptEntry = TranscriptEntryBase &
     }
     | {
       role: "agent";
+      kind: "thinking";
+      text: string;
+    }
+    | {
+      role: "agent";
       kind: "demo";
       file: string;
       title?: string;

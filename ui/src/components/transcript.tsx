@@ -78,6 +78,22 @@ function ToolLine({ tool }: { tool: ToolActivity }) {
   );
 }
 
+function ThinkingBlock({ text }: { text: string }) {
+  return (
+    <Collapsible>
+      <CollapsibleTrigger className="group/thinking flex items-center gap-1 text-xs text-muted-foreground/80 italic">
+        <ChevronRight className="size-3 shrink-0 transition-transform group-data-[state=open]/thinking:rotate-90" />
+        Thinking…
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <p className="mt-1 border-l-2 pl-3 text-sm whitespace-pre-wrap text-muted-foreground italic">
+          {text}
+        </p>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 function TopicChangeDivider({ text }: { text: string }) {
   return (
     <div className="flex items-center gap-3 py-1 text-center text-xs text-muted-foreground/80">
@@ -174,17 +190,7 @@ export function LiveActivity({ activity }: { activity: AgentActivity }) {
     <EntryShell label="Agent">
       <div className="space-y-3">
         {activity.thinking.length > 0 ? (
-          <Collapsible>
-            <CollapsibleTrigger className="group/thinking flex items-center gap-1 text-xs text-muted-foreground/80 italic">
-              <ChevronRight className="size-3 shrink-0 transition-transform group-data-[state=open]/thinking:rotate-90" />
-              Thinking…
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <p className="mt-1 border-l-2 pl-3 text-sm whitespace-pre-wrap text-muted-foreground italic">
-                {activity.thinking}
-              </p>
-            </CollapsibleContent>
-          </Collapsible>
+          <ThinkingBlock text={activity.thinking} />
         ) : null}
         {activity.tools.length > 0 ? (
           <div className="space-y-1">
@@ -238,6 +244,14 @@ function Entry({
 
   if (kind === "topic-change" && entry.role === "system" && "text" in entry) {
     return <TopicChangeDivider text={entry.text} />;
+  }
+
+  if (kind === "thinking" && entry.role === "agent" && "text" in entry) {
+    return (
+      <EntryShell label="Agent">
+        <ThinkingBlock text={entry.text} />
+      </EntryShell>
+    );
   }
 
   if (kind === "tool-call" && entry.role === "system") {

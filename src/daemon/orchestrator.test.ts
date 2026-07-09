@@ -60,6 +60,8 @@ describe("daemon turn orchestration helpers", () => {
     expect(prompt).toContain("get_course_state");
     expect(prompt).toContain("Do not write course files directly");
     expect(prompt).toContain("no sidecar callback commands are available");
+    expect(prompt).toContain("Address the person directly as \"you\"");
+    expect(prompt).toContain("Do not put internal planning");
     expect(prompt).toContain("Course description: Money over time.");
     expect(prompt).toContain("## Position");
     expect(prompt).toContain("No current topic is selected");
