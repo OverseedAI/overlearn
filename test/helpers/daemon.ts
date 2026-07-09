@@ -158,7 +158,13 @@ export const canBindLocalhost = async (): Promise<boolean> => {
 
 export const createFakeHarnessPath = async (): Promise<string> => {
   const binDir = await mkdtemp(join(tmpdir(), "overlearn-harness-bin-"));
-  const commands = ["claude-code-acp", "codex-acp", "gemini"];
+  const commands = [
+    "claude",
+    "codex",
+    "claude-code-acp",
+    "codex-acp",
+    "gemini",
+  ];
 
   await Promise.all(
     commands.map(async (command) => {

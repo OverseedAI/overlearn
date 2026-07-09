@@ -114,6 +114,7 @@ export type AcpAdapterDefinition = Readonly<{
 export type AcpAdapterOverride = Readonly<{
   command?: string;
   args?: readonly string[];
+  managedCommand?: readonly string[];
   env?: Env;
   requestTimeoutMs?: number;
 }>;
@@ -1326,7 +1327,7 @@ const detectAuthenticated = (
 };
 
 const detectVersion = (
-  command: string,
+  commandLine: readonly string[],
   versionArgs: readonly string[] | undefined,
   env: Env,
 ): string | undefined => {
@@ -1336,7 +1337,7 @@ const detectVersion = (
 
   try {
     const result = Bun.spawnSync({
-      cmd: [command, ...versionArgs],
+      cmd: [...commandLine, ...versionArgs],
       env: mergeEnv(process.env, env),
       stdin: "ignore",
       stdout: "pipe",
@@ -1360,35 +1361,58 @@ const commandCandidates = (
     ? [override.command]
     : [definition.command, ...(definition.commandFallbacks ?? [])];
 
-const resolveInstalledCommand = (
+const commandExists = (
+  command: string,
+  env: Readonly<Record<string, string>>,
+): boolean =>
+  (env["PATH"] === undefined
+    ? Bun.which(command)
+    : Bun.which(command, { PATH: env["PATH"] })) !== null;
+
+export const resolveInstalledCommandLine = (
   definition: AcpAdapterDefinition,
   override: AcpAdapterOverride,
   env: Readonly<Record<string, string>>,
-): string | undefined =>
-  commandCandidates(definition, override).find((candidate) => {
-    const path =
-      env["PATH"] === undefined
-        ? Bun.which(candidate)
-        : Bun.which(candidate, { PATH: env["PATH"] });
+): readonly string[] | undefined => {
+  if (override.command !== undefined) {
+    return commandExists(override.command, env) ? [override.command] : undefined;
+  }
 
-    return path !== null;
-  });
+  const [managedExecutable] = override.managedCommand ?? [];
+  if (
+    managedExecutable !== undefined &&
+    commandExists(managedExecutable, env)
+  ) {
+    return override.managedCommand;
+  }
+
+  const pathCommand = commandCandidates(definition, override).find((candidate) =>
+    commandExists(candidate, env),
+  );
+
+  return pathCommand === undefined ? undefined : [pathCommand];
+};
+
+export const detectAcpAuthentication = (
+  definition: AcpAdapterDefinition,
+  env: Env = process.env,
+): boolean => detectAuthenticated(definition.auth, env);
 
 const detectAdapter = (
   definition: AcpAdapterDefinition,
   override: AcpAdapterOverride,
 ): AdapterDetection => {
   const env = mergeEnv(process.env, override.env ?? {});
-  const command = resolveInstalledCommand(definition, override, env);
+  const commandLine = resolveInstalledCommandLine(definition, override, env);
 
-  if (command === undefined) {
+  if (commandLine === undefined) {
     return {
       installed: false,
       authenticated: false,
     };
   }
 
-  const version = detectVersion(command, definition.versionArgs, env);
+  const version = detectVersion(commandLine, definition.versionArgs, env);
   const detection = {
     installed: true,
     authenticated: detectAuthenticated(definition.auth, env),
@@ -1425,9 +1449,13 @@ export const createAcpHarnessAdapter = (
       const requestTimeoutMs =
         override.requestTimeoutMs ?? defaultRequestTimeoutMs;
       const spawnEnv = mergeEnv(process.env, override.env ?? {});
+      const installedCommandLine = resolveInstalledCommandLine(
+        definition,
+        override,
+        spawnEnv,
+      );
       const commandLine = [
-        resolveInstalledCommand(definition, override, spawnEnv) ??
-          definition.command,
+        ...(installedCommandLine ?? [override.command ?? definition.command]),
         ...(override.args ?? definition.args),
       ];
       const rpc = startJsonRpcClient(

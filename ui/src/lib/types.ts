@@ -58,6 +58,11 @@ export type HarnessSummary = {
   defaultEffort: string | null;
   selectedModel: string | null;
   selectedEffort: string | null;
+  bridge?: {
+    state: "ready" | "downloading" | "error";
+    message?: string;
+    manualInstallCommand: string;
+  };
   login: { command: string; manual: boolean; note: string };
   install: { command: string; docsUrl: string };
 };
