@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Main window access for the Overlearn desktop shell.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
 }
