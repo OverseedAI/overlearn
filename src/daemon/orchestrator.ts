@@ -127,6 +127,7 @@ type CreateDaemonTurnOrchestratorOptions = Readonly<{
   courseId: number;
   getCourseMetadata: () => CoursePromptMetadata | undefined;
   attachedDir?: string | null;
+  getWebSearchEnabled?: () => boolean;
   cwd: string;
   mcpBaseUrl: string;
   env?: Env;
@@ -353,6 +354,7 @@ const teachingMcpPermissionRules = (): readonly PermissionRule[] =>
 
 export const buildCoursePermissionPolicy = (
   attachedDir?: string | null,
+  webSearchEnabled = false,
 ): PermissionPolicy => {
   const resources =
     attachedDir === undefined || attachedDir === null || attachedDir.trim() === ""
@@ -367,6 +369,18 @@ export const buildCoursePermissionPolicy = (
         resources,
         "Attached directory reads are pre-approved for this learning session.",
       ),
+      ...(webSearchEnabled
+        ? [
+            {
+              toolName: "WebSearch",
+              reason: "Web search is enabled for this course.",
+            },
+            {
+              toolName: "WebFetch",
+              reason: "Web fetch is enabled for this course.",
+            },
+          ]
+        : []),
     ],
     defaultDecision: "deny",
     defaultReason: "Permission was not pre-approved by the course daemon.",
@@ -705,6 +719,9 @@ export const createDaemonTurnOrchestrator = (
       courseId: options.courseId,
       harnessId: adapter.id,
     });
+    const webSearchEnabled =
+      adapter.id === "claude-code" &&
+      (options.getWebSearchEnabled?.() ?? false);
 
     try {
       const session = await adapter.newSession(options.cwd, {
@@ -714,7 +731,10 @@ export const createDaemonTurnOrchestrator = (
             url: mcpUrl(options.mcpBaseUrl, teachingSession.token),
           },
         ],
-        permissionPolicy: buildCoursePermissionPolicy(options.attachedDir),
+        permissionPolicy: buildCoursePermissionPolicy(
+          options.attachedDir,
+          webSearchEnabled,
+        ),
         metadata: {
           courseId: options.courseId,
           orchestrated: true,
@@ -736,7 +756,17 @@ export const createDaemonTurnOrchestrator = (
     position: TurnPositionContext,
   ): Promise<OrchestratorResult> => {
     const active = await ensureSession();
-    const instructions = formatInstructions(assembleInstructionModules({ env }));
+    const webSearchEnabled =
+      active.adapter.id === "claude-code" &&
+      (options.getWebSearchEnabled?.() ?? false);
+    const instructions = [
+      formatInstructions(assembleInstructionModules({ env })),
+      ...(webSearchEnabled
+        ? [
+            "WebSearch and WebFetch are available for this turn. Cite the sources you use in the learner-facing response.",
+          ]
+        : []),
+    ].join("\n\n");
     const courseMetadata = options.getCourseMetadata() ?? {
       title: `Course ${options.courseId}`,
       description: null,

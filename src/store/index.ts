@@ -58,6 +58,7 @@ export type Course = Readonly<{
   model: string | null;
   effort: string | null;
   attachedDir: string | null;
+  webSearchEnabled: boolean;
   status: CourseStatus;
   sourceName: string | null;
   manifestExtra: JsonRecord;
@@ -103,6 +104,7 @@ export type CourseInput = Readonly<{
   model?: string | null;
   effort?: string | null;
   attachedDir?: string | null;
+  webSearchEnabled?: boolean;
   status?: CourseStatus;
   sourceName?: string | null;
   manifestExtra?: JsonRecord;
@@ -117,6 +119,7 @@ export type CoursePatch = Readonly<{
   model?: string | null;
   effort?: string | null;
   attachedDir?: string | null;
+  webSearchEnabled?: boolean;
   status?: CourseStatus;
   sourceName?: string | null;
   manifestExtra?: JsonRecord;
@@ -411,6 +414,7 @@ type CourseRow = Readonly<{
   model: string | null;
   effort: string | null;
   attached_dir: string | null;
+  web_search_enabled: number;
   status: CourseStatus;
   source_name: string | null;
   manifest_extra_json: string;
@@ -584,7 +588,7 @@ type FolderImportPayload = Readonly<{
 }>;
 
 const STORE_FILE_NAME = "overlearn.sqlite";
-export const STORE_SCHEMA_VERSION = 6;
+export const STORE_SCHEMA_VERSION = 7;
 const courseStatusCheckSql =
   "status TEXT NOT NULL CHECK (status IN ('active', 'archived'))";
 
@@ -804,12 +808,23 @@ const migrations: readonly Migration[] = [
     },
   },
   {
-    id: STORE_SCHEMA_VERSION,
+    id: 6,
     name: "store_schema_v6_agent_config",
     up: (db) => {
       db.exec(`
         ALTER TABLE courses ADD COLUMN model TEXT;
         ALTER TABLE courses ADD COLUMN effort TEXT;
+      `);
+    },
+  },
+  {
+    id: STORE_SCHEMA_VERSION,
+    name: "store_schema_v7_web_search",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE courses
+        ADD COLUMN web_search_enabled INTEGER NOT NULL DEFAULT 0
+          CHECK (web_search_enabled IN (0, 1));
       `);
     },
   },
@@ -1119,6 +1134,7 @@ const courseFromRow = (row: CourseRow): Course => ({
   model: row.model,
   effort: row.effort,
   attachedDir: row.attached_dir,
+  webSearchEnabled: row.web_search_enabled === 1,
   status: row.status,
   sourceName: row.source_name,
   manifestExtra: parseJsonRecord(row.manifest_extra_json),
@@ -1312,13 +1328,14 @@ const insertCourse = (store: Store, input: CourseInput): Course => {
           model,
           effort,
           attached_dir,
+          web_search_enabled,
           status,
           source_name,
           manifest_extra_json,
           created_at,
           updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
       `,
     )
     .run(
@@ -1328,6 +1345,7 @@ const insertCourse = (store: Store, input: CourseInput): Course => {
       nullableText(input.model),
       nullableText(input.effort),
       nullableText(input.attachedDir),
+      input.webSearchEnabled === true ? 1 : 0,
       input.status ?? "active",
       nullableText(input.sourceName),
       stringifyJson(input.manifestExtra ?? {}),
@@ -1389,11 +1407,12 @@ export const patchCourse = (
           model = ?4,
           effort = ?5,
           attached_dir = ?6,
-          status = ?7,
-          source_name = ?8,
-          manifest_extra_json = ?9,
-          updated_at = ?10
-        WHERE id = ?11
+          web_search_enabled = ?7,
+          status = ?8,
+          source_name = ?9,
+          manifest_extra_json = ?10,
+          updated_at = ?11
+        WHERE id = ?12
       `,
     )
     .run(
@@ -1411,6 +1430,9 @@ export const patchCourse = (
       patch.attachedDir === undefined
         ? existing.attachedDir
         : nullableText(patch.attachedDir),
+      patch.webSearchEnabled === undefined
+        ? existing.webSearchEnabled ? 1 : 0
+        : patch.webSearchEnabled ? 1 : 0,
       patch.status ?? existing.status,
       patch.sourceName === undefined
         ? existing.sourceName

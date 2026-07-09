@@ -21,6 +21,7 @@ export type CourseResource = {
   model: string | null;
   effort: string | null;
   attachedDir: string | null;
+  webSearchEnabled: boolean;
   status: CourseStatus;
   sourceName: string | null;
   manifestExtra: Record<string, unknown> | null;

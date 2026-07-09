@@ -159,6 +159,7 @@ type AcpSessionState = {
   acpSessionId: string;
   permissionPolicy: PermissionPolicy;
   mcpToolCallResources: Map<string, string>;
+  toolCallNames: Map<string, string>;
   currentTurn?: TurnState;
   ended: boolean;
 };
@@ -875,6 +876,7 @@ const normalizePermissionRequest = (
   const metadata = isJsonObject(update["metadata"]) ? update["metadata"] : undefined;
   const resource = optionalString(update, "resource");
   const description = optionalString(update, "description");
+  const toolName = optionalString(update, "toolName");
 
   return {
     id: requiredString(
@@ -883,6 +885,7 @@ const normalizePermissionRequest = (
       "permission",
     ),
     action: requiredString(update, ["action", "operation", "tool"], "unknown"),
+    ...(toolName === undefined ? {} : { toolName }),
     ...(resource === undefined ? {} : { resource }),
     ...(description === undefined ? {} : { description }),
     ...(metadata === undefined ? {} : { metadata }),
@@ -1032,6 +1035,9 @@ const normalizeAcpPermissionRequest = (
   const metadata = isJsonObject(toolCall) ? toolCall : undefined;
   const title = optionalString(toolCall, "title");
   const toolCallId = optionalString(toolCall, "toolCallId");
+  const toolName =
+    optionalString(toolCall, "toolName") ??
+    (toolCallId === undefined ? undefined : state.toolCallNames.get(toolCallId));
   const namedMcpResource =
     mcpToolResource(title) ??
     mcpToolResource(optionalString(toolCall, "name")) ??
@@ -1055,6 +1061,7 @@ const normalizeAcpPermissionRequest = (
     action: isMcpApproval
       ? "mcp"
       : (optionalString(toolCall, "kind") ?? title ?? "unknown"),
+    ...(toolName === undefined ? {} : { toolName }),
     ...(resource === undefined ? {} : { resource }),
     ...(title === undefined ? {} : { description: title }),
     ...(metadata === undefined ? {} : { metadata }),
@@ -1077,6 +1084,27 @@ const rememberMcpToolCall = (
   }
 
   state.mcpToolCallResources.set(event.id, `${server}.${tool}`);
+};
+
+const rememberToolCallName = (
+  state: AcpSessionState,
+  update: UnknownRecord,
+  event: ToolCallAgentEvent,
+): void => {
+  const meta = isRecord(update["_meta"]) ? update["_meta"] : undefined;
+  const claudeCode =
+    meta !== undefined && isRecord(meta["claudeCode"])
+      ? meta["claudeCode"]
+      : undefined;
+  const toolName =
+    (claudeCode === undefined
+      ? undefined
+      : optionalString(claudeCode, "toolName")) ??
+    optionalString(update, "toolName");
+
+  if (toolName !== undefined) {
+    state.toolCallNames.set(event.id, toolName);
+  }
 };
 
 const permissionOptions = (params: unknown): readonly UnknownRecord[] => {
@@ -1231,6 +1259,7 @@ const handleNotification = (
   }
 
   if (event.type === "tool-call") {
+    rememberToolCallName(state, update, event);
     rememberMcpToolCall(state, event);
   }
 
@@ -1476,6 +1505,7 @@ export const createAcpHarnessAdapter = (
           acpSessionId: sessionId,
           permissionPolicy: config.permissionPolicy ?? defaultPermissionPolicy,
           mcpToolCallResources: new Map(),
+          toolCallNames: new Map(),
           ended: false,
         };
         sessions.set(ref, state);

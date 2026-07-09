@@ -36,6 +36,7 @@ const ruleMatches = (
   request: PermissionRequest,
 ): boolean =>
   fieldMatches(rule.action, request.action) &&
+  fieldMatches(rule.toolName, request.toolName ?? "") &&
   resourceMatches(rule.resource, request.resource ?? "");
 
 export const evaluatePermissionRequest = (

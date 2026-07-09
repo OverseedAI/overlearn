@@ -12,6 +12,7 @@ type Scenario =
   | "permission"
   | "mcp-permission"
   | "claude-mcp-permission"
+  | "web-permission"
   | "never"
   | "slow-initialize"
   | "crash-once"
@@ -622,6 +623,63 @@ const runClaudeMcpPermissionTurn = async (promptId: JsonRpcId): Promise<void> =>
   finishPrompt(promptId, "end_turn");
 };
 
+// Mirrors claude-code-acp v0.16.2: toolName is present on the preceding
+// session update metadata, while the permission request only repeats the ID,
+// raw input, and human-readable title.
+const runWebPermissionTurn = async (promptId: JsonRpcId): Promise<void> => {
+  const toolCallId = "toolu_web_1";
+  const rawInput = { query: "current TypeScript release" };
+
+  await sleep(5);
+  update({
+    _meta: { claudeCode: { toolName: "WebSearch" } },
+    sessionUpdate: "tool_call",
+    toolCallId,
+    title: '"current TypeScript release"',
+    kind: "fetch",
+    status: "pending",
+    rawInput,
+  });
+
+  const id = nextServerRequestId;
+  nextServerRequestId += 1;
+  send({
+    jsonrpc: "2.0",
+    id,
+    method: "session/request_permission",
+    params: {
+      sessionId,
+      toolCall: {
+        toolCallId,
+        rawInput,
+        title: '"current TypeScript release"',
+      },
+      options: [
+        { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+        { optionId: "reject_once", name: "Reject", kind: "reject_once" },
+      ],
+    },
+  });
+
+  const response = await new Promise<Readonly<{ selectedOptionId?: string }>>(
+    (resolve) => {
+      pendingPermission = resolve;
+    },
+  );
+
+  await sleep(5);
+  update(
+    textChunk(
+      "agent_message_chunk",
+      response.selectedOptionId === "allow_once"
+        ? "web permission granted by fake"
+        : "web permission denied by fake",
+    ),
+  );
+  await sleep(5);
+  finishPrompt(promptId, "end_turn");
+};
+
 const runNeverTurn = async (): Promise<void> => {
   await sleep(5);
   update(textChunk("agent_thought_chunk", "waiting forever"));
@@ -667,6 +725,11 @@ const runTurn = (promptId: JsonRpcId, prompt: readonly unknown[] = []): void => 
 
   if (scenario === "claude-mcp-permission") {
     void runClaudeMcpPermissionTurn(promptId);
+    return;
+  }
+
+  if (scenario === "web-permission") {
+    void runWebPermissionTurn(promptId);
     return;
   }
 

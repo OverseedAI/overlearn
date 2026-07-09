@@ -89,7 +89,8 @@ describe("store migrations", () => {
         .all();
       expect(migrations).toEqual([
         { id: 5, name: "store_schema_v5" },
-        { id: STORE_SCHEMA_VERSION, name: "store_schema_v6_agent_config" },
+        { id: 6, name: "store_schema_v6_agent_config" },
+        { id: STORE_SCHEMA_VERSION, name: "store_schema_v7_web_search" },
       ]);
 
       expect(getProfile(store)).toMatchObject({
@@ -120,12 +121,13 @@ describe("store migrations", () => {
         .query("SELECT COUNT(*) AS count FROM migrations")
         .get() as { count: number };
 
-      expect(migrationCount.count).toBe(2);
+      expect(migrationCount.count).toBe(3);
       expect(listCourses(second)).toMatchObject([
         {
           id: course.id,
           title: "Reopen Course",
           status: "active",
+          webSearchEnabled: false,
         },
       ]);
     } finally {
@@ -184,9 +186,10 @@ describe("store migrations", () => {
     const first = openStore({ databasePath });
     const course = createCourse(first, { title: "Keep me", harnessId: "codex" });
     first.db.exec(`
-      DELETE FROM migrations WHERE id = 6;
+      DELETE FROM migrations WHERE id IN (6, 7);
       ALTER TABLE courses DROP COLUMN model;
       ALTER TABLE courses DROP COLUMN effort;
+      ALTER TABLE courses DROP COLUMN web_search_enabled;
     `);
     first.close();
 
@@ -197,13 +200,40 @@ describe("store migrations", () => {
         harnessId: "codex",
         model: null,
         effort: null,
+        webSearchEnabled: false,
       });
       expect(
         migrated.db.query("SELECT id, name FROM migrations ORDER BY id").all(),
       ).toEqual([
         { id: 5, name: "store_schema_v5" },
         { id: 6, name: "store_schema_v6_agent_config" },
+        { id: 7, name: "store_schema_v7_web_search" },
       ]);
+    } finally {
+      migrated.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("additively migrates v6 courses with web search off by default", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "overlearn-v6-migration-"));
+    const databasePath = join(dir, "store.sqlite");
+    const first = openStore({ databasePath });
+    const course = createCourse(first, { title: "Keep me" });
+    first.db.exec(`
+      DELETE FROM migrations WHERE id = 7;
+      ALTER TABLE courses DROP COLUMN web_search_enabled;
+    `);
+    first.close();
+
+    const migrated = openStore({ databasePath });
+    try {
+      expect(getCourse(migrated, course.id)?.webSearchEnabled).toBe(false);
+      expect(
+        migrated.db
+          .query("SELECT web_search_enabled FROM courses WHERE id = ?1")
+          .get(course.id),
+      ).toEqual({ web_search_enabled: 0 });
     } finally {
       migrated.close();
       await rm(dir, { force: true, recursive: true });
@@ -234,16 +264,22 @@ describe("store query API", () => {
         harnessId: "codex",
         model: "gpt-5.6-sol",
         effort: "high",
+        webSearchEnabled: true,
       });
       const activeCourse = patchCourse(store, course.id, { description: "Mental math." });
       expect(activeCourse.status).toBe("active");
       expect(activeCourse).toMatchObject({
         model: "gpt-5.6-sol",
         effort: "high",
+        webSearchEnabled: true,
       });
       expect(
-        patchCourse(store, course.id, { model: null, effort: "low" }),
-      ).toMatchObject({ model: null, effort: "low" });
+        patchCourse(store, course.id, {
+          model: null,
+          effort: "low",
+          webSearchEnabled: false,
+        }),
+      ).toMatchObject({ model: null, effort: "low", webSearchEnabled: false });
 
       const firstTopic = upsertTopic(store, course.id, {
         path: "finance/rule-of-72",

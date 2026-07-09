@@ -1078,6 +1078,7 @@ const courseResource = (course: Course): Record<string, unknown> => ({
   model: course.model,
   effort: course.effort,
   attachedDir: course.attachedDir,
+  webSearchEnabled: course.webSearchEnabled,
   status: course.status,
   sourceName: course.sourceName,
   manifestExtra: course.manifestExtra,
@@ -2351,6 +2352,8 @@ export const runDaemon = async (
             };
       },
       attachedDir: course.attachedDir,
+      getWebSearchEnabled: () =>
+        getCourse(store, course.id)?.webSearchEnabled ?? false,
       cwd: store.dataDir,
       mcpBaseUrl,
       env,
@@ -3057,6 +3060,61 @@ export const runDaemon = async (
     }
 
     const [action, extra] = rest;
+
+    if (
+      action === "web-search" &&
+      extra === undefined &&
+      request.method === "POST"
+    ) {
+      const body = await readJsonBody(request);
+      if (!isRecord(body)) {
+        return textResponse("Web search body must be an object.", 400);
+      }
+
+      let enabled: boolean;
+      try {
+        const parsed = optionalBooleanField(body, "enabled");
+        if (parsed === undefined) {
+          return textResponse("enabled must be a boolean.", 400);
+        }
+        enabled = parsed;
+      } catch (error) {
+        return textResponse(
+          error instanceof Error ? error.message : "Invalid web search setting.",
+          400,
+        );
+      }
+
+      const currentRuntime = runtimes.get(courseId);
+      if (currentRuntime?.runningTurn === true) {
+        return textResponse(
+          "Cannot change web search while a turn is running. Try again after the agent stops.",
+          409,
+        );
+      }
+
+      if (selectedHarnessId(store, courseId, env) !== "claude-code") {
+        return jsonResponse({
+          ok: true,
+          enabled: course.webSearchEnabled,
+          reset: false,
+          supported: false,
+        });
+      }
+
+      patchCourse(store, courseId, { webSearchEnabled: enabled });
+      const reset =
+        currentRuntime === undefined
+          ? false
+          : await currentRuntime.orchestrator.resetSession("web-search-toggle");
+      if (currentRuntime !== undefined) {
+        currentRuntime.lastActivityAt = Date.now();
+        broadcastSessions();
+      }
+      sseHub.broadcast("courses", coursesPayload());
+
+      return jsonResponse({ ok: true, enabled, reset, supported: true });
+    }
 
     if (action === "transcript" && extra === undefined) {
       if (request.method !== "GET") {

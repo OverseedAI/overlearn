@@ -55,6 +55,7 @@ type CourseResource = Readonly<{
   harnessId?: string | null;
   model?: string | null;
   effort?: string | null;
+  webSearchEnabled?: boolean;
   sourceName?: string | null;
 }>;
 
@@ -3081,6 +3082,121 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
+    "persists web search, resets the active session, and broadcasts courses",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({ scenario: "normal" });
+      const sse = await createSseClient(daemon.url, daemon.token);
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Web Search Course",
+          harnessId: "claude-code",
+        });
+        expect(course.webSearchEnabled).toBe(false);
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "start the session",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "web search setup turn done",
+        );
+
+        const response = await authFetch(
+          daemon,
+          `/api/courses/${course.id}/web-search`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ enabled: true }),
+          },
+        );
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+          ok: true,
+          enabled: true,
+          reset: true,
+          supported: true,
+        });
+
+        await sse.waitFor(
+          "courses",
+          (data) =>
+            isRecord(data) &&
+            Array.isArray(data["courses"]) &&
+            data["courses"].some(
+              (entry) =>
+                isRecord(entry) &&
+                entry["id"] === course.id &&
+                entry["webSearchEnabled"] === true,
+            ),
+          "web search courses broadcast",
+        );
+        const state = await courseState(daemon, course.id);
+        expect(state["course"]).toMatchObject({ webSearchEnabled: true });
+
+        const beforeNextTurn = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.some((entry) => entry["event"] === "session/prompt"),
+          "initial web search session log",
+        );
+        expect(
+          beforeNextTurn.filter((entry) => entry["event"] === "session/prompt"),
+        ).toHaveLength(1);
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "use live sources",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done",
+          "web search next turn done",
+        );
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.filter((entry) => entry["event"] === "session/new").length >=
+              2 &&
+            entries.filter((entry) => entry["event"] === "session/prompt").length >=
+              2,
+          "rebuilt web search session",
+        );
+        const prompts = logs.filter(
+          (entry) => entry["event"] === "session/prompt",
+        );
+        expect(promptText(prompts[1] ?? {})).toContain(
+          "WebSearch and WebFetch are available for this turn",
+        );
+        expect(promptText(prompts[1] ?? {})).toContain("Cite the sources");
+      } finally {
+        sse.close();
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
     "gates harness changes only on the switched course's running turn",
     async () => {
       if (!(await ensureLocalhost())) {
@@ -3141,6 +3257,20 @@ describe(`daemon contract (${runtime.name})`, () => {
           "Cannot change model or effort while a turn is running",
         );
 
+        const webSearchResponse = await authFetch(
+          daemon,
+          `/api/courses/${course.id}/web-search`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ enabled: true }),
+          },
+        );
+        expect(webSearchResponse.status).toBe(409);
+        await expect(webSearchResponse.text()).resolves.toContain(
+          "Cannot change web search while a turn is running",
+        );
+
         const idleResponse = await authFetch(
           daemon,
           `/api/courses/${idleCourse.id}/harness`,
@@ -3155,6 +3285,26 @@ describe(`daemon contract (${runtime.name})`, () => {
           ok: true,
           harness: "codex",
           swapped: false,
+        });
+
+        const unsupportedWebSearch = await authFetch(
+          daemon,
+          `/api/courses/${idleCourse.id}/web-search`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ enabled: true }),
+          },
+        );
+        expect(unsupportedWebSearch.status).toBe(200);
+        await expect(unsupportedWebSearch.json()).resolves.toEqual({
+          ok: true,
+          enabled: false,
+          reset: false,
+          supported: false,
+        });
+        expect((await courseState(daemon, idleCourse.id))["course"]).toMatchObject({
+          webSearchEnabled: false,
         });
       } finally {
         sse.close();

@@ -27,6 +27,7 @@ export type PromptAttachment = Readonly<{
 export type PermissionRequest = Readonly<{
   id: string;
   action: string;
+  toolName?: string;
   resource?: string;
   description?: string;
   metadata?: JsonObject;
@@ -39,6 +40,7 @@ export type PermissionDecision = Readonly<{
 
 export type PermissionRule = Readonly<{
   action?: string;
+  toolName?: string;
   resource?: string;
   reason?: string;
 }>;
