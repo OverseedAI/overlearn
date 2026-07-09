@@ -263,6 +263,13 @@ export const api = {
       `/api/courses/${id}/agent-config`,
       body,
     ),
+  setCourseWebSearch: (id: number, enabled: boolean) =>
+    post<{
+      ok: true;
+      enabled: boolean;
+      reset: boolean;
+      supported: boolean;
+    }>(`/api/courses/${id}/web-search`, { enabled }),
   exportCourse: (id: number, includeTranscript: boolean) =>
     post<unknown>(`/api/courses/${id}/export`, { includeTranscript }),
 

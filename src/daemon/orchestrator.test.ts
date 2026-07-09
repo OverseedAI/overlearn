@@ -222,6 +222,78 @@ describe("daemon turn orchestration helpers", () => {
     expect(policy.allow).toHaveLength(9);
   });
 
+  test("adds precise web tool rules only when web search is enabled", () => {
+    const disabled = buildCoursePermissionPolicy("/repos/example", false);
+    const enabled = buildCoursePermissionPolicy("/repos/example", true);
+
+    expect(disabled.allow.some((rule) => rule.toolName !== undefined)).toBe(false);
+    expect(enabled.allow).toEqual(
+      expect.arrayContaining([
+        {
+          toolName: "WebSearch",
+          reason: "Web search is enabled for this course.",
+        },
+        {
+          toolName: "WebFetch",
+          reason: "Web fetch is enabled for this course.",
+        },
+      ]),
+    );
+  });
+
+  test("rebuilds the next session with live web permissions after reset", async () => {
+    const configs: HarnessSessionConfig[] = [];
+    const prompts: string[] = [];
+    let webSearchEnabled = false;
+    const adapter: HarnessAdapter = {
+      id: "claude-code",
+      name: "Claude Code",
+      detect: () => ({ installed: true, authenticated: true }),
+      newSession: async (_cwd, config) => {
+        configs.push(config ?? {});
+        return {
+          id: `session-${configs.length}`,
+          adapterId: "claude-code",
+          cwd: "/tmp",
+          processId: configs.length,
+        };
+      },
+      prompt: async function* (_session, prompt): AsyncIterable<AgentEvent> {
+        prompts.push(prompt);
+        yield { type: "text", text: "Reply." };
+        yield { type: "done", reason: "complete" };
+      },
+      cancel: async () => undefined,
+      end: async () => undefined,
+    };
+    const orchestrator = createDaemonTurnOrchestrator({
+      courseId: 42,
+      getCourseMetadata: () => undefined,
+      getWebSearchEnabled: () => webSearchEnabled,
+      cwd: "/tmp",
+      mcpBaseUrl: "http://127.0.0.1:1234",
+      adapter,
+      onAgentEvent: () => undefined,
+      registerTeachingSession: () => ({ token: "token" }),
+      unregisterTeachingSession: () => undefined,
+    });
+
+    await orchestrator.runTurn(turn, "teaching", noTopicPosition);
+    webSearchEnabled = true;
+    await orchestrator.resetSession("web-search-toggle");
+    await orchestrator.runTurn({ ...turn, turn: 8 }, "teaching", noTopicPosition);
+
+    expect(configs[0]?.permissionPolicy).toEqual(
+      buildCoursePermissionPolicy(undefined, false),
+    );
+    expect(configs[1]?.permissionPolicy).toEqual(
+      buildCoursePermissionPolicy(undefined, true),
+    );
+    expect(prompts[0]).not.toContain("WebSearch and WebFetch are available");
+    expect(prompts[1]).toContain("WebSearch and WebFetch are available");
+    expect(prompts[1]).toContain("Cite the sources");
+  });
+
   test("parses harness command override strings and JSON arrays", () => {
     expect(parseHarnessCommand('bun "fake agent.ts" normal')).toEqual([
       "bun",

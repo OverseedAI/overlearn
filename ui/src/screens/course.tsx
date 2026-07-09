@@ -15,6 +15,7 @@ import { AppHeader } from "@/components/app-chrome";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -43,6 +44,7 @@ import {
 import { useCourseStore } from "@/lib/course-store";
 import { cn } from "@/lib/utils";
 import type {
+  CourseResource,
   HarnessSummary,
   PromptAttachment,
   TopicNode,
@@ -93,12 +95,21 @@ function StatusDot({
 
 function HarnessPicker({
   courseId,
+  course,
   disabled,
 }: {
   courseId: number;
+  course: CourseResource;
   disabled: boolean;
 }) {
   const [harnesses, setHarnesses] = useState<HarnessSummary[]>([]);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(
+    course.webSearchEnabled,
+  );
+
+  useEffect(() => {
+    setWebSearchEnabled(course.webSearchEnabled);
+  }, [course.webSearchEnabled]);
 
   const load = useCallback(
     (refresh = false) => {
@@ -149,6 +160,21 @@ function HarnessPicker({
         error instanceof ApiError
           ? error.message
           : "Couldn’t update agent settings.",
+      );
+    }
+  };
+
+  const toggleWebSearch = async (enabled: boolean) => {
+    setWebSearchEnabled(enabled);
+    try {
+      const result = await api.setCourseWebSearch(courseId, enabled);
+      setWebSearchEnabled(result.enabled);
+    } catch (error) {
+      setWebSearchEnabled(course.webSearchEnabled);
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Couldn’t update web search.",
       );
     }
   };
@@ -249,6 +275,32 @@ function HarnessPicker({
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
             ) : null}
+          </>
+        ) : null}
+        {selected?.id === "claude-code" ? (
+          <>
+            <DropdownMenuSeparator />
+            <div className="space-y-1.5 px-2 py-1.5">
+              <div className="flex items-center justify-between gap-3">
+                <label
+                  htmlFor="course-web-search"
+                  className="text-sm font-medium"
+                >
+                  Allow web search
+                </label>
+                <Switch
+                  id="course-web-search"
+                  checked={webSearchEnabled}
+                  disabled={disabled}
+                  onCheckedChange={(enabled) => void toggleWebSearch(enabled)}
+                />
+              </div>
+              <p className="text-xs text-pretty text-muted-foreground">
+                {webSearchEnabled && course.attachedDir
+                  ? "The agent can access the web and your attached directory, which may expose attached data to external sites."
+                  : "Lets the teaching agent search and fetch live web sources."}
+              </p>
+            </div>
           </>
         ) : null}
       </DropdownMenuContent>
@@ -579,7 +631,11 @@ export function CourseScreen() {
         actionsClassName="gap-1"
       >
         <AppScaleControls />
-        <HarnessPicker courseId={courseId} disabled={busy || ended} />
+        <HarnessPicker
+          courseId={courseId}
+          course={course}
+          disabled={busy || ended}
+        />
         <Tooltip>
           <TooltipTrigger asChild>
             <Button

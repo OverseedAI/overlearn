@@ -28,6 +28,7 @@ type FakeScenario =
   | "permission"
   | "mcp-permission"
   | "claude-mcp-permission"
+  | "web-permission"
   | "never"
   | "slow-initialize"
   | "crash-always"
@@ -667,6 +668,40 @@ describe("ACP harness adapter sessions", () => {
     });
   });
 
+  test("normalizes claude-code web permissions with a stable tool name", async () => {
+    const { adapter, session } = await createFakeSession("web-permission", {
+      permissionPolicy: {
+        allow: [
+          {
+            toolName: "WebSearch",
+            reason: "Web search is enabled for this course.",
+          },
+        ],
+      },
+    });
+    const events = await collectEvents(
+      adapter.prompt(session, "search the web"),
+      "web permission events",
+    );
+
+    expect(events[1]).toEqual({
+      type: "permission-request",
+      request: expect.objectContaining({
+        action: '"current TypeScript release"',
+        toolName: "WebSearch",
+        resource: '"current TypeScript release"',
+      }),
+      decision: {
+        allowed: true,
+        reason: "Web search is enabled for this course.",
+      },
+    });
+    expect(events[2]).toEqual({
+      type: "text",
+      text: "web permission granted by fake",
+    });
+  });
+
   test("denies permissions by default when no allowlist rule matches", () => {
     expect(
       evaluatePermissionRequest({
@@ -731,6 +766,83 @@ describe("ACP harness adapter sessions", () => {
       allowed: false,
       reason: "Permission was not pre-approved by the session policy.",
     });
+  });
+
+  test("matches tool names independently from action and resource rules", () => {
+    const policy = {
+      allow: [
+        { toolName: "WebSearch", reason: "Search enabled." },
+        { toolName: "WebFetch", reason: "Fetch enabled." },
+        {
+          action: "search",
+          resource: "/course/dir/**",
+          reason: "Attached search enabled.",
+        },
+      ],
+      defaultDecision: "deny" as const,
+    };
+
+    expect(
+      evaluatePermissionRequest(
+        {
+          id: "web-search",
+          action: "fetch",
+          toolName: "WebSearch",
+          resource: '"query"',
+        },
+        policy,
+      ).allowed,
+    ).toBe(true);
+    expect(
+      evaluatePermissionRequest(
+        {
+          id: "web-fetch",
+          action: "fetch",
+          toolName: "WebFetch",
+          resource: "https://example.com",
+        },
+        policy,
+      ).allowed,
+    ).toBe(true);
+    expect(
+      evaluatePermissionRequest(
+        {
+          id: "web-search-disabled",
+          action: "fetch",
+          toolName: "WebSearch",
+          resource: '"query"',
+        },
+        { ...policy, allow: policy.allow.slice(2) },
+      ).allowed,
+    ).toBe(false);
+    expect(
+      evaluatePermissionRequest(
+        {
+          id: "web-search-not-attached-search",
+          action: "fetch",
+          toolName: "WebSearch",
+          resource: "/course/dir/notes.md",
+        },
+        { ...policy, allow: policy.allow.slice(2) },
+      ).allowed,
+    ).toBe(false);
+    expect(
+      evaluatePermissionRequest(
+        {
+          id: "mcp",
+          action: "mcp",
+          resource: "overlearn-teaching.get_course_state",
+        },
+        {
+          allow: [
+            {
+              action: "mcp",
+              resource: "overlearn-teaching.get_course_state",
+            },
+          ],
+        },
+      ).allowed,
+    ).toBe(true);
   });
 
   test("cancel resolves an active stream with a terminal event", async () => {

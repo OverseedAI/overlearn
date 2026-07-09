@@ -106,6 +106,7 @@ const courseSnapshot = (store: Store, courseId: number) => {
       status: course.status,
       harnessId: course.harnessId,
       attachedDir: course.attachedDir,
+      webSearchEnabled: course.webSearchEnabled,
       sourceName: course.sourceName,
       manifestExtra: course.manifestExtra,
     },
@@ -201,6 +202,7 @@ describe("course bundle export/import", () => {
         model: "gpt-5.6-sol",
         effort: "high",
         attachedDir: "/tmp/source",
+        webSearchEnabled: true,
         status: "active",
         sourceName: "rule-of-72",
         manifestExtra: { preserved: true },
@@ -342,6 +344,9 @@ describe("course bundle export/import", () => {
         await readFile(join(exported.path, "course.json"), "utf8"),
       ) as Record<string, unknown>;
       expect(manifest["format"]).toBe(BUNDLE_FORMAT);
+      expect(
+        (manifest["course"] as Record<string, unknown>)["webSearchEnabled"],
+      ).toBe(true);
       expect(manifest["lessons"]).toBeUndefined();
       expect(manifest["journals"]).toEqual([
         expect.objectContaining({

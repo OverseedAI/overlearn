@@ -68,6 +68,7 @@ type BundleCourse = Readonly<{
   model: string | null;
   effort: string | null;
   attachedDir: string | null;
+  webSearchEnabled: boolean;
   sourceName: string | null;
   manifestExtra: JsonRecord;
   createdAt: string;
@@ -372,6 +373,7 @@ const courseForManifest = (course: Course): BundleCourse => ({
   model: course.model,
   effort: course.effort,
   attachedDir: course.attachedDir,
+  webSearchEnabled: course.webSearchEnabled,
   sourceName: course.sourceName,
   manifestExtra: course.manifestExtra,
   createdAt: course.createdAt,
@@ -629,6 +631,10 @@ const parseBundleCourse = (value: unknown): CourseInput => {
   const title = stringValue(value, "title", "course.title");
   const createdAt = optionalStringValue(value, "createdAt") ?? nowIso();
   const updatedAt = optionalStringValue(value, "updatedAt") ?? createdAt;
+  const webSearchEnabled = value["webSearchEnabled"];
+  if (webSearchEnabled !== undefined && typeof webSearchEnabled !== "boolean") {
+    throw new Error("course.webSearchEnabled must be a boolean.");
+  }
 
   return {
     title,
@@ -638,6 +644,7 @@ const parseBundleCourse = (value: unknown): CourseInput => {
     model: optionalStringValue(value, "model"),
     effort: optionalStringValue(value, "effort"),
     attachedDir: optionalStringValue(value, "attachedDir"),
+    webSearchEnabled: webSearchEnabled ?? false,
     sourceName: optionalStringValue(value, "sourceName"),
     manifestExtra: jsonRecord(value["manifestExtra"]),
     createdAt,
