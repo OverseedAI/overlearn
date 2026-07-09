@@ -350,7 +350,26 @@ const runMcpTurn = async (
   finishPrompt(promptId, "end_turn");
 };
 
-const runNormalTurn = async (promptId: JsonRpcId): Promise<void> => {
+const attachmentSummary = (prompt: readonly unknown[]): string | undefined => {
+  const attachments = prompt.filter(
+    (block) =>
+      isRecord(block) &&
+      (block["type"] === "image" || block["type"] === "resource"),
+  );
+  if (attachments.length === 0) {
+    return undefined;
+  }
+
+  const types = attachments.map((block) =>
+    isRecord(block) && block["type"] === "image" ? "image" : "file",
+  );
+  return `Received ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}: ${types.join(", ")}.`;
+};
+
+const runNormalTurn = async (
+  promptId: JsonRpcId,
+  prompt: readonly unknown[] = [],
+): Promise<void> => {
   if (fakeMcpCalls.length > 0) {
     await runMcpTurn(promptId, fakeMcpCalls);
     return;
@@ -358,6 +377,11 @@ const runNormalTurn = async (promptId: JsonRpcId): Promise<void> => {
 
   await sleep(5);
   update(textChunk("agent_thought_chunk", "considering the lesson"));
+  const summary = attachmentSummary(prompt);
+  if (summary !== undefined) {
+    await sleep(5);
+    update(textChunk("agent_message_chunk", summary));
+  }
   for (const chunk of messageChunks) {
     await sleep(5);
     update(textChunk("agent_message_chunk", chunk));
@@ -628,7 +652,7 @@ const runMalformedTurn = async (): Promise<void> => {
   sendRaw("{malformed-json\n");
 };
 
-const runTurn = (promptId: JsonRpcId): void => {
+const runTurn = (promptId: JsonRpcId, prompt: readonly unknown[] = []): void => {
   activePrompt = { id: promptId, cancelled: false };
 
   if (scenario === "permission") {
@@ -655,7 +679,7 @@ const runTurn = (promptId: JsonRpcId): void => {
     if (shouldCrashOnce()) {
       void runCrashTurn();
     } else {
-      void runNormalTurn(promptId);
+      void runNormalTurn(promptId, prompt);
     }
     return;
   }
@@ -670,7 +694,7 @@ const runTurn = (promptId: JsonRpcId): void => {
     return;
   }
 
-  void runNormalTurn(promptId);
+  void runNormalTurn(promptId, prompt);
 };
 
 const selectedPermissionOption = (message: JsonRpcMessage): string | undefined => {
@@ -705,9 +729,9 @@ for await (const line of input) {
       agentCapabilities: {
         loadSession: false,
         promptCapabilities: {
-          image: false,
+          image: true,
           audio: false,
-          embeddedContext: false,
+          embeddedContext: true,
         },
         mcpCapabilities: {
           http: false,
@@ -748,7 +772,11 @@ for await (const line of input) {
       prompt: isRecord(message.params) ? message.params["prompt"] : undefined,
       sessionId,
     });
-    runTurn(message.id);
+    const prompt =
+      isRecord(message.params) && Array.isArray(message.params["prompt"])
+        ? message.params["prompt"]
+        : [];
+    runTurn(message.id, prompt);
     continue;
   }
 

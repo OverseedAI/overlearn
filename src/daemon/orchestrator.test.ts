@@ -4,6 +4,7 @@ import type {
   AgentEvent,
   HarnessAdapter,
   HarnessSessionConfig,
+  PromptAttachment,
 } from "../adapter/types";
 import { teachingMcpServerName } from "../mcp/teaching";
 import {
@@ -262,6 +263,59 @@ describe("daemon turn orchestration helpers", () => {
 });
 
 describe("daemon turn orchestrator", () => {
+  test("passes learner message attachments to the adapter", async () => {
+    const received: (readonly PromptAttachment[] | undefined)[] = [];
+    const attachments: readonly PromptAttachment[] = [
+      {
+        kind: "image",
+        name: "diagram.png",
+        mimeType: "image/png",
+        data: "aW1hZ2U=",
+      },
+    ];
+    const adapter: HarnessAdapter = {
+      id: "codex",
+      name: "Codex",
+      detect: () => ({ installed: true, authenticated: true }),
+      newSession: async () => ({
+        id: "session",
+        adapterId: "codex",
+        cwd: "/tmp",
+        processId: 1,
+      }),
+      prompt: async function* (_session, _prompt, promptAttachments) {
+        received.push(promptAttachments);
+        yield { type: "text", text: "I received it." };
+        yield { type: "done", reason: "complete" };
+      },
+      cancel: async () => undefined,
+      end: async () => undefined,
+    };
+    const orchestrator = createDaemonTurnOrchestrator({
+      courseId: 42,
+      getCourseMetadata: () => undefined,
+      cwd: "/tmp",
+      mcpBaseUrl: "http://127.0.0.1:1234",
+      adapter,
+      onAgentEvent: () => undefined,
+      registerTeachingSession: () => ({ token: "token" }),
+      unregisterTeachingSession: () => undefined,
+    });
+
+    await expect(
+      orchestrator.runTurn(
+        {
+          turn: 1,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          events: [{ type: "message", text: "Explain it.", attachments }],
+        },
+        "teaching",
+        noTopicPosition,
+      ),
+    ).resolves.toEqual({ ok: true });
+    expect(received).toEqual([attachments]);
+  });
+
   test("injects HTTP MCP config, records session lifecycle, streams events, and retries once after a crash", async () => {
     const configs: HarnessSessionConfig[] = [];
     const endedSessions: string[] = [];

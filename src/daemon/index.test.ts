@@ -7,8 +7,10 @@ import {
   daemonMetadataPath,
   expireIdleSessions,
   isLegalOnboardingTransition,
+  parseMessageTurnEvent,
   resolveSessionIdleTtlMs,
 } from "./index";
+import { MAX_ATTACHMENT_BYTES } from "../attachments";
 
 type TestRuntime = {
   courseId: number;
@@ -39,6 +41,65 @@ const testRuntime = (
 });
 
 describe("app daemon helpers", () => {
+  test("validates submit attachments while preserving the learner text", () => {
+    const data = Buffer.from("image bytes").toString("base64");
+
+    expect(
+      parseMessageTurnEvent({
+        text: "Keep this draft intact.",
+        attachments: [
+          {
+            kind: "image",
+            name: "diagram.png",
+            mimeType: "image/png",
+            data,
+          },
+        ],
+      }),
+    ).toEqual({
+      type: "message",
+      text: "Keep this draft intact.",
+      attachments: [
+        {
+          kind: "image",
+          name: "diagram.png",
+          mimeType: "image/png",
+          data,
+        },
+      ],
+    });
+  });
+
+  test("rejects unsupported and oversized submit attachments", () => {
+    expect(() =>
+      parseMessageTurnEvent({
+        text: "Do not discard this text.",
+        attachments: [
+          {
+            kind: "file",
+            name: "archive.zip",
+            mimeType: "application/zip",
+            data: "",
+          },
+        ],
+      }),
+    ).toThrow("unsupported format");
+
+    expect(() =>
+      parseMessageTurnEvent({
+        text: "Do not discard this text either.",
+        attachments: [
+          {
+            kind: "file",
+            name: "large.pdf",
+            mimeType: "application/pdf",
+            data: Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64"),
+          },
+        ],
+      }),
+    ).toThrow("exceeds the 10 MB size limit");
+  });
+
   test("uses the store data dir for daemon metadata", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "overlearn-daemon-meta-"));
 

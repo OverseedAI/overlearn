@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { existsSync } from "node:fs";
 
 import {
@@ -16,6 +17,7 @@ import type {
   JsonValue,
   PermissionPolicy,
   PermissionRequest,
+  PromptAttachment,
   SessionRef,
   ToolCallAgentEvent,
 } from "./types";
@@ -43,6 +45,55 @@ type AcpMcpHttpServer = Readonly<{
 }>;
 
 type AcpMcpServer = AcpMcpStdioServer | AcpMcpHttpServer;
+
+export type AcpPromptBlock =
+  | Readonly<{ type: "text"; text: string }>
+  | Readonly<{ type: "image"; mimeType: string; data: string }>
+  | Readonly<{
+      type: "resource";
+      resource: Readonly<{
+        uri: string;
+        name: string;
+        mimeType: string;
+        text?: string;
+        blob?: string;
+      }>;
+    }>;
+
+export const buildAcpPromptBlocks = (
+  content: string,
+  attachments: readonly PromptAttachment[] = [],
+): readonly AcpPromptBlock[] => [
+  { type: "text", text: content },
+  ...attachments.map((attachment): AcpPromptBlock => {
+    if (attachment.kind === "image") {
+      return {
+        type: "image",
+        mimeType: attachment.mimeType,
+        data: attachment.data,
+      };
+    }
+
+    const resource = {
+      uri: `attachment:///${attachment.name}`,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+    };
+
+    return attachment.mimeType.startsWith("text/")
+      ? {
+          type: "resource",
+          resource: {
+            ...resource,
+            text: Buffer.from(attachment.data, "base64").toString("utf8"),
+          },
+        }
+      : {
+          type: "resource",
+          resource: { ...resource, blob: attachment.data },
+        };
+  }),
+];
 
 export type AcpAuthDetection = Readonly<{
   env?: readonly string[];
@@ -1435,7 +1486,7 @@ export const createAcpHarnessAdapter = (
         throw error;
       }
     },
-    prompt: (session, content) => {
+    prompt: (session, content, attachments) => {
       let state: AcpSessionState;
 
       try {
@@ -1467,12 +1518,7 @@ export const createAcpHarnessAdapter = (
       void state.rpc
         .request("session/prompt", {
           sessionId: state.acpSessionId,
-          prompt: [
-            {
-              type: "text",
-              text: content,
-            },
-          ],
+          prompt: buildAcpPromptBlocks(content, attachments),
         }, {})
         .then((result) => {
           if (state.currentTurn === turn) {

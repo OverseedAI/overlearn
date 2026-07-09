@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUp, Bot, ChevronDown, PanelRight } from "lucide-react";
+import {
+  ArrowUp,
+  Bot,
+  ChevronDown,
+  FileText,
+  Image as ImageIcon,
+  LoaderCircle,
+  Paperclip,
+  PanelRight,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 import { AppHeader } from "@/components/app-chrome";
 import { Button } from "@/components/ui/button";
@@ -18,9 +28,21 @@ import { AppScaleControls } from "@/components/app-scale-controls";
 import { StudyRail, type RailTab } from "@/components/study-rail";
 import { Transcript } from "@/components/transcript";
 import { api, ApiError } from "@/lib/api";
+import {
+  ATTACHMENT_ACCEPT,
+  attachmentKind,
+  attachmentMimeType,
+  readFileAsBase64,
+  validateAttachmentFile,
+} from "@/lib/attachments";
 import { useCourseStore } from "@/lib/course-store";
 import { cn } from "@/lib/utils";
-import type { HarnessSummary, TopicNode, UiStatus } from "@/lib/types";
+import type {
+  HarnessSummary,
+  PromptAttachment,
+  TopicNode,
+  UiStatus,
+} from "@/lib/types";
 
 const RAIL_KEY = "overlearn-rail-open";
 
@@ -144,21 +166,120 @@ function Composer({
   disabled: boolean;
   placeholder: string;
 }) {
+  type ComposerAttachment = Readonly<{
+    id: string;
+    kind: PromptAttachment["kind"];
+    name: string;
+    mimeType: string;
+    status: "pending" | "ready" | "error";
+    data?: string;
+    error?: string;
+  }>;
+
   const [text, setText] = useState("");
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string>();
   const [sending, setSending] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const nextAttachmentId = useRef(1);
+
+  const updateAttachment = (
+    id: string,
+    update: Partial<ComposerAttachment>,
+  ) => {
+    setAttachments((current) =>
+      current.map((attachment) =>
+        attachment.id === id ? { ...attachment, ...update } : attachment,
+      ),
+    );
+  };
+
+  const addFiles = (files: FileList | null) => {
+    if (files === null) {
+      return;
+    }
+
+    setAttachmentError(undefined);
+    for (const file of files) {
+      const id = `attachment-${nextAttachmentId.current}`;
+      nextAttachmentId.current += 1;
+      const mimeType = attachmentMimeType(file);
+      const kind = attachmentKind(mimeType);
+      const validationError = validateAttachmentFile(file, mimeType);
+      const attachment: ComposerAttachment = {
+        id,
+        kind,
+        name: file.name,
+        mimeType,
+        status: validationError === undefined ? "pending" : "error",
+        ...(validationError === undefined ? {} : { error: validationError }),
+      };
+      setAttachments((current) => [...current, attachment]);
+
+      if (validationError !== undefined) {
+        setAttachmentError(validationError);
+        continue;
+      }
+
+      void readFileAsBase64(file)
+        .then((data) => updateAttachment(id, { status: "ready", data }))
+        .catch((error: unknown) => {
+          const message =
+            error instanceof Error ? error.message : `Couldn’t read ${file.name}.`;
+          updateAttachment(id, { status: "error", error: message });
+          setAttachmentError(message);
+        });
+    }
+
+    if (fileInputRef.current !== null) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const removeAttachment = (id: string) => {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== id));
+    setAttachmentError(undefined);
+  };
 
   const send = async () => {
     const value = text.trim();
-    if (value.length === 0 || sending || disabled) {
+    if (
+      value.length === 0 ||
+      sending ||
+      disabled ||
+      attachments.some((attachment) => attachment.status === "pending")
+    ) {
       return;
     }
+
+    const readyAttachments = attachments.flatMap(
+      (attachment): readonly PromptAttachment[] =>
+        attachment.status === "ready" && attachment.data !== undefined
+          ? [
+              {
+                kind: attachment.kind,
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                data: attachment.data,
+              },
+            ]
+          : [],
+    );
     setSending(true);
     try {
-      await api.submit(courseId, value);
+      await api.submit(
+        courseId,
+        value,
+        readyAttachments.length === 0 ? undefined : readyAttachments,
+      );
       setText("");
+      setAttachments([]);
+      setAttachmentError(undefined);
     } catch (error) {
-      toast.error(error instanceof ApiError ? error.message : "Couldn’t send.");
+      const message = error instanceof ApiError ? error.message : "Couldn’t send.";
+      setAttachmentError(message);
+      toast.error(message);
     } finally {
       setSending(false);
       textareaRef.current?.focus();
@@ -167,37 +288,122 @@ function Composer({
 
   return (
     <form
-      className="relative"
+      className="space-y-2"
       onSubmit={(event) => {
         event.preventDefault();
         void send();
       }}
     >
-      <Textarea
-        ref={textareaRef}
-        name="message"
-        aria-label="Message the agent"
-        placeholder={placeholder}
-        value={text}
-        disabled={disabled || sending}
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            void send();
+      {attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2" aria-label="Attachments">
+          {attachments.map((attachment) => {
+            const status = sending && attachment.status === "ready"
+              ? "Sending"
+              : attachment.status === "pending"
+                ? "Preparing"
+                : attachment.status === "ready"
+                  ? "Ready"
+                  : "Error";
+            const AttachmentIcon =
+              attachment.kind === "image" ? ImageIcon : FileText;
+
+            return (
+              <div
+                key={attachment.id}
+                title={attachment.error}
+                className={cn(
+                  "flex max-w-64 items-center gap-2 rounded-lg border bg-card px-2.5 py-1.5 text-sm",
+                  attachment.status === "error" && "border-destructive/50",
+                )}
+              >
+                {attachment.status === "pending" ||
+                (sending && attachment.status === "ready") ? (
+                  <LoaderCircle className="size-4 shrink-0 animate-spin text-muted-foreground" />
+                ) : (
+                  <AttachmentIcon className="size-4 shrink-0 text-muted-foreground" />
+                )}
+                <span className="min-w-0">
+                  <span className="block truncate">{attachment.name}</span>
+                  <span
+                    className={cn(
+                      "block text-xs text-muted-foreground",
+                      attachment.status === "error" && "text-destructive",
+                    )}
+                  >
+                    {status}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  aria-label={`Remove ${attachment.name}`}
+                  disabled={sending}
+                  onClick={() => removeAttachment(attachment.id)}
+                  className="rounded-sm text-muted-foreground hover:text-foreground disabled:opacity-50"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {attachmentError !== undefined && (
+        <p role="alert" className="text-sm text-destructive">
+          {attachmentError}
+        </p>
+      )}
+      <div className="relative">
+        <Textarea
+          ref={textareaRef}
+          name="message"
+          aria-label="Message the agent"
+          placeholder={placeholder}
+          value={text}
+          disabled={disabled || sending}
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void send();
+            }
+          }}
+          className="max-h-48 min-h-16 resize-none bg-card px-12 text-[15pt] leading-[1.45] md:text-[15pt]"
+        />
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept={ATTACHMENT_ACCEPT}
+          aria-label="Attach images or files"
+          className="sr-only"
+          onChange={(event) => addFiles(event.target.files)}
+        />
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          aria-label="Attach images or files"
+          disabled={disabled || sending}
+          onClick={() => fileInputRef.current?.click()}
+          className="absolute bottom-2 left-2 size-8 rounded-full"
+        >
+          <Paperclip className="size-4" />
+        </Button>
+        <Button
+          type="submit"
+          size="icon"
+          aria-label="Send"
+          disabled={
+            disabled ||
+            sending ||
+            text.trim().length === 0 ||
+            attachments.some((attachment) => attachment.status === "pending")
           }
-        }}
-        className="max-h-48 min-h-16 resize-none bg-card pr-12 text-[15pt] leading-[1.45] md:text-[15pt]"
-      />
-      <Button
-        type="submit"
-        size="icon"
-        aria-label="Send"
-        disabled={disabled || sending || text.trim().length === 0}
-        className="absolute right-2 bottom-2 size-8 rounded-full"
-      >
-        <ArrowUp className="size-4" />
-      </Button>
+          className="absolute right-2 bottom-2 size-8 rounded-full"
+        >
+          <ArrowUp className="size-4" />
+        </Button>
+      </div>
     </form>
   );
 }

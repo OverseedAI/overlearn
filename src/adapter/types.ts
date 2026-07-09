@@ -17,6 +17,13 @@ export type SessionRef = Readonly<{
   processId: number;
 }>;
 
+export type PromptAttachment = Readonly<{
+  kind: "image" | "file";
+  name: string;
+  mimeType: string;
+  data: string;
+}>;
+
 export type PermissionRequest = Readonly<{
   id: string;
   action: string;
@@ -118,7 +125,11 @@ export type HarnessAdapter = Readonly<{
     cwd: string,
     config?: HarnessSessionConfig,
   ) => Promise<SessionRef>;
-  prompt: (session: SessionRef, content: string) => AsyncIterable<AgentEvent>;
+  prompt: (
+    session: SessionRef,
+    content: string,
+    attachments?: readonly PromptAttachment[],
+  ) => AsyncIterable<AgentEvent>;
   cancel: (session: SessionRef) => Promise<void>;
   end: (session: SessionRef) => Promise<void>;
 }>;

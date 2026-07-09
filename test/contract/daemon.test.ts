@@ -1067,6 +1067,70 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
+    "delivers an attached image to the fake ACP agent",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({ scenario: "normal" });
+      const sse = await createSseClient(daemon.url, daemon.token);
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Attachment Course",
+        });
+        const imageData = Buffer.from("fake image bytes").toString("base64");
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "What does this image show?",
+          [
+            {
+              kind: "image",
+              name: "diagram.png",
+              mimeType: "image/png",
+              data: imageData,
+            },
+          ],
+        );
+
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "text" &&
+            data["event"]["text"] === "Received 1 attachment: image.",
+          "attachment acknowledgement",
+        );
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.some((entry) => entry["event"] === "session/prompt"),
+          "attachment prompt log",
+        );
+        const promptEntry = logs.find(
+          (entry) => entry["event"] === "session/prompt",
+        );
+        const prompt = promptEntry?.["prompt"];
+
+        expect(Array.isArray(prompt)).toBe(true);
+        expect(prompt).toContainEqual({
+          type: "image",
+          mimeType: "image/png",
+          data: imageData,
+        });
+      } finally {
+        sse.close();
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
     "exposes live sessions by API and sessions SSE with current course titles",
     async () => {
       if (!(await ensureLocalhost())) {

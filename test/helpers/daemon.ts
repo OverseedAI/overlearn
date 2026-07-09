@@ -235,11 +235,20 @@ export const submitCourseMessage = async (
   token: string,
   courseId: number,
   text: string,
+  attachments?: readonly Readonly<{
+    kind: "image" | "file";
+    name: string;
+    mimeType: string;
+    data: string;
+  }>[],
 ): Promise<void> => {
   const response = await fetch(`${url}/api/courses/${courseId}/submit`, {
     method: "POST",
     headers: daemonAuthHeaders(token, { "content-type": "application/json" }),
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({
+      text,
+      ...(attachments === undefined ? {} : { attachments }),
+    }),
   });
 
   expect(response.status).toBe(200);

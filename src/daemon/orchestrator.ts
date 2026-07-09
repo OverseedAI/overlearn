@@ -7,6 +7,7 @@ import type {
   HarnessAdapterId,
   PermissionPolicy,
   PermissionRule,
+  PromptAttachment,
   SessionRef,
 } from "../adapter/types";
 import { assembleInstructionModules, formatInstructions } from "../instructions";
@@ -21,7 +22,11 @@ type Env = Readonly<Record<string, string | undefined>>;
 export type TurnPromptMode = "teaching" | "wrap-up" | "greeting" | "orientation";
 
 export type TurnEvent =
-  | Readonly<{ type: "message"; text: string }>
+  | Readonly<{
+      type: "message";
+      text: string;
+      attachments?: readonly PromptAttachment[];
+    }>
   | Readonly<{ type: "nav"; path: string }>
   | Readonly<{
       type: "topic-entered";
@@ -585,6 +590,7 @@ const runPromptWithTimeout = async (
   adapter: HarnessAdapter,
   session: SessionRef,
   prompt: string,
+  attachments: readonly PromptAttachment[] | undefined,
   courseId: number,
   turn: TurnPayload,
   timeoutMs: number,
@@ -594,7 +600,7 @@ const runPromptWithTimeout = async (
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let suppressEvents = false;
   const consume = consumePrompt(
-    adapter.prompt(session, prompt),
+    adapter.prompt(session, prompt, attachments),
     courseId,
     turn,
     nextSequence,
@@ -723,10 +729,14 @@ export const createDaemonTurnOrchestrator = (
       includeResumeContext,
       mode,
     });
+    const attachments = turn.events.flatMap((event) =>
+      event.type === "message" ? (event.attachments ?? []) : [],
+    );
     const result = await runPromptWithTimeout(
       active.adapter,
       active.session,
       prompt,
+      attachments.length === 0 ? undefined : attachments,
       options.courseId,
       turn,
       timeoutMs,

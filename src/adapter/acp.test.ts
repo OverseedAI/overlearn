@@ -11,6 +11,7 @@ import {
   type McpServerDefinition,
 } from "../mcp/protocol";
 import {
+  buildAcpPromptBlocks,
   createAcpHarnessAdapter,
   type AcpAdapterDefinition,
 } from "./acp";
@@ -195,6 +196,56 @@ describe("ACP harness adapter detection", () => {
 });
 
 describe("ACP harness adapter sessions", () => {
+  test("builds ACP blocks for images, text files, and binary files", () => {
+    const imageData = Buffer.from("image bytes").toString("base64");
+    const textData = Buffer.from("plain text contents").toString("base64");
+    const binaryData = Buffer.from([0, 1, 2, 255]).toString("base64");
+
+    expect(
+      buildAcpPromptBlocks("Explain these attachments.", [
+        {
+          kind: "image",
+          name: "chart.png",
+          mimeType: "image/png",
+          data: imageData,
+        },
+        {
+          kind: "file",
+          name: "notes.txt",
+          mimeType: "text/plain",
+          data: textData,
+        },
+        {
+          kind: "file",
+          name: "report.pdf",
+          mimeType: "application/pdf",
+          data: binaryData,
+        },
+      ]),
+    ).toEqual([
+      { type: "text", text: "Explain these attachments." },
+      { type: "image", mimeType: "image/png", data: imageData },
+      {
+        type: "resource",
+        resource: {
+          uri: "attachment:///notes.txt",
+          name: "notes.txt",
+          mimeType: "text/plain",
+          text: "plain text contents",
+        },
+      },
+      {
+        type: "resource",
+        resource: {
+          uri: "attachment:///report.pdf",
+          name: "report.pdf",
+          mimeType: "application/pdf",
+          blob: binaryData,
+        },
+      },
+    ]);
+  });
+
   test("passes configured MCP servers through session/new", async () => {
     const logDir = await createTempDir();
     tempDirs.push(logDir);

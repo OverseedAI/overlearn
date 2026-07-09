@@ -7,6 +7,7 @@ import type {
   LiveSessionSummary,
   OnboardingState,
   ProfileResource,
+  PromptAttachment,
   ServerEvents,
   SessionSummary,
   TranscriptPage,
@@ -219,8 +220,15 @@ export const api = {
     }>,
   ) => patch<CourseResource>(`/api/courses/${id}`, body),
   deleteCourse: (id: number) => del<CourseResource>(`/api/courses/${id}`),
-  submit: (id: number, text: string) =>
-    post<{ ok: true; turn: number }>(`/api/courses/${id}/submit`, { text }),
+  submit: (
+    id: number,
+    text: string,
+    attachments?: readonly PromptAttachment[],
+  ) =>
+    post<{ ok: true; turn: number }>(`/api/courses/${id}/submit`, {
+      text,
+      ...(attachments === undefined ? {} : { attachments }),
+    }),
   nav: (id: number, path: string, options: { cardId?: string } = {}) =>
     post<{ ok: true; turn?: number }>(`/api/courses/${id}/nav`, {
       path,

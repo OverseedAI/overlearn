@@ -6,6 +6,13 @@
 
 export type CourseStatus = "active" | "archived";
 
+export type PromptAttachment = {
+  kind: "image" | "file";
+  name: string;
+  mimeType: string;
+  data: string;
+};
+
 export type CourseResource = {
   id: number;
   title: string;

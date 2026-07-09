@@ -15,6 +15,7 @@ import {
   type HarnessCommand,
 } from "../adapter/registry";
 import type { AdapterDetection, HarnessAdapterId } from "../adapter/types";
+import { parsePromptAttachments } from "../attachments";
 import {
   appendTranscriptEntry,
   appendTurnEvents,
@@ -976,6 +977,20 @@ const requiredStringField = (
   }
 
   return value;
+};
+
+export const parseMessageTurnEvent = (body: unknown): MessageTurnEvent => {
+  if (!isRecord(body)) {
+    throw new Error("Submit body must be an object.");
+  }
+
+  const attachments = parsePromptAttachments(body["attachments"]);
+
+  return {
+    type: "message",
+    text: requiredStringField(body, "text"),
+    ...(attachments === undefined ? {} : { attachments }),
+  };
 };
 
 const parseCommandOverride = (value: string, name: string): readonly string[] => {
@@ -2515,14 +2530,7 @@ export const runDaemon = async (
 
   const parseSubmit = async (request: Request): Promise<MessageTurnEvent> => {
     const body = await readJsonBody(request);
-    if (!isRecord(body)) {
-      throw new Error("Submit body must be an object.");
-    }
-
-    return {
-      type: "message",
-      text: requiredStringField(body, "text"),
-    };
+    return parseMessageTurnEvent(body);
   };
 
   const parseNavRequest = async (request: Request): Promise<NavRequest> => {
