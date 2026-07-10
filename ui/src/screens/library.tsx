@@ -22,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -132,7 +133,7 @@ function CourseCard({
   return (
     <Card
       className={cn(
-        "gap-3 py-4",
+        "min-w-0 gap-3 py-4",
         navigable && "cursor-pointer transition-colors hover:bg-accent/40",
       )}
       role={navigable ? "button" : undefined}
@@ -149,9 +150,11 @@ function CourseCard({
           : undefined
       }
     >
-      <CardHeader className="gap-1.5 px-4">
-        <div className="flex items-start justify-between gap-2">
-          <CardTitle className="truncate text-sm">{course.title}</CardTitle>
+      <CardHeader className="min-w-0 gap-1.5 px-4 has-data-[slot=card-action]:grid-cols-[minmax(0,1fr)_auto]">
+        <CardTitle className="min-w-0 truncate text-sm">
+          {course.title}
+        </CardTitle>
+        <CardAction>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -166,15 +169,17 @@ function CourseCard({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">{menu}</DropdownMenuContent>
           </DropdownMenu>
-        </div>
-        <CardDescription className="line-clamp-2 text-pretty">
+        </CardAction>
+        <CardDescription className="min-w-0 line-clamp-2 text-pretty">
           {course.description && course.description.trim().length > 0
             ? course.description
             : "No description yet."}
         </CardDescription>
       </CardHeader>
-      <CardContent className="flex items-center justify-between px-4 text-xs text-muted-foreground">
-        <span>Updated {formatDate(course.updatedAt)}</span>
+      <CardContent className="flex min-w-0 items-center justify-between gap-2 px-4 text-xs text-muted-foreground">
+        <span className="min-w-0 truncate">
+          Updated {formatDate(course.updatedAt)}
+        </span>
         <Badge variant="outline">{course.status}</Badge>
       </CardContent>
     </Card>
