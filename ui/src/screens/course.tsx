@@ -226,6 +226,7 @@ function Composer({
   selectHarness,
   disabled,
   placeholder,
+  registerFileDrop,
 }: {
   courseId: number;
   course: CourseResource;
@@ -235,6 +236,7 @@ function Composer({
   selectHarness: (id: string) => Promise<void>;
   disabled: boolean;
   placeholder: string;
+  registerFileDrop: (handler: ((files: FileList) => void) | null) => void;
 }) {
   type ComposerAttachment = Readonly<{
     id: string;
@@ -250,39 +252,16 @@ function Composer({
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string>();
   const [sending, setSending] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(
     course.webSearchEnabled,
   );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nextAttachmentId = useRef(1);
-  const dragDepth = useRef(0);
 
   useEffect(() => {
     setWebSearchEnabled(course.webSearchEnabled);
   }, [course.webSearchEnabled]);
-
-  useEffect(() => {
-    // Stray-drop navigation is prevented globally in main.tsx; this only
-    // resets the highlight when a drag ends outside the composer.
-    const clearFileDrag = () => {
-      dragDepth.current = 0;
-      setIsDragging(false);
-    };
-
-    window.addEventListener("drop", clearFileDrag);
-    return () => {
-      window.removeEventListener("drop", clearFileDrag);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (disabled || sending) {
-      dragDepth.current = 0;
-      setIsDragging(false);
-    }
-  }, [disabled, sending]);
 
   const chooseHarness = async (id: string) => {
     try {
@@ -326,18 +305,18 @@ function Composer({
     }
   };
 
-  const updateAttachment = (
-    id: string,
-    update: Partial<ComposerAttachment>,
-  ) => {
-    setAttachments((current) =>
-      current.map((attachment) =>
-        attachment.id === id ? { ...attachment, ...update } : attachment,
-      ),
-    );
-  };
+  const updateAttachment = useCallback(
+    (id: string, update: Partial<ComposerAttachment>) => {
+      setAttachments((current) =>
+        current.map((attachment) =>
+          attachment.id === id ? { ...attachment, ...update } : attachment,
+        ),
+      );
+    },
+    [],
+  );
 
-  const addFiles = (files: FileList | null) => {
+  const addFiles = useCallback((files: FileList | null) => {
     if (files === null) {
       return;
     }
@@ -377,7 +356,16 @@ function Composer({
     if (fileInputRef.current !== null) {
       fileInputRef.current.value = "";
     }
-  };
+  }, [updateAttachment]);
+
+  useEffect(() => {
+    registerFileDrop((files) => {
+      if (!disabled && !sending) {
+        addFiles(files);
+      }
+    });
+    return () => registerFileDrop(null);
+  }, [addFiles, disabled, sending, registerFileDrop]);
 
   const removeAttachment = (id: string) => {
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
@@ -494,54 +482,7 @@ function Composer({
           {attachmentError}
         </p>
       )}
-      <div
-        className={cn(
-          "relative rounded-md border border-input bg-card shadow-xs transition-[color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50",
-          isDragging && "border-ring ring-[3px] ring-ring/30",
-        )}
-        onDragEnter={(event) => {
-          if (!hasDraggedFiles(event.dataTransfer)) {
-            return;
-          }
-          event.preventDefault();
-          if (disabled || sending) {
-            return;
-          }
-          dragDepth.current += 1;
-          setIsDragging(true);
-        }}
-        onDragOver={(event) => {
-          if (!hasDraggedFiles(event.dataTransfer)) {
-            return;
-          }
-          event.preventDefault();
-          if (disabled || sending) {
-            return;
-          }
-          event.dataTransfer.dropEffect = "copy";
-        }}
-        onDragLeave={(event) => {
-          if (!hasDraggedFiles(event.dataTransfer) || disabled || sending) {
-            return;
-          }
-          event.preventDefault();
-          dragDepth.current = Math.max(0, dragDepth.current - 1);
-          if (dragDepth.current === 0) {
-            setIsDragging(false);
-          }
-        }}
-        onDrop={(event) => {
-          if (!hasDraggedFiles(event.dataTransfer)) {
-            return;
-          }
-          event.preventDefault();
-          dragDepth.current = 0;
-          setIsDragging(false);
-          if (!disabled && !sending) {
-            addFiles(event.dataTransfer.files);
-          }
-        }}
-      >
+      <div className="relative rounded-md border border-input bg-card shadow-xs transition-[color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50">
         <Textarea
           ref={textareaRef}
           name="message"
@@ -775,11 +716,6 @@ function Composer({
             <ArrowUp className="size-4" />
           </Button>
         </div>
-        {isDragging ? (
-          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-md border-2 border-ring bg-card/90 text-sm font-medium text-foreground">
-            Drop files to attach
-          </div>
-        ) : null}
       </div>
     </form>
   );
@@ -796,6 +732,30 @@ export function CourseScreen() {
     () => localStorage.getItem(RAIL_KEY) !== "closed",
   );
   const [railTab, setRailTab] = useState<RailTab>("journal");
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const dragDepth = useRef(0);
+  const fileDropHandler = useRef<((files: FileList) => void) | null>(null);
+
+  const registerFileDrop = useCallback(
+    (handler: ((files: FileList) => void) | null) => {
+      fileDropHandler.current = handler;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    // Stray-drop navigation is prevented globally in main.tsx; this only
+    // resets the highlight when a drag ends outside the chat column.
+    const clearFileDrag = () => {
+      dragDepth.current = 0;
+      setDraggingFiles(false);
+    };
+
+    window.addEventListener("drop", clearFileDrag);
+    return () => {
+      window.removeEventListener("drop", clearFileDrag);
+    };
+  }, []);
 
   const toggleRail = () => {
     setRailOpen((current) => {
@@ -888,7 +848,58 @@ export function CourseScreen() {
       </AppHeader>
 
       <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div
+          className="relative flex min-w-0 flex-1 flex-col"
+          onDragEnter={(event) => {
+            if (!hasDraggedFiles(event.dataTransfer)) {
+              return;
+            }
+            event.preventDefault();
+            if (composerDisabled) {
+              return;
+            }
+            dragDepth.current += 1;
+            setDraggingFiles(true);
+          }}
+          onDragOver={(event) => {
+            if (!hasDraggedFiles(event.dataTransfer)) {
+              return;
+            }
+            event.preventDefault();
+            if (composerDisabled) {
+              return;
+            }
+            event.dataTransfer.dropEffect = "copy";
+          }}
+          onDragLeave={(event) => {
+            if (!hasDraggedFiles(event.dataTransfer) || composerDisabled) {
+              return;
+            }
+            event.preventDefault();
+            dragDepth.current = Math.max(0, dragDepth.current - 1);
+            if (dragDepth.current === 0) {
+              setDraggingFiles(false);
+            }
+          }}
+          onDrop={(event) => {
+            if (!hasDraggedFiles(event.dataTransfer)) {
+              return;
+            }
+            event.preventDefault();
+            dragDepth.current = 0;
+            setDraggingFiles(false);
+            if (!composerDisabled) {
+              fileDropHandler.current?.(event.dataTransfer.files);
+            }
+          }}
+        >
+          {draggingFiles ? (
+            <div className="pointer-events-none absolute inset-0 z-10 bg-background/60">
+              <div className="absolute inset-3 flex items-center justify-center rounded-lg border-2 border-dashed border-ring bg-card/80 text-sm font-medium text-foreground">
+                Drop files to attach
+              </div>
+            </div>
+          ) : null}
           <Transcript
             entries={transcript}
             courseId={courseId}
@@ -928,6 +939,7 @@ export function CourseScreen() {
                       ? (store.statusMessage ?? "Preparing your next step…")
                       : "Ask, answer, or explore…"
                   }
+                  registerFileDrop={registerFileDrop}
                 />
               )}
             </div>
