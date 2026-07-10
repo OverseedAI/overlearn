@@ -4,6 +4,7 @@ import {
   Bot,
   ChevronDown,
   FileText,
+  Globe,
   Image as ImageIcon,
   LoaderCircle,
   Paperclip,
@@ -15,7 +16,6 @@ import { AppHeader } from "@/components/app-chrome";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,9 +24,6 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -93,23 +90,8 @@ function StatusDot({
   );
 }
 
-function HarnessPicker({
-  courseId,
-  course,
-  disabled,
-}: {
-  courseId: number;
-  course: CourseResource;
-  disabled: boolean;
-}) {
+function useCourseHarnesses(courseId: number) {
   const [harnesses, setHarnesses] = useState<HarnessSummary[]>([]);
-  const [webSearchEnabled, setWebSearchEnabled] = useState(
-    course.webSearchEnabled,
-  );
-
-  useEffect(() => {
-    setWebSearchEnabled(course.webSearchEnabled);
-  }, [course.webSearchEnabled]);
 
   const load = useCallback(
     (refresh = false) => {
@@ -135,12 +117,26 @@ function HarnessPicker({
     [courseId],
   );
 
+  return { harnesses, load };
+}
+
+function HarnessPicker({
+  courseId,
+  harnesses,
+  loadHarnesses,
+  disabled,
+}: {
+  courseId: number;
+  harnesses: HarnessSummary[];
+  loadHarnesses: (refresh?: boolean) => void;
+  disabled: boolean;
+}) {
   const selected = harnesses.find((harness) => harness.selected);
 
   const choose = async (id: string) => {
     try {
       await api.setCourseHarness(courseId, id);
-      load();
+      loadHarnesses();
     } catch (error) {
       toast.error(
         error instanceof ApiError ? error.message : "Couldn’t switch agent.",
@@ -148,39 +144,8 @@ function HarnessPicker({
     }
   };
 
-  const configure = async (config: {
-    model: string | null;
-    effort: string | null;
-  }) => {
-    try {
-      await api.setCourseAgentConfig(courseId, config);
-      load();
-    } catch (error) {
-      toast.error(
-        error instanceof ApiError
-          ? error.message
-          : "Couldn’t update agent settings.",
-      );
-    }
-  };
-
-  const toggleWebSearch = async (enabled: boolean) => {
-    setWebSearchEnabled(enabled);
-    try {
-      const result = await api.setCourseWebSearch(courseId, enabled);
-      setWebSearchEnabled(result.enabled);
-    } catch (error) {
-      setWebSearchEnabled(course.webSearchEnabled);
-      toast.error(
-        error instanceof ApiError
-          ? error.message
-          : "Couldn’t update web search.",
-      );
-    }
-  };
-
   return (
-    <DropdownMenu onOpenChange={(open) => open && load(true)}>
+    <DropdownMenu onOpenChange={(open) => open && loadHarnesses(true)}>
       <DropdownMenuTrigger asChild>
         <Button type="button" variant="ghost" size="sm" disabled={disabled}>
           <Bot className="size-4 shrink-0" />
@@ -211,98 +176,6 @@ function HarnessPicker({
             </span>
           </DropdownMenuItem>
         ))}
-        {selected &&
-        (selected.models.length > 0 || selected.efforts.length > 0) ? (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>Turn settings</DropdownMenuLabel>
-            {selected.models.length > 0 ? (
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  <span className="flex-1">Model</span>
-                  <span className="max-w-28 truncate text-xs text-muted-foreground">
-                    {selected.models.find(
-                      (model) => model.id === selected.selectedModel,
-                    )?.label ?? selected.selectedModel}
-                  </span>
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent className="w-52">
-                  <DropdownMenuRadioGroup value={selected.selectedModel ?? ""}>
-                    {selected.models.map((model) => (
-                      <DropdownMenuRadioItem
-                        key={model.id}
-                        value={model.id}
-                        onSelect={() =>
-                          void configure({
-                            model: model.id,
-                            effort: selected.selectedEffort,
-                          })
-                        }
-                      >
-                        {model.label}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-            ) : null}
-            {selected.efforts.length > 0 ? (
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  <span className="flex-1">Effort</span>
-                  <span className="capitalize text-xs text-muted-foreground">
-                    {selected.selectedEffort}
-                  </span>
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
-                  <DropdownMenuRadioGroup value={selected.selectedEffort ?? ""}>
-                    {selected.efforts.map((effort) => (
-                      <DropdownMenuRadioItem
-                        key={effort}
-                        value={effort}
-                        className="capitalize"
-                        onSelect={() =>
-                          void configure({
-                            model: selected.selectedModel,
-                            effort,
-                          })
-                        }
-                      >
-                        {effort}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-            ) : null}
-          </>
-        ) : null}
-        {selected?.id === "claude-code" ? (
-          <>
-            <DropdownMenuSeparator />
-            <div className="space-y-1.5 px-2 py-1.5">
-              <div className="flex items-center justify-between gap-3">
-                <label
-                  htmlFor="course-web-search"
-                  className="text-sm font-medium"
-                >
-                  Allow web search
-                </label>
-                <Switch
-                  id="course-web-search"
-                  checked={webSearchEnabled}
-                  disabled={disabled}
-                  onCheckedChange={(enabled) => void toggleWebSearch(enabled)}
-                />
-              </div>
-              <p className="text-xs text-pretty text-muted-foreground">
-                {webSearchEnabled && course.attachedDir
-                  ? "The agent can access the web and your attached directory, which may expose attached data to external sites."
-                  : "Lets the teaching agent search and fetch live web sources."}
-              </p>
-            </div>
-          </>
-        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -310,10 +183,16 @@ function HarnessPicker({
 
 function Composer({
   courseId,
+  course,
+  harness,
+  loadHarnesses,
   disabled,
   placeholder,
 }: {
   courseId: number;
+  course: CourseResource;
+  harness: HarnessSummary | undefined;
+  loadHarnesses: (refresh?: boolean) => void;
   disabled: boolean;
   placeholder: string;
 }) {
@@ -331,9 +210,48 @@ function Composer({
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string>();
   const [sending, setSending] = useState(false);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(
+    course.webSearchEnabled,
+  );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nextAttachmentId = useRef(1);
+
+  useEffect(() => {
+    setWebSearchEnabled(course.webSearchEnabled);
+  }, [course.webSearchEnabled]);
+
+  const configure = async (config: {
+    model: string | null;
+    effort: string | null;
+  }) => {
+    try {
+      await api.setCourseAgentConfig(courseId, config);
+      loadHarnesses();
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Couldn’t update agent settings.",
+      );
+    }
+  };
+
+  const toggleWebSearch = async () => {
+    const enabled = !webSearchEnabled;
+    setWebSearchEnabled(enabled);
+    try {
+      const result = await api.setCourseWebSearch(courseId, enabled);
+      setWebSearchEnabled(result.enabled);
+    } catch (error) {
+      setWebSearchEnabled(course.webSearchEnabled);
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Couldn’t update web search.",
+      );
+    }
+  };
 
   const updateAttachment = (
     id: string,
@@ -503,7 +421,7 @@ function Composer({
           {attachmentError}
         </p>
       )}
-      <div className="relative">
+      <div className="rounded-md border border-input bg-card shadow-xs transition-[color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50">
         <Textarea
           ref={textareaRef}
           name="message"
@@ -518,7 +436,7 @@ function Composer({
               void send();
             }
           }}
-          className="max-h-48 min-h-16 resize-none bg-card px-12 text-[15pt] leading-[1.45] md:text-[15pt]"
+          className="max-h-48 min-h-16 resize-none rounded-b-none border-0 bg-transparent px-3 pt-3 pb-2 text-[15pt] leading-[1.45] shadow-none focus-visible:border-transparent focus-visible:ring-0 md:text-[15pt] dark:bg-transparent"
         />
         <input
           ref={fileInputRef}
@@ -529,31 +447,143 @@ function Composer({
           className="sr-only"
           onChange={(event) => addFiles(event.target.files)}
         />
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          aria-label="Attach images or files"
-          disabled={disabled || sending}
-          onClick={() => fileInputRef.current?.click()}
-          className="absolute bottom-2 left-2 size-8 rounded-full"
-        >
-          <Paperclip className="size-4" />
-        </Button>
-        <Button
-          type="submit"
-          size="icon"
-          aria-label="Send"
-          disabled={
-            disabled ||
-            sending ||
-            text.trim().length === 0 ||
-            attachments.some((attachment) => attachment.status === "pending")
-          }
-          className="absolute right-2 bottom-2 size-8 rounded-full"
-        >
-          <ArrowUp className="size-4" />
-        </Button>
+        <div className="flex min-w-0 items-center justify-between gap-2 px-2 pt-1 pb-2">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label="Attach images or files"
+              disabled={disabled || sending}
+              onClick={() => fileInputRef.current?.click()}
+              className="size-8 rounded-full"
+            >
+              <Paperclip className="size-4" />
+            </Button>
+
+            {harness && harness.models.length > 0 ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    aria-label="Choose model"
+                    disabled={disabled || sending}
+                    className="min-w-0 max-w-44 shrink rounded-full px-2.5 text-muted-foreground"
+                  >
+                    <span className="min-w-0 truncate">
+                      {harness.models.find(
+                        (model) => model.id === harness.selectedModel,
+                      )?.label ?? harness.selectedModel ?? "Model"}
+                    </span>
+                    <ChevronDown className="size-3.5 shrink-0" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-52">
+                  <DropdownMenuRadioGroup value={harness.selectedModel ?? ""}>
+                    {harness.models.map((model) => (
+                      <DropdownMenuRadioItem
+                        key={model.id}
+                        value={model.id}
+                        onSelect={() =>
+                          void configure({
+                            model: model.id,
+                            effort: harness.selectedEffort,
+                          })
+                        }
+                      >
+                        {model.label}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
+
+            {harness && harness.efforts.length > 0 ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    aria-label="Choose effort"
+                    disabled={disabled || sending}
+                    className="min-w-0 max-w-28 shrink rounded-full px-2.5 text-muted-foreground capitalize"
+                  >
+                    <span className="min-w-0 truncate">
+                      {harness.selectedEffort ?? "Effort"}
+                    </span>
+                    <ChevronDown className="size-3.5 shrink-0" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuRadioGroup value={harness.selectedEffort ?? ""}>
+                    {harness.efforts.map((effort) => (
+                      <DropdownMenuRadioItem
+                        key={effort}
+                        value={effort}
+                        className="capitalize"
+                        onSelect={() =>
+                          void configure({
+                            model: harness.selectedModel,
+                            effort,
+                          })
+                        }
+                      >
+                        {effort}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
+
+            {harness?.id === "claude-code" ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={webSearchEnabled ? "secondary" : "ghost"}
+                    aria-label="Toggle web search"
+                    aria-pressed={webSearchEnabled}
+                    disabled={disabled || sending}
+                    onClick={() => void toggleWebSearch()}
+                    className={cn(
+                      "min-w-0 max-w-28 shrink rounded-full px-2.5",
+                      !webSearchEnabled && "text-muted-foreground",
+                    )}
+                  >
+                    <Globe className="size-4 shrink-0" />
+                    <span className="min-w-0 truncate">Search</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs text-pretty">
+                  {webSearchEnabled && course.attachedDir
+                    ? "The agent can access the web and your attached directory, which may expose attached data to external sites."
+                    : "Lets the teaching agent search and fetch live web sources."}
+                </TooltipContent>
+              </Tooltip>
+            ) : null}
+          </div>
+
+          <Button
+            type="submit"
+            size="icon"
+            aria-label="Send"
+            disabled={
+              disabled ||
+              sending ||
+              text.trim().length === 0 ||
+              attachments.some((attachment) => attachment.status === "pending")
+            }
+            className="size-8 rounded-full"
+          >
+            <ArrowUp className="size-4" />
+          </Button>
+        </div>
       </div>
     </form>
   );
@@ -561,6 +591,7 @@ function Composer({
 
 export function CourseScreen() {
   const { store, courseId, prependTranscript } = useCourseStore();
+  const { harnesses, load: loadHarnesses } = useCourseHarnesses(courseId);
   const [railOpen, setRailOpen] = useState(
     () => localStorage.getItem(RAIL_KEY) !== "closed",
   );
@@ -620,6 +651,7 @@ export function CourseScreen() {
   const busy = store.status === "agent-working" || store.status === "wrapping-up";
   const ended = store.status === "session-ended";
   const composerDisabled = busy || ended;
+  const selectedHarness = harnesses.find((harness) => harness.selected);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -633,7 +665,8 @@ export function CourseScreen() {
         <AppScaleControls />
         <HarnessPicker
           courseId={courseId}
-          course={course}
+          harnesses={harnesses}
+          loadHarnesses={loadHarnesses}
           disabled={busy || ended}
         />
         <Tooltip>
@@ -684,6 +717,9 @@ export function CourseScreen() {
               ) : (
                 <Composer
                   courseId={courseId}
+                  course={course}
+                  harness={selectedHarness}
+                  loadHarnesses={loadHarnesses}
                   disabled={composerDisabled}
                   placeholder={
                     busy
