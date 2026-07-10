@@ -264,21 +264,15 @@ function Composer({
   }, [course.webSearchEnabled]);
 
   useEffect(() => {
-    const preventFileNavigation = (event: DragEvent) => {
-      if (hasDraggedFiles(event.dataTransfer)) {
-        event.preventDefault();
-      }
-    };
-    const clearFileDrag = (event: DragEvent) => {
-      preventFileNavigation(event);
+    // Stray-drop navigation is prevented globally in main.tsx; this only
+    // resets the highlight when a drag ends outside the composer.
+    const clearFileDrag = () => {
       dragDepth.current = 0;
       setIsDragging(false);
     };
 
-    window.addEventListener("dragover", preventFileNavigation);
     window.addEventListener("drop", clearFileDrag);
     return () => {
-      window.removeEventListener("dragover", preventFileNavigation);
       window.removeEventListener("drop", clearFileDrag);
     };
   }, []);

@@ -4,6 +4,23 @@ import "./index.css";
 import { App } from "./app";
 import { apiReady } from "./lib/api";
 
+function preventStrayFileDrops() {
+  const hasFiles = (event: DragEvent) =>
+    event.dataTransfer !== null &&
+    Array.from(event.dataTransfer.types).includes("Files");
+
+  window.addEventListener("dragover", (event) => {
+    if (hasFiles(event)) {
+      event.preventDefault();
+    }
+  });
+  window.addEventListener("drop", (event) => {
+    if (hasFiles(event)) {
+      event.preventDefault();
+    }
+  });
+}
+
 function configureWindowChrome() {
   const tauriWindow = window as Window & {
     __TAURI__?: unknown;
@@ -26,5 +43,6 @@ const render = () =>
     </StrictMode>,
   );
 
+preventStrayFileDrops();
 configureWindowChrome();
 void apiReady.then(render);
