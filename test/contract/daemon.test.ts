@@ -3181,10 +3181,12 @@ describe(`daemon contract (${runtime.name})`, () => {
       }
 
       const fakeHarness = await withFakeHarnessPath();
+      const versionLogPath = join(fakeHarness.binDir, "versions.log");
       const daemon = await start({
         scenario: "normal",
         extraEnv: {
           PATH: fakeHarness.path,
+          OVERLEARN_HARNESS_VERSION_LOG: versionLogPath,
           ANTHROPIC_API_KEY: "test-anthropic",
           OPENAI_API_KEY: "test-openai",
           GEMINI_API_KEY: "test-gemini",
@@ -3198,6 +3200,15 @@ describe(`daemon contract (${runtime.name})`, () => {
           title: "Swap Course",
           harnessId: "claude-code",
         });
+        const primedHarnesses = await authFetch(
+          daemon,
+          `/api/harnesses?courseId=${course.id}&refresh=1`,
+        );
+        expect(primedHarnesses.status).toBe(200);
+        const detectionsBeforeSwap = (await readFile(versionLogPath, "utf8"))
+          .trim()
+          .split("\n");
+        expect(detectionsBeforeSwap.length).toBeGreaterThan(0);
 
         await submitCourseMessage(
           daemon.url,
@@ -3235,6 +3246,10 @@ describe(`daemon contract (${runtime.name})`, () => {
           harness: "codex",
           swapped: true,
         });
+        const detectionsAfterSwap = (await readFile(versionLogPath, "utf8"))
+          .trim()
+          .split("\n");
+        expect(detectionsAfterSwap).toEqual(detectionsBeforeSwap);
 
         const state = await courseState(daemon, course.id);
         expect(state["course"]).toMatchObject({ harnessId: "codex" });

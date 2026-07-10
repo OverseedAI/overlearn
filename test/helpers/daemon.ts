@@ -174,6 +174,7 @@ export const createFakeHarnessPath = async (): Promise<string> => {
         [
           "#!/bin/sh",
           "if [ \"$1\" = \"--version\" ]; then",
+          `  if [ -n "$OVERLEARN_HARNESS_VERSION_LOG" ]; then printf '%s\\n' "${command}" >> "$OVERLEARN_HARNESS_VERSION_LOG"; fi`,
           `  echo "${command} 9.9.9"`,
           "  exit 0",
           "fi",
