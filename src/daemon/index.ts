@@ -3670,7 +3670,7 @@ export const runDaemon = async (
         currentRuntime === undefined
           ? false
           : await currentRuntime.orchestrator.resetSession("harness-swap");
-      const payload = harnessesPayload(courseId, hadActiveSession, true);
+      const payload = harnessesPayload(courseId, hadActiveSession);
       sseHub.broadcast("harnesses", payload);
       sseHub.broadcast("courses", coursesPayload());
       if (currentRuntime !== undefined) {

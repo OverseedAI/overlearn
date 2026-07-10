@@ -101,15 +101,35 @@ function StatusDot({
 
 function useCourseHarnesses(courseId: number) {
   const [harnesses, setHarnesses] = useState<HarnessSummary[]>([]);
+  const [optimisticSelectedId, setOptimisticSelectedId] = useState<string>();
+
+  const applyHarnesses = useCallback((next: HarnessSummary[]) => {
+    setHarnesses(next);
+    setOptimisticSelectedId(undefined);
+  }, []);
 
   const load = useCallback(
     (refresh = false) => {
       void api
         .listHarnesses({ courseId, refresh })
-        .then(setHarnesses)
+        .then(applyHarnesses)
         .catch(() => undefined);
     },
-    [courseId],
+    [applyHarnesses, courseId],
+  );
+
+  const select = useCallback(
+    async (id: string) => {
+      setOptimisticSelectedId(id);
+      try {
+        await api.setCourseHarness(courseId, id);
+        load();
+      } catch (error) {
+        setOptimisticSelectedId(undefined);
+        throw error;
+      }
+    },
+    [courseId, load],
   );
 
   useEffect(() => load(), [load]);
@@ -119,33 +139,40 @@ function useCourseHarnesses(courseId: number) {
       subscribeEvents({
         harnesses: (payload) => {
           if (payload.courseId === courseId) {
-            setHarnesses(payload.harnesses);
+            applyHarnesses(payload.harnesses);
           }
         },
       }),
-    [courseId],
+    [applyHarnesses, courseId],
   );
 
-  return { harnesses, load };
+  const displayedHarnesses =
+    optimisticSelectedId === undefined
+      ? harnesses
+      : harnesses.map((harness) => ({
+          ...harness,
+          selected: harness.id === optimisticSelectedId,
+        }));
+
+  return { harnesses: displayedHarnesses, load, select };
 }
 
 function HarnessPicker({
-  courseId,
   harnesses,
   loadHarnesses,
+  selectHarness,
   disabled,
 }: {
-  courseId: number;
   harnesses: HarnessSummary[];
   loadHarnesses: (refresh?: boolean) => void;
+  selectHarness: (id: string) => Promise<void>;
   disabled: boolean;
 }) {
   const selected = harnesses.find((harness) => harness.selected);
 
   const choose = async (id: string) => {
     try {
-      await api.setCourseHarness(courseId, id);
-      loadHarnesses();
+      await selectHarness(id);
     } catch (error) {
       toast.error(
         error instanceof ApiError ? error.message : "Couldn’t switch agent.",
@@ -196,6 +223,7 @@ function Composer({
   harness,
   harnesses,
   loadHarnesses,
+  selectHarness,
   disabled,
   placeholder,
 }: {
@@ -204,6 +232,7 @@ function Composer({
   harness: HarnessSummary | undefined;
   harnesses: HarnessSummary[];
   loadHarnesses: (refresh?: boolean) => void;
+  selectHarness: (id: string) => Promise<void>;
   disabled: boolean;
   placeholder: string;
 }) {
@@ -263,8 +292,7 @@ function Composer({
 
   const chooseHarness = async (id: string) => {
     try {
-      await api.setCourseHarness(courseId, id);
-      loadHarnesses();
+      await selectHarness(id);
     } catch (error) {
       toast.error(
         error instanceof ApiError ? error.message : "Couldn’t switch agent.",
@@ -765,7 +793,11 @@ function Composer({
 
 export function CourseScreen() {
   const { store, courseId, prependTranscript } = useCourseStore();
-  const { harnesses, load: loadHarnesses } = useCourseHarnesses(courseId);
+  const {
+    harnesses,
+    load: loadHarnesses,
+    select: selectHarness,
+  } = useCourseHarnesses(courseId);
   const [railOpen, setRailOpen] = useState(
     () => localStorage.getItem(RAIL_KEY) !== "closed",
   );
@@ -838,9 +870,9 @@ export function CourseScreen() {
       >
         <AppScaleControls />
         <HarnessPicker
-          courseId={courseId}
           harnesses={harnesses}
           loadHarnesses={loadHarnesses}
+          selectHarness={selectHarness}
           disabled={busy || ended}
         />
         <Tooltip>
@@ -895,6 +927,7 @@ export function CourseScreen() {
                   harness={selectedHarness}
                   harnesses={harnesses}
                   loadHarnesses={loadHarnesses}
+                  selectHarness={selectHarness}
                   disabled={composerDisabled}
                   placeholder={
                     busy
