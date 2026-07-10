@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   Bot,
+  Check,
   ChevronDown,
   FileText,
   Globe,
@@ -9,6 +10,7 @@ import {
   LoaderCircle,
   Paperclip,
   PanelRight,
+  Sparkles,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -24,6 +26,9 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -49,6 +54,10 @@ import type {
 } from "@/lib/types";
 
 const RAIL_KEY = "overlearn-rail-open";
+
+function hasDraggedFiles(dataTransfer: DataTransfer | null) {
+  return dataTransfer !== null && Array.from(dataTransfer.types).includes("Files");
+}
 
 function flattenTopics(topics: readonly TopicNode[]): TopicNode[] {
   return topics.flatMap((topic) => [topic, ...flattenTopics(topic.children)]);
@@ -185,6 +194,7 @@ function Composer({
   courseId,
   course,
   harness,
+  harnesses,
   loadHarnesses,
   disabled,
   placeholder,
@@ -192,6 +202,7 @@ function Composer({
   courseId: number;
   course: CourseResource;
   harness: HarnessSummary | undefined;
+  harnesses: HarnessSummary[];
   loadHarnesses: (refresh?: boolean) => void;
   disabled: boolean;
   placeholder: string;
@@ -210,16 +221,56 @@ function Composer({
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string>();
   const [sending, setSending] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(
     course.webSearchEnabled,
   );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nextAttachmentId = useRef(1);
+  const dragDepth = useRef(0);
 
   useEffect(() => {
     setWebSearchEnabled(course.webSearchEnabled);
   }, [course.webSearchEnabled]);
+
+  useEffect(() => {
+    const preventFileNavigation = (event: DragEvent) => {
+      if (hasDraggedFiles(event.dataTransfer)) {
+        event.preventDefault();
+      }
+    };
+    const clearFileDrag = (event: DragEvent) => {
+      preventFileNavigation(event);
+      dragDepth.current = 0;
+      setIsDragging(false);
+    };
+
+    window.addEventListener("dragover", preventFileNavigation);
+    window.addEventListener("drop", clearFileDrag);
+    return () => {
+      window.removeEventListener("dragover", preventFileNavigation);
+      window.removeEventListener("drop", clearFileDrag);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (disabled || sending) {
+      dragDepth.current = 0;
+      setIsDragging(false);
+    }
+  }, [disabled, sending]);
+
+  const chooseHarness = async (id: string) => {
+    try {
+      await api.setCourseHarness(courseId, id);
+      loadHarnesses();
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError ? error.message : "Couldn’t switch agent.",
+      );
+    }
+  };
 
   const configure = async (config: {
     model: string | null;
@@ -421,7 +472,54 @@ function Composer({
           {attachmentError}
         </p>
       )}
-      <div className="rounded-md border border-input bg-card shadow-xs transition-[color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50">
+      <div
+        className={cn(
+          "relative rounded-md border border-input bg-card shadow-xs transition-[color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50",
+          isDragging && "border-ring ring-[3px] ring-ring/30",
+        )}
+        onDragEnter={(event) => {
+          if (!hasDraggedFiles(event.dataTransfer)) {
+            return;
+          }
+          event.preventDefault();
+          if (disabled || sending) {
+            return;
+          }
+          dragDepth.current += 1;
+          setIsDragging(true);
+        }}
+        onDragOver={(event) => {
+          if (!hasDraggedFiles(event.dataTransfer)) {
+            return;
+          }
+          event.preventDefault();
+          if (disabled || sending) {
+            return;
+          }
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDragLeave={(event) => {
+          if (!hasDraggedFiles(event.dataTransfer) || disabled || sending) {
+            return;
+          }
+          event.preventDefault();
+          dragDepth.current = Math.max(0, dragDepth.current - 1);
+          if (dragDepth.current === 0) {
+            setIsDragging(false);
+          }
+        }}
+        onDrop={(event) => {
+          if (!hasDraggedFiles(event.dataTransfer)) {
+            return;
+          }
+          event.preventDefault();
+          dragDepth.current = 0;
+          setIsDragging(false);
+          if (!disabled && !sending) {
+            addFiles(event.dataTransfer.files);
+          }
+        }}
+      >
         <Textarea
           ref={textareaRef}
           name="message"
@@ -447,7 +545,7 @@ function Composer({
           className="sr-only"
           onChange={(event) => addFiles(event.target.files)}
         />
-        <div className="flex min-w-0 items-center justify-between gap-2 px-2 pt-1 pb-2">
+        <div className="flex min-w-0 items-center justify-between gap-2 border-t border-input/50 px-2 py-2">
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
             <Button
               type="button"
@@ -461,6 +559,49 @@ function Composer({
               <Paperclip className="size-4" />
             </Button>
 
+            <DropdownMenu
+              onOpenChange={(open) => open && loadHarnesses(true)}
+            >
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  aria-label="Choose teaching agent"
+                  disabled={disabled || sending}
+                  className="min-w-0 max-w-36 shrink rounded-full px-2.5 text-muted-foreground"
+                >
+                  <Bot className="size-4 shrink-0" />
+                  <span className="min-w-0 truncate">
+                    {harness?.name ?? "Agent"}
+                  </span>
+                  <ChevronDown className="size-3.5 shrink-0" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64">
+                <DropdownMenuLabel>Teaching agent</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {harnesses.map((option) => (
+                  <DropdownMenuItem
+                    key={option.id}
+                    disabled={!option.installed}
+                    onSelect={() => void chooseHarness(option.id)}
+                  >
+                    <span className="flex-1 truncate">{option.name}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {option.selected
+                        ? "Selected"
+                        : !option.installed
+                          ? "Not installed"
+                          : !option.authenticated
+                            ? "Not logged in"
+                            : ""}
+                    </span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             {harness && harness.models.length > 0 ? (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -468,81 +609,107 @@ function Composer({
                     type="button"
                     size="sm"
                     variant="ghost"
-                    aria-label="Choose model"
+                    aria-label="Choose model and effort"
                     disabled={disabled || sending}
-                    className="min-w-0 max-w-44 shrink rounded-full px-2.5 text-muted-foreground"
+                    className="min-w-0 max-w-56 shrink rounded-full px-2.5 text-muted-foreground"
                   >
+                    <Sparkles className="size-4 shrink-0" />
                     <span className="min-w-0 truncate">
                       {harness.models.find(
                         (model) => model.id === harness.selectedModel,
                       )?.label ?? harness.selectedModel ?? "Model"}
+                      {harness.efforts.length > 0 && harness.selectedEffort ? (
+                        <>
+                          {" · "}
+                          <span className="capitalize">
+                            {harness.selectedEffort}
+                          </span>
+                        </>
+                      ) : null}
                     </span>
                     <ChevronDown className="size-3.5 shrink-0" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-52">
-                  <DropdownMenuRadioGroup value={harness.selectedModel ?? ""}>
-                    {harness.models.map((model) => (
-                      <DropdownMenuRadioItem
-                        key={model.id}
-                        value={model.id}
-                        onSelect={() =>
-                          void configure({
-                            model: model.id,
-                            effort: harness.selectedEffort,
-                          })
-                        }
-                      >
-                        {model.label}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
+                  {harness.efforts.length === 0 ? (
+                    <DropdownMenuRadioGroup value={harness.selectedModel ?? ""}>
+                      {harness.models.map((model) => (
+                        <DropdownMenuRadioItem
+                          key={model.id}
+                          value={model.id}
+                          onSelect={() =>
+                            void configure({
+                              model: model.id,
+                              effort: harness.selectedEffort,
+                            })
+                          }
+                        >
+                          {model.label}
+                        </DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  ) : (
+                    harness.models.map((model) => (
+                      <DropdownMenuSub key={model.id}>
+                        <DropdownMenuSubTrigger className="relative pl-8">
+                          <span className="pointer-events-none absolute left-2 flex size-3.5 items-center justify-center">
+                            {model.id === harness.selectedModel ? (
+                              <Check className="size-4" />
+                            ) : null}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">
+                            {model.label}
+                          </span>
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent>
+                          <DropdownMenuRadioGroup
+                            value={
+                              model.id === harness.selectedModel
+                                ? (harness.selectedEffort ?? "")
+                                : ""
+                            }
+                          >
+                            {harness.efforts.map((effort) => (
+                              <DropdownMenuRadioItem
+                                key={effort}
+                                value={effort}
+                                className="capitalize"
+                                onSelect={() =>
+                                  void configure({ model: model.id, effort })
+                                }
+                              >
+                                {effort}
+                              </DropdownMenuRadioItem>
+                            ))}
+                          </DropdownMenuRadioGroup>
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                    ))
+                  )}
                 </DropdownMenuContent>
               </DropdownMenu>
             ) : null}
 
-            {harness && harness.efforts.length > 0 ? (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    aria-label="Choose effort"
-                    disabled={disabled || sending}
-                    className="min-w-0 max-w-28 shrink rounded-full px-2.5 text-muted-foreground capitalize"
+            <Tooltip>
+              <TooltipTrigger asChild>
+                {harness?.id !== "claude-code" ? (
+                  <span
+                    tabIndex={0}
+                    className="inline-flex min-w-0 shrink rounded-full"
                   >
-                    <span className="min-w-0 truncate">
-                      {harness.selectedEffort ?? "Effort"}
-                    </span>
-                    <ChevronDown className="size-3.5 shrink-0" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuRadioGroup value={harness.selectedEffort ?? ""}>
-                    {harness.efforts.map((effort) => (
-                      <DropdownMenuRadioItem
-                        key={effort}
-                        value={effort}
-                        className="capitalize"
-                        onSelect={() =>
-                          void configure({
-                            model: harness.selectedModel,
-                            effort,
-                          })
-                        }
-                      >
-                        {effort}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : null}
-
-            {harness?.id === "claude-code" ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      aria-label="Web search unavailable"
+                      disabled
+                      className="min-w-0 max-w-28 shrink rounded-full px-2.5 text-muted-foreground"
+                    >
+                      <Globe className="size-4 shrink-0" />
+                      <span className="min-w-0 truncate">Search</span>
+                    </Button>
+                  </span>
+                ) : (
                   <Button
                     type="button"
                     size="sm"
@@ -559,14 +726,16 @@ function Composer({
                     <Globe className="size-4 shrink-0" />
                     <span className="min-w-0 truncate">Search</span>
                   </Button>
-                </TooltipTrigger>
-                <TooltipContent className="max-w-xs text-pretty">
-                  {webSearchEnabled && course.attachedDir
+                )}
+              </TooltipTrigger>
+              <TooltipContent className="max-w-xs text-pretty">
+                {harness?.id !== "claude-code"
+                  ? "Web search is available with the Claude Code agent."
+                  : webSearchEnabled && course.attachedDir
                     ? "The agent can access the web and your attached directory, which may expose attached data to external sites."
                     : "Lets the teaching agent search and fetch live web sources."}
-                </TooltipContent>
-              </Tooltip>
-            ) : null}
+              </TooltipContent>
+            </Tooltip>
           </div>
 
           <Button
@@ -584,6 +753,11 @@ function Composer({
             <ArrowUp className="size-4" />
           </Button>
         </div>
+        {isDragging ? (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-md border-2 border-ring bg-card/90 text-sm font-medium text-foreground">
+            Drop files to attach
+          </div>
+        ) : null}
       </div>
     </form>
   );
@@ -719,6 +893,7 @@ export function CourseScreen() {
                   courseId={courseId}
                   course={course}
                   harness={selectedHarness}
+                  harnesses={harnesses}
                   loadHarnesses={loadHarnesses}
                   disabled={composerDisabled}
                   placeholder={
