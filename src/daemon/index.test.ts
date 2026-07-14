@@ -53,9 +53,14 @@ describe("app daemon helpers", () => {
       model: null,
       effort: null,
     });
-    expect(() =>
-      parseAgentConfigPatch("codex", { model: "not-a-model" }),
-    ).toThrow("Unknown model for codex: not-a-model");
+    // Codex allows free-text (custom) model ids, but effort stays strict.
+    expect(parseAgentConfigPatch("codex", { model: "not-a-model" })).toEqual({
+      model: "not-a-model",
+      effort: null,
+    });
+    expect(() => parseAgentConfigPatch("codex", { model: "   " })).toThrow(
+      "Unknown model for codex:",
+    );
     expect(() =>
       parseAgentConfigPatch("codex", { effort: "extreme" }),
     ).toThrow("Unknown effort for codex: extreme");

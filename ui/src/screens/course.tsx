@@ -31,6 +31,15 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AppScaleControls } from "@/components/app-scale-controls";
 import { StudyRail, type RailTab } from "@/components/study-rail";
@@ -252,6 +261,8 @@ function Composer({
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string>();
   const [sending, setSending] = useState(false);
+  const [customModelOpen, setCustomModelOpen] = useState(false);
+  const [customModelText, setCustomModelText] = useState("");
   const [webSearchEnabled, setWebSearchEnabled] = useState(
     course.webSearchEnabled,
   );
@@ -287,6 +298,26 @@ function Composer({
           : "Couldn’t update agent settings.",
       );
     }
+  };
+
+  const usingCustomModel =
+    harness !== undefined &&
+    harness.selectedModel !== null &&
+    !harness.models.some((model) => model.id === harness.selectedModel);
+
+  const openCustomModel = () => {
+    setCustomModelText(usingCustomModel ? (harness?.selectedModel ?? "") : "");
+    setCustomModelOpen(true);
+  };
+
+  const submitCustomModel = () => {
+    const model = customModelText.trim();
+    if (model.length === 0) {
+      return;
+    }
+
+    setCustomModelOpen(false);
+    void configure({ model, effort: harness?.selectedEffort ?? null });
   };
 
   const toggleWebSearch = async () => {
@@ -649,6 +680,22 @@ function Composer({
                       </DropdownMenuSub>
                     ))
                   )}
+                  {harness.customModels ? (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        className="relative pl-8"
+                        onSelect={openCustomModel}
+                      >
+                        <span className="pointer-events-none absolute left-2 flex size-3.5 items-center justify-center">
+                          {usingCustomModel ? <Check className="size-4" /> : null}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">
+                          Custom model…
+                        </span>
+                      </DropdownMenuItem>
+                    </>
+                  ) : null}
                 </DropdownMenuContent>
               </DropdownMenu>
             ) : null}
@@ -717,6 +764,46 @@ function Composer({
           </Button>
         </div>
       </div>
+
+      <Dialog open={customModelOpen} onOpenChange={setCustomModelOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Custom model</DialogTitle>
+            <DialogDescription>
+              Exact model id passed to {harness?.name ?? "the agent"} as-is. An
+              id the harness doesn’t recognize will fail the next turn.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            value={customModelText}
+            placeholder={harness?.defaultModel ?? "model-id"}
+            onChange={(event) => setCustomModelText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                submitCustomModel();
+              }
+            }}
+          />
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setCustomModelOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={customModelText.trim().length === 0}
+              onClick={submitCustomModel}
+            >
+              Use model
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </form>
   );
 }

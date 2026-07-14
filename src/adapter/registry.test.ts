@@ -31,13 +31,36 @@ describe("harness agent configuration", () => {
     expect(getHarnessAdapterDefinition("codex")?.capabilities).toEqual({
       models: [
         { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+        { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
+        { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
         { id: "gpt-5.5", label: "GPT-5.5" },
+        { id: "gpt-5.4", label: "GPT-5.4" },
+        { id: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
       ],
       efforts: ["low", "medium", "high"],
       defaultModel: "gpt-5.6-sol",
       defaultEffort: "medium",
+      customModels: true,
     });
     expect(getHarnessAdapterDefinition("gemini")?.capabilities).toEqual({});
+  });
+
+  test("passes custom model ids through for harnesses that allow them", () => {
+    expect(
+      resolveHarnessAgentSelection("codex", {
+        model: "gpt-6-experimental",
+        effort: "high",
+      }),
+    ).toEqual({ model: "gpt-6-experimental", effort: "high" });
+    expect(
+      harnessAgentSpawnOverride("claude-code", {
+        model: "claude-fable-5",
+      }).env,
+    ).toEqual({ ANTHROPIC_MODEL: "claude-fable-5" });
+    expect(resolveHarnessAgentSelection("codex", { model: "   " })).toEqual({
+      model: "gpt-5.6-sol",
+      effort: "medium",
+    });
   });
 
   test("constructs Codex ACP with selected model and effort in spawn env", () => {

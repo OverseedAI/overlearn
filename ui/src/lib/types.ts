@@ -54,6 +54,7 @@ export type HarnessSummary = {
   selected: boolean;
   models: { id: string; label: string }[];
   efforts: string[];
+  customModels: boolean;
   defaultModel: string | null;
   defaultEffort: string | null;
   selectedModel: string | null;

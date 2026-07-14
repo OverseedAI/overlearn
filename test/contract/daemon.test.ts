@@ -3024,8 +3024,13 @@ describe(`daemon contract (${runtime.name})`, () => {
         expect(harnessById(harnesses, "codex")).toMatchObject({
           models: [
             { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+            { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
+            { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
             { id: "gpt-5.5", label: "GPT-5.5" },
+            { id: "gpt-5.4", label: "GPT-5.4" },
+            { id: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
           ],
+          customModels: true,
           efforts: ["low", "medium", "high"],
           defaultModel: "gpt-5.6-sol",
           defaultEffort: "medium",
@@ -3096,7 +3101,7 @@ describe(`daemon contract (${runtime.name})`, () => {
           {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ model: "unknown-model" }),
+            body: JSON.stringify({ model: "   " }),
           },
         );
         expect(invalid.status).toBe(400);
@@ -3137,6 +3142,27 @@ describe(`daemon contract (${runtime.name})`, () => {
           model_reasoning_effort: "low",
         });
 
+        // Free-text (custom) model ids are accepted and persisted as-is.
+        const custom = await authFetch(
+          daemon,
+          `/api/courses/${course.id}/agent-config`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model: "my-custom-model", effort: "low" }),
+          },
+        );
+        expect(custom.status).toBe(200);
+        await expect(custom.json()).resolves.toEqual({
+          ok: true,
+          model: "my-custom-model",
+          effort: "low",
+        });
+        expect((await courseState(daemon, course.id))["course"]).toMatchObject({
+          model: "my-custom-model",
+          effort: "low",
+        });
+
         const unsupported = await createCourse(daemon, {
           title: "Unsupported Config Course",
           harnessId: "gemini",
@@ -3147,6 +3173,7 @@ describe(`daemon contract (${runtime.name})`, () => {
         expect(harnessById(unsupportedHarnesses, "gemini")).toMatchObject({
           models: [],
           efforts: [],
+          customModels: false,
           defaultModel: null,
           defaultEffort: null,
           selectedModel: null,

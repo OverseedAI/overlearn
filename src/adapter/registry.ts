@@ -38,6 +38,8 @@ export type HarnessCapabilities = Readonly<{
   efforts?: readonly string[];
   defaultModel?: string;
   defaultEffort?: string;
+  /** Accepts model ids outside the curated list (free-text entry). */
+  customModels?: boolean;
 }>;
 
 export type HarnessAgentSelection = Readonly<{
@@ -128,8 +130,10 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
       models: [
         { id: "claude-opus-4-8", label: "Claude Opus 4.8" },
         { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
+        { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
       ],
       defaultModel: "claude-sonnet-5",
+      customModels: true,
     },
   },
   {
@@ -159,13 +163,20 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
       paths: codexAuthPaths,
     },
     capabilities: {
+      // Ids verified against the codex 0.144.x picker lineup (strings embedded
+      // in the CLI binary); keep in sync with what the pinned bridge accepts.
       models: [
         { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+        { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
+        { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
         { id: "gpt-5.5", label: "GPT-5.5" },
+        { id: "gpt-5.4", label: "GPT-5.4" },
+        { id: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
       ],
       efforts: ["low", "medium", "high"],
       defaultModel: "gpt-5.6-sol",
       defaultEffort: "medium",
+      customModels: true,
     },
   },
   {
@@ -193,12 +204,24 @@ export const harnessAdapterDefinitions: readonly HarnessAdapterDefinition[] = [
   },
 ];
 
+const customModel = (
+  capabilities: HarnessCapabilities,
+  model: string | null | undefined,
+): string | undefined =>
+  capabilities.customModels === true &&
+  typeof model === "string" &&
+  model.trim().length > 0
+    ? model.trim()
+    : undefined;
+
 const availableModel = (
   capabilities: HarnessCapabilities,
   model: string | null | undefined,
 ): string | undefined => {
   const models = capabilities.models ?? [];
-  const selected = models.find((candidate) => candidate.id === model)?.id;
+  const selected =
+    models.find((candidate) => candidate.id === model)?.id ??
+    customModel(capabilities, model);
 
   return (
     selected ??
@@ -250,9 +273,9 @@ export const harnessAgentSpawnOverride = (
   env: Env = process.env,
 ): HarnessAdapterRegistryOverride => {
   const capabilities = getHarnessAdapterDefinition(id)?.capabilities ?? {};
-  const selectedModel = capabilities.models?.find(
-    (candidate) => candidate.id === selection.model,
-  )?.id;
+  const selectedModel =
+    capabilities.models?.find((candidate) => candidate.id === selection.model)
+      ?.id ?? customModel(capabilities, selection.model);
   const selectedEffort = capabilities.efforts?.find(
     (candidate) => candidate === selection.effort,
   );

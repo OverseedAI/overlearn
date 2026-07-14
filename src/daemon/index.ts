@@ -292,6 +292,7 @@ type HarnessSummary = Readonly<{
   selected: boolean;
   models: readonly Readonly<{ id: string; label: string }>[];
   efforts: readonly string[];
+  customModels: boolean;
   defaultModel: string | null;
   defaultEffort: string | null;
   selectedModel: string | null;
@@ -1514,8 +1515,13 @@ export const parseAgentConfigPatch = (
   const effort = optionalStringField(body, "effort") ?? null;
   const models = definition.capabilities?.models ?? [];
   const efforts = definition.capabilities?.efforts ?? [];
+  const customModels = definition.capabilities?.customModels === true;
 
-  if (model !== null && !models.some((candidate) => candidate.id === model)) {
+  if (
+    model !== null &&
+    !models.some((candidate) => candidate.id === model) &&
+    !(customModels && model.trim().length > 0)
+  ) {
     throw new Error(
       models.length === 0
         ? `Harness ${harnessId} does not support model selection.`
@@ -1620,6 +1626,7 @@ const harnessSummaries = (
       selected: adapter.id === selected,
       models: capabilities.models ?? [],
       efforts: capabilities.efforts ?? [],
+      customModels: capabilities.customModels ?? false,
       defaultModel: capabilities.defaultModel ?? null,
       defaultEffort: capabilities.defaultEffort ?? null,
       selectedModel: selection.model ?? null,
