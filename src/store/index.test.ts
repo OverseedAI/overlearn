@@ -27,6 +27,7 @@ import {
   listFeynmanChecks,
   listGlossary,
   listLatestMasteryScores,
+  listMasteryEvents,
   listSessions,
   listTopicsDueForReview,
   listTurnEvents,
@@ -90,7 +91,8 @@ describe("store migrations", () => {
       expect(migrations).toEqual([
         { id: 5, name: "store_schema_v5" },
         { id: 6, name: "store_schema_v6_agent_config" },
-        { id: STORE_SCHEMA_VERSION, name: "store_schema_v7_web_search" },
+        { id: 7, name: "store_schema_v7_web_search" },
+        { id: STORE_SCHEMA_VERSION, name: "store_schema_v8_mastery_stars" },
       ]);
 
       expect(getProfile(store)).toMatchObject({
@@ -121,7 +123,7 @@ describe("store migrations", () => {
         .query("SELECT COUNT(*) AS count FROM migrations")
         .get() as { count: number };
 
-      expect(migrationCount.count).toBe(3);
+      expect(migrationCount.count).toBe(4);
       expect(listCourses(second)).toMatchObject([
         {
           id: course.id,
@@ -208,7 +210,63 @@ describe("store migrations", () => {
         { id: 5, name: "store_schema_v5" },
         { id: 6, name: "store_schema_v6_agent_config" },
         { id: 7, name: "store_schema_v7_web_search" },
+        { id: 8, name: "store_schema_v8_mastery_stars" },
       ]);
+    } finally {
+      migrated.close();
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("band-maps legacy 0-100 mastery scores to stars on migration", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "overlearn-v7-mastery-"));
+    const databasePath = join(dir, "store.sqlite");
+    const first = openStore({ databasePath });
+    const course = createCourse(first, { title: "Keep scores" });
+    first.db.exec(`
+      DELETE FROM migrations WHERE id = 8;
+      DROP TABLE mastery_events;
+      CREATE TABLE mastery_events (
+        id INTEGER PRIMARY KEY,
+        course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+        topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
+        concept TEXT NOT NULL,
+        score INTEGER NOT NULL CHECK (score >= 0 AND score <= 100),
+        gaps TEXT,
+        ts TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    const legacy: readonly (readonly [string, number])[] = [
+      ["mechanism", 95],
+      ["precision", 83],
+      ["vague-steps", 72],
+      ["partial-recall", 55],
+      ["misconception", 20],
+    ];
+    for (const [index, [concept, score]] of legacy.entries()) {
+      first.db
+        .query(
+          `INSERT INTO mastery_events (course_id, concept, score, gaps, ts, created_at)
+           VALUES (?1, ?2, ?3, NULL, ?4, ?4)`,
+        )
+        .run(course.id, concept, score, `2026-01-0${index + 1}T00:00:00.000Z`);
+    }
+    first.close();
+
+    const migrated = openStore({ databasePath });
+    try {
+      const stars = new Map(
+        listMasteryEvents(migrated, course.id).map((entry) => [
+          entry.concept,
+          entry.score,
+        ]),
+      );
+      expect(stars.get("mechanism")).toBe(5);
+      expect(stars.get("precision")).toBe(4);
+      expect(stars.get("vague-steps")).toBe(3);
+      expect(stars.get("partial-recall")).toBe(2);
+      expect(stars.get("misconception")).toBe(1);
     } finally {
       migrated.close();
       await rm(dir, { force: true, recursive: true });
@@ -312,38 +370,38 @@ describe("store query API", () => {
 
       appendMasteryEvent(store, course.id, {
         concept: "finance",
-        score: 40,
+        score: 1,
         ts: "2026-01-01T00:00:00.000Z",
       });
       appendMasteryEvent(store, course.id, {
         concept: "rule-of-72",
-        score: 70,
+        score: 3,
         gaps: "forgot rate as a percentage",
         ts: "2026-01-02T00:00:00.000Z",
       });
       appendMasteryEvent(store, course.id, {
         concept: "rule-of-72",
-        score: 85,
+        score: 5,
         ts: "2026-01-03T00:00:00.000Z",
       });
       appendMasteryEvent(store, course.id, {
         concept: "finance/rates",
-        score: 50,
+        score: 2,
         ts: "2026-01-03T12:00:00.000Z",
       });
 
       expect(listLatestMasteryScores(store, course.id)).toMatchObject([
-        { concept: "finance", score: 40 },
-        { concept: "finance/rates", score: 50 },
-        { concept: "rule-of-72", score: 85 },
+        { concept: "finance", score: 1 },
+        { concept: "finance/rates", score: 2 },
+        { concept: "rule-of-72", score: 5 },
       ]);
       expect(
         latestMasteryForTopic(store, course.id, "finance/rule-of-72"),
-      ).toMatchObject({ concept: "rule-of-72", score: 85 });
+      ).toMatchObject({ concept: "rule-of-72", score: 5 });
       expect(
         listTopicsDueForReview(store, course.id, {
           includeUnscored: false,
-          masteryThreshold: 80,
+          masteryThreshold: 3,
           limit: 3,
         }).map((entry) => entry.topic.path),
       ).toEqual(["finance/rates"]);
@@ -772,13 +830,13 @@ describe("folder importer", () => {
       await writeJson(join(fixture, "mastery.json"), [
         {
           concept: "finance/rule-of-72",
-          score: 55,
+          score: 2,
           gaps: "missed percentage conversion",
           at: "2026-01-06T00:00:00.000Z",
         },
         {
           concept: "rule-of-72",
-          score: 80,
+          score: 4,
           at: "2026-01-07T00:00:00.000Z",
         },
       ]);
@@ -883,12 +941,12 @@ describe("folder importer", () => {
         },
       ]);
       expect(listLatestMasteryScores(store, result.course.id)).toMatchObject([
-        { concept: "finance/rule-of-72", score: 55 },
-        { concept: "rule-of-72", score: 80 },
+        { concept: "finance/rule-of-72", score: 2 },
+        { concept: "rule-of-72", score: 4 },
       ]);
       expect(
         latestMasteryForTopic(store, result.course.id, "finance/rule-of-72"),
-      ).toMatchObject({ concept: "rule-of-72", score: 80 });
+      ).toMatchObject({ concept: "rule-of-72", score: 4 });
 
       const importedDemos = listDemos(store, result.course.id);
       expect(importedDemos).toHaveLength(2);

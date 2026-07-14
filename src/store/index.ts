@@ -588,7 +588,7 @@ type FolderImportPayload = Readonly<{
 }>;
 
 const STORE_FILE_NAME = "overlearn.sqlite";
-export const STORE_SCHEMA_VERSION = 7;
+export const STORE_SCHEMA_VERSION = 8;
 const courseStatusCheckSql =
   "status TEXT NOT NULL CHECK (status IN ('active', 'archived'))";
 
@@ -818,13 +818,58 @@ const migrations: readonly Migration[] = [
     },
   },
   {
-    id: STORE_SCHEMA_VERSION,
+    id: 7,
     name: "store_schema_v7_web_search",
     up: (db) => {
       db.exec(`
         ALTER TABLE courses
         ADD COLUMN web_search_enabled INTEGER NOT NULL DEFAULT 0
           CHECK (web_search_enabled IN (0, 1));
+      `);
+    },
+  },
+  {
+    id: STORE_SCHEMA_VERSION,
+    name: "store_schema_v8_mastery_stars",
+    up: (db) => {
+      // Mastery moves from a 0-100 scale to 1-5 stars; band-map existing
+      // scores per the old grading.md rubric bands.
+      db.exec(`
+        CREATE TABLE mastery_events_v8 (
+          id INTEGER PRIMARY KEY,
+          course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+          topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
+          concept TEXT NOT NULL,
+          score INTEGER NOT NULL CHECK (score >= 1 AND score <= 5),
+          gaps TEXT,
+          ts TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        INSERT INTO mastery_events_v8 (
+          id, course_id, topic_id, concept, score, gaps, ts, created_at
+        )
+        SELECT
+          id, course_id, topic_id, concept,
+          CASE
+            WHEN score >= 90 THEN 5
+            WHEN score >= 80 THEN 4
+            WHEN score >= 70 THEN 3
+            WHEN score >= 50 THEN 2
+            ELSE 1
+          END,
+          gaps, ts, created_at
+        FROM mastery_events;
+
+        DROP TABLE mastery_events;
+
+        ALTER TABLE mastery_events_v8 RENAME TO mastery_events;
+
+        CREATE INDEX mastery_events_course_concept_ts_idx
+          ON mastery_events(course_id, concept, ts, id);
+
+        CREATE INDEX mastery_events_topic_ts_idx
+          ON mastery_events(topic_id, ts, id);
       `);
     },
   },
@@ -2110,8 +2155,8 @@ export const appendMasteryEvent = (
 ): MasteryEvent => {
   requireCourse(store, courseId);
   const concept = normalizeText(input.concept, "Mastery concept");
-  if (!Number.isInteger(input.score) || input.score < 0 || input.score > 100) {
-    throw new Error("Mastery score must be an integer from 0 to 100.");
+  if (!Number.isInteger(input.score) || input.score < 1 || input.score > 5) {
+    throw new Error("Mastery score must be an integer from 1 to 5 stars.");
   }
 
   const ts = input.ts ?? nowIso();
@@ -2237,7 +2282,8 @@ export const listTopicsDueForReview = (
   courseId: number,
   options: ReviewDueOptions = {},
 ): readonly TopicReviewDue[] => {
-  const threshold = options.masteryThreshold ?? 80;
+  // Stars at or below this are due for review; 4-5 stars are considered held.
+  const threshold = options.masteryThreshold ?? 3;
   const includeUnscored = options.includeUnscored ?? true;
   const limit = options.limit ?? 3;
 

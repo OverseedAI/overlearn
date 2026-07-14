@@ -12,23 +12,23 @@ Grade the answer against the key points and the actual mechanism in the current
 course state. Be honest, not generous. A missed key point is a named gap, not a
 reason to round up.
 
-Score bands:
+Scores are stars from 1 to 5:
 
-- 90-100: teaches it back with the correct mechanism, uses the concept in a
+- 5 stars: teaches it back with the correct mechanism, uses the concept in a
   concrete example, and misses no important key point.
-- 80-89: mostly correct mechanism with a small precision gap or thin example.
-- 70-79: right overall idea, but one or more mechanism steps are vague or
+- 4 stars: mostly correct mechanism with a small precision gap or thin example.
+- 3 stars: right overall idea, but one or more mechanism steps are vague or
   missing.
-- 50-69: partial recall; important vocabulary appears, but the causal chain or
-  procedure is incomplete.
-- 0-49: a misconception is present, or the answer cannot be used to perform or
-  explain the concept.
+- 2 stars: partial recall; important vocabulary appears, but the causal chain
+  or procedure is incomplete.
+- 1 star: a misconception is present, or the answer cannot be used to perform
+  or explain the concept.
 
 Your grading response must always include:
 
 1. What was right, in concrete terms.
 2. The specific gaps, by name. If no gap remains, say `Gaps: none`.
-3. The exact `record_mastery` score you will write: concept, score, and named
+3. The exact `record_mastery` score you will write: concept, stars, and named
    gaps.
 
 After calling `record_mastery`, continue teaching per the pedagogy module.

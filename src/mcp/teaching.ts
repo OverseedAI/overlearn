@@ -256,8 +256,9 @@ const inputSchemas: Record<TeachingToolName, McpJsonObject> = {
       concept: stringSchema("Concept id or topic slug."),
       score: {
         type: "integer",
-        minimum: 0,
-        maximum: 100,
+        minimum: 1,
+        maximum: 5,
+        description: "Mastery stars from 1 (misconception) to 5 (teaches it back).",
       },
       gaps: {
         oneOf: [
@@ -1417,11 +1418,11 @@ const appendLessonNoteTool = (options: TeachingServerOptions): McpServerTool =>
 const recordMasteryTool = (options: TeachingServerOptions): McpServerTool =>
   createTeachingTool(options, {
     name: "record_mastery",
-    description: "Appends a mastery score from 0 to 100 for a concept.",
+    description: "Appends a mastery score from 1 to 5 stars for a concept.",
     knownKeys: ["concept", "score", "gaps", "topicPath"],
     call: (args) => {
       const concept = requireString(args, "concept");
-      const score = requireInteger(args, "score", { min: 0, max: 100 });
+      const score = requireInteger(args, "score", { min: 1, max: 5 });
       const gaps = optionalGaps(args);
       const topicPath = optionalString(args, "topicPath");
       const topicId = resolveTopicId(

@@ -1185,7 +1185,7 @@ describe(`daemon contract (${runtime.name})`, () => {
               tool: "record_mastery",
               args: {
                 concept: "compound-growth",
-                score: 84,
+                score: 4,
                 gaps: "none",
                 topicPath: "compound-growth",
               },
@@ -1331,14 +1331,14 @@ describe(`daemon contract (${runtime.name})`, () => {
         expect(state["mastery"]).toContainEqual(
           expect.objectContaining({
             concept: "compound-growth",
-            score: 84,
+            score: 4,
           }),
         );
         expect(state["transcript"]).toContainEqual(
           expect.objectContaining({
             role: "system",
             kind: "tool-call",
-            text: "recorded mastery compound-growth=84",
+            text: "recorded mastery compound-growth=4",
           }),
         );
         expect(state["transcript"]).toContainEqual(
@@ -2470,7 +2470,7 @@ describe(`daemon contract (${runtime.name})`, () => {
               tool: "record_mastery",
               args: {
                 concept: "rule-of-72",
-                score: 91,
+                score: 5,
                 gaps: ["minor wording"],
               },
             }),
@@ -2525,7 +2525,7 @@ describe(`daemon contract (${runtime.name})`, () => {
         const mastery = listLatestMasteryScores(store, course.id);
         expect(mastery).toHaveLength(1);
         expect(mastery[0]?.concept).toBe("rule-of-72");
-        expect(mastery[0]?.score).toBe(91);
+        expect(mastery[0]?.score).toBe(5);
         expect(mastery[0]?.gaps).toBe("minor wording");
 
         const logs = await waitForLogEntries(

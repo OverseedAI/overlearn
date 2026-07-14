@@ -262,13 +262,13 @@ const exerciseTeachingTools = async (
   const invalid = await withTimeout(
     client.callTool("record_mastery", {
       concept: "rule-of-72",
-      score: 101,
+      score: 6,
     }),
     3_000,
     "validation failure",
   );
   expect(invalid.isError).toBe(true);
-  expect(parseResult(invalid)["error"]).toContain("score must be at most 100");
+  expect(parseResult(invalid)["error"]).toContain("score must be at most 5");
   expect(fixture.writes).toEqual([]);
 
   const topicResult = parseResult(
@@ -324,7 +324,7 @@ const exerciseTeachingTools = async (
     await withTimeout(
       client.callTool("record_mastery", {
         concept: "rule-of-72",
-        score: 82,
+        score: 4,
         gaps: ["rate as percent"],
         topicPath: "finance/rule-of-72",
       }),
@@ -336,7 +336,7 @@ const exerciseTeachingTools = async (
     ok: true,
     mastery: {
       concept: "rule-of-72",
-      score: 82,
+      score: 4,
       gaps: "rate as percent",
     },
   });
@@ -571,7 +571,7 @@ const exerciseTeachingTools = async (
   );
   expect(ruleTopic["path"]).toBe("finance/rule-of-72");
   expect(ruleTopic["state"]).toBe("current");
-  expect(asRecord(ruleTopic["mastery"], "rule mastery")["score"]).toBe(82);
+  expect(asRecord(ruleTopic["mastery"], "rule mastery")["score"]).toBe(4);
   const ruleJournal = asRecord(ruleTopic["journal"], "rule journal");
   expect(ruleJournal["totalCount"]).toBe(2);
   const ruleJournalEntries = asArray(ruleJournal["entries"], "rule journal entries");

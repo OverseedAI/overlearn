@@ -15,5 +15,5 @@ Mastery is a working signal, not a grade. A low score means "teach or review thi
 Use mastery scores to steer the session:
 
 - Ask "what is weakest right now?"
-- Ask "review the topics under 80."
+- Ask "review the topics under 4 stars."
 - Ask "record my mastery only after I explain it back."

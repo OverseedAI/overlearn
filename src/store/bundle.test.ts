@@ -239,13 +239,13 @@ describe("course bundle export/import", () => {
       appendMasteryEvent(store, course.id, {
         concept: "custom-rule",
         topicId: ruleTopic.id,
-        score: 66,
+        score: 2,
         gaps: "missed percentage conversion",
         ts: "2026-01-03T00:00:00.000Z",
       });
       appendMasteryEvent(store, course.id, {
         concept: "rule-of-72",
-        score: 88,
+        score: 4,
         ts: "2026-01-04T00:00:00.000Z",
       });
       upsertGlossaryEntry(store, course.id, {
@@ -377,6 +377,32 @@ describe("course bundle export/import", () => {
       expect(imported.source).toBe("bundle");
       expect(imported.warnings).toEqual([]);
       expect(courseSnapshot(store, imported.course.id)).toEqual(original);
+
+      // Bundles from before the 5-star switch carry 0-100 scores; the import
+      // band-maps them to stars.
+      const manifestPath = join(exported.path, "course.json");
+      const legacyManifest = JSON.parse(
+        await readFile(manifestPath, "utf8"),
+      ) as { mastery: { concept: string; score: number }[] };
+      const legacyScores: Record<string, number> = {
+        "custom-rule": 66,
+        "rule-of-72": 88,
+      };
+      legacyManifest.mastery = legacyManifest.mastery.map((entry) => ({
+        ...entry,
+        score: legacyScores[entry.concept] ?? entry.score,
+      }));
+      await writeFile(manifestPath, JSON.stringify(legacyManifest));
+
+      const legacyImport = await importCoursePath(store, exported.path);
+      const legacyMastery = new Map(
+        listMasteryEvents(store, legacyImport.course.id).map((entry) => [
+          entry.concept,
+          entry.score,
+        ]),
+      );
+      expect(legacyMastery.get("custom-rule")).toBe(2);
+      expect(legacyMastery.get("rule-of-72")).toBe(4);
     });
   });
 

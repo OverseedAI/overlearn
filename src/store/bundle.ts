@@ -776,6 +776,16 @@ const parseBundleJournalEntry = (
   };
 };
 
+// Bundles carry no schema version, so scores above 5 are read as the legacy
+// 0-100 scale and band-mapped to 1-5 stars; 0 clamps to 1.
+const starScore = (score: number): number => {
+  if (score <= 5) {
+    return Math.max(score, 1);
+  }
+
+  return score >= 90 ? 5 : score >= 80 ? 4 : score >= 70 ? 3 : score >= 50 ? 2 : 1;
+};
+
 const parseBundleMastery = (
   value: unknown,
   warnings: string[],
@@ -802,7 +812,7 @@ const parseBundleMastery = (
 
   return {
     concept,
-    score,
+    score: starScore(score),
     gaps: optionalStringValue(value, "gaps"),
     ts,
     topicPath: optionalStringValue(value, "topicPath"),
