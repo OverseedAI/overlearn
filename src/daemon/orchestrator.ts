@@ -103,7 +103,7 @@ export type OrchestratorResult =
   | Readonly<{ ok: true }>
   | Readonly<{
       ok: false;
-      reason: "agent-crashed" | "timeout" | "no-output";
+      reason: "agent-crashed" | "timeout" | "no-output" | "unsupported-model";
       message: string;
     }>;
 
@@ -520,6 +520,12 @@ const attemptFailureMessage = (
     return result;
   }
 
+  // An unsupported-model failure already carries its own guidance; a retry
+  // hint would just send the learner back into the same rejection.
+  if (result.reason === "unsupported-model") {
+    return result;
+  }
+
   const detail = result.message.trim().replace(/\.+$/, "");
   const summary =
     result.reason === "timeout"
@@ -542,7 +548,10 @@ const terminalError = (event: AgentEvent): OrchestratorResult | undefined =>
   event.type === "error"
     ? {
         ok: false,
-        reason: "agent-crashed",
+        reason:
+          event.kind === "unsupported-model"
+            ? "unsupported-model"
+            : "agent-crashed",
         message: event.message,
       }
     : undefined;
@@ -825,7 +834,9 @@ export const createDaemonTurnOrchestrator = (
     const includeResumeContext = nextTurnNeedsResumeContext;
     const first = await runAttempt(turn, mode, includeResumeContext, position);
 
-    if (first.ok || first.reason === "timeout") {
+    // Retrying an unsupported model would spawn a fresh session into the same
+    // rejection, so surface the failure immediately.
+    if (first.ok || first.reason === "timeout" || first.reason === "unsupported-model") {
       nextTurnNeedsResumeContext = !first.ok;
       return attemptFailureMessage(first);
     }

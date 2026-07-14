@@ -401,6 +401,43 @@ describe("ACP harness adapter sessions", () => {
     });
   });
 
+  test("unwraps streamed codex model rejections into a readable terminal error", async () => {
+    // codex streams API rejections as raw JSON blobs inside a message chunk.
+    const errorBlob = JSON.stringify({
+      type: "error",
+      status: 400,
+      error: {
+        type: "invalid_request_error",
+        message:
+          "The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.",
+      },
+    });
+    const { adapter, session } = await createFakeSession(
+      "normal",
+      {},
+      { FAKE_ACP_MESSAGE_CHUNKS: JSON.stringify([errorBlob]) },
+    );
+    const events = await collectEvents(
+      adapter.prompt(session, "teach the rule of 72"),
+      "model rejection events",
+    );
+    const last = events[events.length - 1];
+
+    expect(last).toEqual({
+      type: "error",
+      kind: "unsupported-model",
+      message: expect.stringContaining(
+        "requires a newer version of Codex",
+      ) as unknown as string,
+    });
+    expect(last?.type === "error" ? last.message : "").toContain(
+      "Pick a different model",
+    );
+    expect(last?.type === "error" ? last.message : "").not.toContain(
+      '"status"',
+    );
+  });
+
   test("allows slow real-world ACP startup with the default request timeout", async () => {
     const cwd = await createTempDir();
     tempDirs.push(cwd);

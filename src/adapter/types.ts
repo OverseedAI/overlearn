@@ -109,6 +109,8 @@ export type DoneAgentEvent = Readonly<{
 export type ErrorAgentEvent = Readonly<{
   type: "error";
   message: string;
+  /** The harness rejected the selected model, not the turn itself. */
+  kind?: "unsupported-model";
 }>;
 
 export type AgentEvent =

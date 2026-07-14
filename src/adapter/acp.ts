@@ -330,6 +330,84 @@ const acpMcpServers = (
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+type EmbeddedAgentError = Readonly<{
+  type?: string;
+  message: string;
+}>;
+
+// Codex surfaces API failures as raw JSON blobs streamed into the turn, e.g.
+// {"type":"error","status":400,"error":{"type":"invalid_request_error",
+// "message":"The 'gpt-5.6-sol' model requires a newer version of Codex..."}}.
+// Unwrap them so the learner sees the sentence, not the JSON.
+const parseEmbeddedAgentError = (
+  text: string,
+): EmbeddedAgentError | undefined => {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+
+    let parsed: unknown;
+
+    try {
+      parsed = JSON.parse(trimmed) as unknown;
+    } catch {
+      continue;
+    }
+
+    if (!isRecord(parsed) || parsed["type"] !== "error") {
+      continue;
+    }
+
+    const error = parsed["error"];
+
+    if (!isRecord(error)) {
+      continue;
+    }
+
+    const message = optionalString(error, "message");
+
+    if (message === undefined) {
+      continue;
+    }
+
+    const errorType = optionalString(error, "type");
+
+    return {
+      ...(errorType === undefined ? {} : { type: errorType }),
+      message,
+    };
+  }
+
+  return undefined;
+};
+
+const unsupportedModelPattern =
+  /requires a newer version|unknown model|unsupported model|model .* does not exist/i;
+
+const unsupportedModelGuidance =
+  "Pick a different model from the model menu, or retry after the harness bridge updates.";
+
+const agentErrorEvent = (raw: string): ErrorAgentEvent => {
+  const embedded = parseEmbeddedAgentError(raw);
+  const message = embedded?.message ?? raw;
+  const unsupportedModel =
+    unsupportedModelPattern.test(message) &&
+    (embedded === undefined || embedded.type === "invalid_request_error");
+
+  if (!unsupportedModel) {
+    return { type: "error", message };
+  }
+
+  return {
+    type: "error",
+    kind: "unsupported-model",
+    message: `${message.trim().replace(/\.?$/, ".")} ${unsupportedModelGuidance}`,
+  };
+};
+
 const responseError = (message: UnknownRecord): Error => {
   const error = message["error"];
 
@@ -943,7 +1021,13 @@ const mapUpdateToEvent = (
       updateType,
     )
   ) {
-    return { type: "text", text: updateText(update) };
+    const text = updateText(update);
+
+    // Codex streams API rejections as raw error JSON in a message chunk; end
+    // the turn with a readable error instead of printing the blob.
+    return parseEmbeddedAgentError(text) === undefined
+      ? { type: "text", text }
+      : agentErrorEvent(text);
   }
 
   if (
@@ -972,10 +1056,9 @@ const mapUpdateToEvent = (
   }
 
   if (["error", "failed"].includes(updateType)) {
-    return {
-      type: "error",
-      message: requiredString(update, ["message", "error"], "ACP turn failed."),
-    };
+    return agentErrorEvent(
+      requiredString(update, ["message", "error"], "ACP turn failed."),
+    );
   }
 
   return undefined;
@@ -1585,10 +1668,7 @@ export const createAcpHarnessAdapter = (
         })
         .catch((error) => {
           if (state.currentTurn === turn) {
-            finishTurn(state, {
-              type: "error",
-              message: errorMessage(error),
-            });
+            finishTurn(state, agentErrorEvent(errorMessage(error)));
           }
         });
 
