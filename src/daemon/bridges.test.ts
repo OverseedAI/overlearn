@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { getHarnessAdapterDefinition } from "../adapter/registry";
 import {
+  createManagedBridgeService,
   ensureManagedBridge,
   managedBridgeCommand,
   managedBridgeDirectory,
@@ -233,5 +234,24 @@ describe("managed bridge downloads", () => {
     expect(first).toBe(second);
     expect(metadataRequests).toBe(1);
     expect(tarballRequests).toBe(1);
+  });
+
+  test("does not emit another ready status when an installed bridge is ensured again", async () => {
+    const bytes = await fixtureTarball();
+    const dataDir = await tempDirectory("overlearn-bridge-status-");
+    const states: string[] = [];
+    const service = createManagedBridgeService({
+      dataDir,
+      fetchImpl: injectedFetch(packument(bytes), bytes),
+      registryUrl: "https://fake.registry",
+      onStatus: (_definition, status) => states.push(status.state),
+    });
+
+    const first = await service.ensure(codexDefinition);
+    expect(first).toBeDefined();
+    expect(states).toEqual(["downloading", "ready"]);
+
+    await expect(service.ensure(codexDefinition)).resolves.toBe(first);
+    expect(states).toEqual(["downloading", "ready"]);
   });
 });

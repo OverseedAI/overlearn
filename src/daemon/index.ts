@@ -1545,32 +1545,65 @@ const commandInstalled = (command: string, env: Env): boolean => {
   return (path === undefined ? Bun.which(command) : Bun.which(command, { PATH: path })) !== null;
 };
 
-const detectHarnesses = (
+type HarnessDetectionCache = {
+  value?: Map<string, AdapterDetection>;
+  pending?: Promise<Map<string, AdapterDetection>>;
+};
+
+const detectHarnesses = async (
   env: Env,
   bridges: ManagedBridgeService,
-): Map<string, AdapterDetection> => {
-  const detections = new Map<string, AdapterDetection>();
+): Promise<Map<string, AdapterDetection>> =>
+  new Map(
+    await Promise.all(
+      harnessAdapterDefinitions.map(async (definition) => {
+        const entry = bridges.entry(definition);
+        const managedCommand =
+          entry === undefined ? undefined : managedBridgeCommand(entry, env);
+        const adapter = getHarnessAdapter(definition.id, {
+          env,
+          ...(managedCommand === undefined ? {} : { managedCommand }),
+        });
+        const bridgeDetection = await adapter?.detect();
+        const detection = {
+          installed: commandInstalled(definition.loginCommand.command, env),
+          authenticated: detectAcpAuthentication(definition, env),
+          ...(bridgeDetection?.version === undefined
+            ? {}
+            : { version: bridgeDetection.version }),
+        };
 
-  for (const definition of harnessAdapterDefinitions) {
-    const entry = bridges.entry(definition);
-    const managedCommand =
-      entry === undefined ? undefined : managedBridgeCommand(entry, env);
-    const adapter = getHarnessAdapter(definition.id, {
-      env,
-      ...(managedCommand === undefined ? {} : { managedCommand }),
-    });
-    const bridgeDetection = adapter?.detect();
-    const detection = {
-      installed: commandInstalled(definition.loginCommand.command, env),
-      authenticated: detectAcpAuthentication(definition, env),
-      ...(bridgeDetection?.version === undefined
-        ? {}
-        : { version: bridgeDetection.version }),
-    };
-    detections.set(definition.id, detection);
+        return [definition.id, detection] as const;
+      }),
+    ),
+  );
+
+const refreshHarnessDetections = async (
+  env: Env,
+  bridges: ManagedBridgeService,
+  cache: HarnessDetectionCache,
+  refresh = false,
+): Promise<void> => {
+  if (cache.value !== undefined && !refresh) {
+    return;
   }
 
-  return detections;
+  if (cache.pending !== undefined) {
+    await cache.pending;
+    if (!refresh) {
+      return;
+    }
+  }
+
+  const pending = detectHarnesses(env, bridges);
+  cache.pending = pending;
+  try {
+    cache.value = await pending;
+  } finally {
+    if (cache.pending === pending) {
+      delete cache.pending;
+    }
+  }
 };
 
 const harnessSummaries = (
@@ -1578,13 +1611,8 @@ const harnessSummaries = (
   courseId: number | undefined,
   env: Env,
   bridges: ManagedBridgeService,
-  cache: { value?: Map<string, AdapterDetection> },
-  refresh = false,
+  cache: HarnessDetectionCache,
 ): readonly HarnessSummary[] => {
-  if (cache.value === undefined || refresh) {
-    cache.value = detectHarnesses(env, bridges);
-  }
-
   const selected = selectedHarnessId(store, courseId, env);
   const course = courseId === undefined ? undefined : getCourse(store, courseId);
 
@@ -2000,8 +2028,10 @@ export const runDaemon = async (
   const activeTurnByCourse = new Map<number, number>();
   const activeTurnSnapshotByCourse = new Map<number, ActiveTeachingTurn>();
   const agentStreamReplay: AgentStreamPayload[] = [];
-  const harnessDetectionCache: { value?: Map<string, AdapterDetection> } = {};
+  const harnessDetectionCache: HarnessDetectionCache = {};
   let publishBridgeStatus = (): void => {};
+  let bridgeStatusGeneration = 0;
+  let bridgeStatusPublishing = false;
   const managedBridgesDisabled =
     env["OVERLEARN_DISABLE_MANAGED_BRIDGES"] === "1";
   const bridges = createManagedBridgeService({
@@ -2011,6 +2041,7 @@ export const runDaemon = async (
       : { registryUrl: env["OVERLEARN_NPM_REGISTRY_URL"] }),
     onStatus: () => {
       delete harnessDetectionCache.value;
+      bridgeStatusGeneration += 1;
       publishBridgeStatus();
     },
   });
@@ -2113,7 +2144,6 @@ export const runDaemon = async (
   const harnessesPayload = (
     courseId: number | undefined,
     switched: boolean,
-    refresh = false,
   ): HarnessesPayload => ({
     ...(courseId === undefined ? { scope: "profile" as const } : { courseId }),
     harnesses: harnessSummaries(
@@ -2122,7 +2152,6 @@ export const runDaemon = async (
       env,
       bridges,
       harnessDetectionCache,
-      refresh,
     ),
     switched,
   });
@@ -2135,10 +2164,33 @@ export const runDaemon = async (
   );
 
   publishBridgeStatus = () => {
-    sseHub.broadcast("harnesses", harnessesPayload(undefined, false, true));
-    for (const courseId of runtimes.keys()) {
-      sseHub.broadcast("harnesses", harnessesPayload(courseId, false, true));
+    if (bridgeStatusPublishing) {
+      return;
     }
+
+    bridgeStatusPublishing = true;
+    void (async () => {
+      let refreshedGeneration = 0;
+      while (refreshedGeneration !== bridgeStatusGeneration) {
+        const targetGeneration = bridgeStatusGeneration;
+        await refreshHarnessDetections(
+          env,
+          bridges,
+          harnessDetectionCache,
+          true,
+        );
+        refreshedGeneration = targetGeneration;
+      }
+
+      sseHub.broadcast("harnesses", harnessesPayload(undefined, false));
+      for (const courseId of runtimes.keys()) {
+        sseHub.broadcast("harnesses", harnessesPayload(courseId, false));
+      }
+    })()
+      .catch(() => undefined)
+      .finally(() => {
+        bridgeStatusPublishing = false;
+      });
   };
 
   const startManagedBridgeEnsures = (): void => {
@@ -2535,7 +2587,7 @@ export const runDaemon = async (
             currentCourse?.model,
             currentCourse?.effort,
           );
-          if (fallback.detect().installed) {
+          if ((await fallback.detect()).installed) {
             return fallback;
           }
           throw new Error(
@@ -2548,7 +2600,7 @@ export const runDaemon = async (
             currentCourse?.model,
             currentCourse?.effort,
           );
-          if (fallback.detect().installed) {
+          if ((await fallback.detect()).installed) {
             return fallback;
           }
 
@@ -3018,7 +3070,7 @@ export const runDaemon = async (
       }
 
       const profile = patchProfileResource(patch);
-      sseHub.broadcast("harnesses", harnessesPayload(undefined, false, true));
+      sseHub.broadcast("harnesses", harnessesPayload(undefined, false));
       return jsonResponse(profile);
     } catch (error) {
       return textResponse(
@@ -3124,13 +3176,13 @@ export const runDaemon = async (
       return textResponse(`Unknown harness adapter: ${harnessId}`, 404);
     }
 
+    await refreshHarnessDetections(env, bridges, harnessDetectionCache, true);
     const [summary] = harnessSummaries(
       store,
       undefined,
       env,
       bridges,
       harnessDetectionCache,
-      true,
     ).filter((candidate) => candidate.id === definition.id);
     if (summary?.installed !== true) {
       return textResponse(`${definition.name} is not installed.`, 409);
@@ -3810,6 +3862,12 @@ export const runDaemon = async (
 
     if (method === "GET" && requestUrl.pathname === "/api/harnesses") {
       startManagedBridgeEnsures();
+      await refreshHarnessDetections(
+        env,
+        bridges,
+        harnessDetectionCache,
+        requestUrl.searchParams.get("refresh") === "1",
+      );
       const courseIdParam = requestUrl.searchParams.get("courseId");
       const scope = requestUrl.searchParams.get("scope");
       if (courseIdParam !== null && scope !== null) {
@@ -3835,7 +3893,6 @@ export const runDaemon = async (
             env,
             bridges,
             harnessDetectionCache,
-            requestUrl.searchParams.get("refresh") === "1",
           ),
         );
       }
@@ -3851,7 +3908,6 @@ export const runDaemon = async (
           env,
           bridges,
           harnessDetectionCache,
-          requestUrl.searchParams.get("refresh") === "1",
         ),
       );
     }

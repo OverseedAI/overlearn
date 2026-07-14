@@ -3201,6 +3201,52 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
+    "serves course state while harness versions are still being detected",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const fakeHarness = await withFakeHarnessPath();
+      const daemon = await start({
+        useHarnessOverride: false,
+        extraEnv: {
+          PATH: fakeHarness.path,
+          OVERLEARN_HARNESS_VERSION_DELAY: "0.4",
+        },
+      });
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Concurrent course load",
+        });
+        let harnessesFinished = false;
+        const harnessesRequest = authFetch(
+          daemon,
+          `/api/harnesses?courseId=${course.id}&refresh=1`,
+        ).then((response) => {
+          harnessesFinished = true;
+          return response;
+        });
+        await sleep(50);
+
+        const courseResponse = await Promise.race([
+          authFetch(daemon, `/api/courses/${course.id}`),
+          sleep(200).then(() => undefined),
+        ]);
+
+        expect(courseResponse).toBeDefined();
+        expect(courseResponse?.status).toBe(200);
+        expect(harnessesFinished).toBe(false);
+        expect((await harnessesRequest).status).toBe(200);
+      } finally {
+        await rm(fakeHarness.binDir, { force: true, recursive: true });
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
     "swaps active harnesses and runs a continuity greeting turn",
     async () => {
       if (!(await ensureLocalhost())) {

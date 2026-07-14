@@ -124,7 +124,7 @@ export type AgentEvent =
 export type HarnessAdapter = Readonly<{
   id: HarnessAdapterId;
   name: string;
-  detect: () => AdapterDetection;
+  detect: () => AdapterDetection | Promise<AdapterDetection>;
   newSession: (
     cwd: string,
     config?: HarnessSessionConfig,

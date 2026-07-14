@@ -94,7 +94,7 @@ const run = async (): Promise<void> => {
   let session: SessionRef | undefined;
 
   try {
-    const detection = adapter.detect();
+    const detection = await adapter.detect();
     console.log(JSON.stringify({ event: "detect", detection }));
     if (!detection.installed) {
       throw new Error(`${command} was not detected on PATH.`);

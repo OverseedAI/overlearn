@@ -1409,25 +1409,30 @@ const detectAuthenticated = (
   return auth.paths?.(env).some((path) => existsSync(path)) ?? false;
 };
 
-const detectVersion = (
+const detectVersion = async (
   commandLine: readonly string[],
   versionArgs: readonly string[] | undefined,
   env: Env,
-): string | undefined => {
+): Promise<string | undefined> => {
   if (versionArgs === undefined || versionArgs.length === 0) {
     return undefined;
   }
 
   try {
-    const result = Bun.spawnSync({
+    const child = Bun.spawn({
       cmd: [...commandLine, ...versionArgs],
       env: mergeEnv(process.env, env),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
-    const stdout = result.stdout.toString("utf8").trim();
-    const stderr = result.stderr.toString("utf8").trim();
+    const [stdoutText, stderrText] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    const stdout = stdoutText.trim();
+    const stderr = stderrText.trim();
     const text = stdout.length > 0 ? stdout : stderr;
 
     return text.length === 0 ? undefined : text.split("\n")[0]?.trim();
@@ -1481,10 +1486,10 @@ export const detectAcpAuthentication = (
   env: Env = process.env,
 ): boolean => detectAuthenticated(definition.auth, env);
 
-const detectAdapter = (
+const detectAdapter = async (
   definition: AcpAdapterDefinition,
   override: AcpAdapterOverride,
-): AdapterDetection => {
+): Promise<AdapterDetection> => {
   const env = mergeEnv(process.env, override.env ?? {});
   const commandLine = resolveInstalledCommandLine(definition, override, env);
 
@@ -1495,7 +1500,7 @@ const detectAdapter = (
     };
   }
 
-  const version = detectVersion(commandLine, definition.versionArgs, env);
+  const version = await detectVersion(commandLine, definition.versionArgs, env);
   const detection = {
     installed: true,
     authenticated: detectAuthenticated(definition.auth, env),

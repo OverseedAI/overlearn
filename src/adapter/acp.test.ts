@@ -208,7 +208,43 @@ describe("ACP harness adapter detection", () => {
     ).toEqual([overrideBridge]);
   });
 
-  test("reports a missing binary without attempting auth", () => {
+  test("runs version detection without blocking the event loop", async () => {
+    const directory = await createTempDir();
+    tempDirs.push(directory);
+    const command = join(directory, "slow-version-bridge");
+    await writeFile(
+      command,
+      "#!/bin/sh\n/bin/sleep 0.2\nprintf 'slow-bridge 1.0.0\\n'\n",
+      "utf8",
+    );
+    await chmod(command, 0o755);
+    const adapter = createAcpHarnessAdapter(
+      {
+        id: "slow-version",
+        name: "Slow version",
+        command: "slow-version-bridge",
+        args: [],
+        versionArgs: ["--version"],
+      },
+      { env: { PATH: directory } },
+    );
+    let eventLoopTicked = false;
+    const timer = setTimeout(() => {
+      eventLoopTicked = true;
+    }, 10);
+
+    const detection = await adapter.detect();
+    clearTimeout(timer);
+
+    expect(eventLoopTicked).toBe(true);
+    expect(detection).toEqual({
+      installed: true,
+      authenticated: false,
+      version: "slow-bridge 1.0.0",
+    });
+  });
+
+  test("reports a missing binary without attempting auth", async () => {
     const adapter = createAcpHarnessAdapter(
       {
         id: "missing",
@@ -227,7 +263,7 @@ describe("ACP harness adapter detection", () => {
       },
     );
 
-    expect(adapter.detect()).toEqual({
+    expect(await adapter.detect()).toEqual({
       installed: false,
       authenticated: false,
     });

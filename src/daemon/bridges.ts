@@ -824,7 +824,6 @@ export const createManagedBridgeService = (
       }
       const installed = managedBridgeEntry(definition, options.dataDir);
       if (installed !== undefined) {
-        update(definition, { state: "ready" });
         return installed;
       }
 
