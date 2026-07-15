@@ -10,6 +10,7 @@ import {
   LoaderCircle,
   Paperclip,
   PanelRight,
+  Square,
   Sparkles,
   X,
 } from "lucide-react";
@@ -234,6 +235,7 @@ function Composer({
   loadHarnesses,
   selectHarness,
   disabled,
+  running,
   placeholder,
   registerFileDrop,
 }: {
@@ -244,6 +246,7 @@ function Composer({
   loadHarnesses: (refresh?: boolean) => void;
   selectHarness: (id: string) => Promise<void>;
   disabled: boolean;
+  running: boolean;
   placeholder: string;
   registerFileDrop: (handler: ((files: FileList) => void) | null) => void;
 }) {
@@ -261,6 +264,7 @@ function Composer({
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string>();
   const [sending, setSending] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [customModelOpen, setCustomModelOpen] = useState(false);
   const [customModelText, setCustomModelText] = useState("");
   const [webSearchEnabled, setWebSearchEnabled] = useState(
@@ -269,10 +273,26 @@ function Composer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nextAttachmentId = useRef(1);
+  const lastSubmission = useRef<
+    Readonly<{ text: string; attachments: ComposerAttachment[] }> | undefined
+  >(undefined);
+  const observedRunning = useRef(false);
 
   useEffect(() => {
     setWebSearchEnabled(course.webSearchEnabled);
   }, [course.webSearchEnabled]);
+
+  useEffect(() => {
+    if (running) {
+      observedRunning.current = true;
+      return;
+    }
+
+    if (observedRunning.current && !cancelling) {
+      observedRunning.current = false;
+      lastSubmission.current = undefined;
+    }
+  }, [cancelling, running]);
 
   const chooseHarness = async (id: string) => {
     try {
@@ -391,12 +411,12 @@ function Composer({
 
   useEffect(() => {
     registerFileDrop((files) => {
-      if (!disabled && !sending) {
+      if (!disabled && !running && !sending) {
         addFiles(files);
       }
     });
     return () => registerFileDrop(null);
-  }, [addFiles, disabled, sending, registerFileDrop]);
+  }, [addFiles, disabled, running, sending, registerFileDrop]);
 
   const removeAttachment = (id: string) => {
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
@@ -409,6 +429,7 @@ function Composer({
       value.length === 0 ||
       sending ||
       disabled ||
+      running ||
       attachments.some((attachment) => attachment.status === "pending")
     ) {
       return;
@@ -434,6 +455,10 @@ function Composer({
         value,
         readyAttachments.length === 0 ? undefined : readyAttachments,
       );
+      lastSubmission.current = {
+        text: value,
+        attachments: [...attachments],
+      };
       setText("");
       setAttachments([]);
       setAttachmentError(undefined);
@@ -446,6 +471,33 @@ function Composer({
       textareaRef.current?.focus();
     }
   };
+
+  const cancel = async () => {
+    if (!running || cancelling) {
+      return;
+    }
+
+    setCancelling(true);
+    try {
+      await api.cancelTurn(courseId);
+      const submitted = lastSubmission.current;
+      if (submitted !== undefined) {
+        setText(submitted.text);
+        setAttachments(submitted.attachments);
+        setAttachmentError(undefined);
+        lastSubmission.current = undefined;
+      }
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError ? error.message : "Couldn’t stop the agent.",
+      );
+    } finally {
+      setCancelling(false);
+      textareaRef.current?.focus();
+    }
+  };
+
+  const controlsDisabled = disabled || running || sending;
 
   return (
     <form
@@ -497,7 +549,7 @@ function Composer({
                 <button
                   type="button"
                   aria-label={`Remove ${attachment.name}`}
-                  disabled={sending}
+                  disabled={controlsDisabled}
                   onClick={() => removeAttachment(attachment.id)}
                   className="rounded-sm text-muted-foreground hover:text-foreground disabled:opacity-50"
                 >
@@ -520,7 +572,7 @@ function Composer({
           aria-label="Message the agent"
           placeholder={placeholder}
           value={text}
-          disabled={disabled || sending}
+          disabled={controlsDisabled}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
@@ -546,7 +598,7 @@ function Composer({
               size="icon"
               variant="ghost"
               aria-label="Attach images or files"
-              disabled={disabled || sending}
+              disabled={controlsDisabled}
               onClick={() => fileInputRef.current?.click()}
               className="size-8 rounded-full"
             >
@@ -562,7 +614,7 @@ function Composer({
                   size="sm"
                   variant="ghost"
                   aria-label="Choose teaching agent"
-                  disabled={disabled || sending}
+                  disabled={controlsDisabled}
                   className="min-w-0 max-w-36 shrink rounded-full px-2.5 text-muted-foreground"
                 >
                   <Bot className="size-4 shrink-0" />
@@ -604,7 +656,7 @@ function Composer({
                     size="sm"
                     variant="ghost"
                     aria-label="Choose model and effort"
-                    disabled={disabled || sending}
+                    disabled={controlsDisabled}
                     className="min-w-0 max-w-56 shrink rounded-full px-2.5 text-muted-foreground"
                   >
                     <Sparkles className="size-4 shrink-0" />
@@ -726,7 +778,7 @@ function Composer({
                     variant={webSearchEnabled ? "secondary" : "ghost"}
                     aria-label="Toggle web search"
                     aria-pressed={webSearchEnabled}
-                    disabled={disabled || sending}
+                    disabled={controlsDisabled}
                     onClick={() => void toggleWebSearch()}
                     className={cn(
                       "min-w-0 max-w-28 shrink rounded-full px-2.5",
@@ -748,20 +800,37 @@ function Composer({
             </Tooltip>
           </div>
 
-          <Button
-            type="submit"
-            size="icon"
-            aria-label="Send"
-            disabled={
-              disabled ||
-              sending ||
-              text.trim().length === 0 ||
-              attachments.some((attachment) => attachment.status === "pending")
-            }
-            className="size-8 rounded-full"
-          >
-            <ArrowUp className="size-4" />
-          </Button>
+          {running ? (
+            <Button
+              type="button"
+              size="icon"
+              aria-label="Stop agent"
+              disabled={cancelling || sending}
+              onClick={() => void cancel()}
+              className="size-8 rounded-full"
+            >
+              {cancelling ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : (
+                <Square className="size-3.5 fill-current" />
+              )}
+            </Button>
+          ) : (
+            <Button
+              type="submit"
+              size="icon"
+              aria-label="Send"
+              disabled={
+                disabled ||
+                sending ||
+                text.trim().length === 0 ||
+                attachments.some((attachment) => attachment.status === "pending")
+              }
+              className="size-8 rounded-full"
+            >
+              <ArrowUp className="size-4" />
+            </Button>
+          )}
         </div>
       </div>
 
@@ -1020,7 +1089,8 @@ export function CourseScreen() {
                   harnesses={harnesses}
                   loadHarnesses={loadHarnesses}
                   selectHarness={selectHarness}
-                  disabled={composerDisabled}
+                  disabled={ended}
+                  running={busy}
                   placeholder={
                     busy
                       ? (store.statusMessage ?? "Preparing your next step…")

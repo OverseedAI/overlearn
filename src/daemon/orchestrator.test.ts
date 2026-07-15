@@ -388,6 +388,84 @@ describe("daemon turn orchestrator", () => {
     expect(received).toEqual([attachments]);
   });
 
+  test("cancels an in-flight turn without retrying or ending its warm session", async () => {
+    let promptCount = 0;
+    let newSessionCount = 0;
+    let cancelCount = 0;
+    let releaseCancelledPrompt: (() => void) | undefined;
+    let resolvePromptStarted: (() => void) | undefined;
+    const promptStarted = new Promise<void>((resolve) => {
+      resolvePromptStarted = resolve;
+    });
+    const streamed: AgentStreamPayload[] = [];
+
+    const adapter: HarnessAdapter = {
+      id: "codex",
+      name: "Codex",
+      detect: () => ({ installed: true, authenticated: true }),
+      newSession: async () => {
+        newSessionCount += 1;
+        return {
+          id: "session",
+          adapterId: "codex",
+          cwd: "/tmp",
+          processId: 1,
+        };
+      },
+      prompt: async function* (): AsyncIterable<AgentEvent> {
+        promptCount += 1;
+        if (promptCount === 1) {
+          yield { type: "text", text: "Partial explanation" };
+          resolvePromptStarted?.();
+          await new Promise<void>((resolve) => {
+            releaseCancelledPrompt = resolve;
+          });
+          yield { type: "done", reason: "cancelled" };
+          return;
+        }
+
+        yield { type: "text", text: "Retried by the learner." };
+        yield { type: "done", reason: "complete" };
+      },
+      cancel: async () => {
+        cancelCount += 1;
+        releaseCancelledPrompt?.();
+      },
+      end: async () => undefined,
+    };
+    const orchestrator = createDaemonTurnOrchestrator({
+      courseId: 42,
+      getCourseMetadata: () => undefined,
+      cwd: "/tmp",
+      mcpBaseUrl: "http://127.0.0.1:1234",
+      adapter,
+      onAgentEvent: (payload) => streamed.push(payload),
+      registerTeachingSession: () => ({ token: "token" }),
+      unregisterTeachingSession: () => undefined,
+    });
+
+    const running = orchestrator.runTurn(turn, "teaching", noTopicPosition);
+    await promptStarted;
+
+    await expect(orchestrator.cancelTurn()).resolves.toBe(true);
+    await expect(running).resolves.toEqual({ ok: true, cancelled: true });
+    expect(promptCount).toBe(1);
+    expect(cancelCount).toBe(1);
+    expect(newSessionCount).toBe(1);
+    expect(orchestrator.hasActiveSession()).toBe(true);
+    expect(streamed.at(-1)?.event).toEqual({
+      type: "done",
+      reason: "cancelled",
+    });
+
+    await expect(
+      orchestrator.runTurn({ ...turn, turn: 8 }, "teaching", noTopicPosition),
+    ).resolves.toEqual({ ok: true });
+    expect(promptCount).toBe(2);
+    expect(newSessionCount).toBe(1);
+    await expect(orchestrator.cancelTurn()).resolves.toBe(false);
+  });
+
   test("injects HTTP MCP config, records session lifecycle, streams events, and retries once after a crash", async () => {
     const configs: HarnessSessionConfig[] = [];
     const endedSessions: string[] = [];

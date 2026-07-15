@@ -198,6 +198,11 @@ export type TranscriptEntry = TranscriptEntryBase &
       kind: "topic-change";
       text: string;
     }
+    | {
+      role: "system";
+      kind: "turn-cancelled";
+      text: string;
+    }
   );
 
 export type TranscriptPage = {

@@ -281,6 +281,11 @@ type TranscriptEntry = TranscriptEntryBase &
       kind: "topic-change";
       text: string;
     }>
+    | Readonly<{
+      role: "system";
+      kind: "turn-cancelled";
+      text: string;
+    }>
   );
 
 type HarnessSummary = Readonly<{
@@ -1377,6 +1382,15 @@ const uiTranscriptEntry = (entry: StoreTranscriptEntry): TranscriptEntry => {
       ...base,
       role: "system",
       kind: "topic-change",
+      text: entry.content,
+    };
+  }
+
+  if (entry.kind === "turn-cancelled") {
+    return {
+      ...base,
+      role: "system",
+      kind: "turn-cancelled",
       text: entry.content,
     };
   }
@@ -2507,6 +2521,7 @@ export const runDaemon = async (
   const onAgentEvent = (payload: AgentStreamPayload): void => {
     const terminalWrapUp =
       payload.event.type === "done" &&
+      payload.event.reason === "complete" &&
       statuses.get(payload.courseId)?.status === "wrapping-up";
     if (terminalWrapUp) {
       revokeTeachingTokensForCourse(payload.courseId, "done");
@@ -2713,6 +2728,25 @@ export const runDaemon = async (
         importedFrom: null,
       });
 
+      if (result.ok && result.cancelled) {
+        const activeTurn = getActiveTurn(course.id);
+        const entry = appendUiTranscript(store, course.id, {
+          turn: turn.turn,
+          ...(activeTurn?.topicId === undefined
+            ? {}
+            : { topicId: activeTurn.topicId }),
+          role: "system",
+          kind: "turn-cancelled",
+          content: "Cancelled",
+          payload: {
+            role: "system",
+            kind: "turn-cancelled",
+            text: "Cancelled",
+          },
+        });
+        sseHub.broadcast("message", { courseId: course.id, entry });
+      }
+
       currentRuntime.runningTurn = false;
       currentRuntime.lastActivityAt = Date.now();
       activeTurnByCourse.delete(course.id);
@@ -2726,7 +2760,7 @@ export const runDaemon = async (
         return;
       }
 
-      if (mode === "wrap-up") {
+      if (mode === "wrap-up" && !result.cancelled) {
         await currentRuntime.orchestrator.endSession("done");
         runtimes.delete(course.id);
         setStatus(course.id, "session-ended");
@@ -3459,6 +3493,34 @@ export const runDaemon = async (
         return runCourseTurn(course, appended.events, "teaching", turn);
       } catch (error) {
         return textResponse(error instanceof Error ? error.message : "Invalid submit request.", 400);
+      }
+    }
+
+    if (action === "cancel-turn" && extra === undefined) {
+      if (request.method !== "POST") {
+        return emptyResponse(405);
+      }
+
+      const currentRuntime = runtimes.get(courseId);
+      if (currentRuntime?.runningTurn !== true) {
+        return textResponse("No turn is running for this course.", 409);
+      }
+
+      try {
+        const cancelled = await currentRuntime.orchestrator.cancelTurn();
+        if (!cancelled) {
+          return textResponse("No turn is running for this course.", 409);
+        }
+
+        return jsonResponse({
+          ok: true,
+          turn: activeTurnByCourse.get(courseId),
+        });
+      } catch (error) {
+        return textResponse(
+          error instanceof Error ? error.message : "Could not cancel the turn.",
+          500,
+        );
       }
     }
 

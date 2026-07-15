@@ -100,7 +100,7 @@ export type AgentStreamPayload = Readonly<{
 }>;
 
 export type OrchestratorResult =
-  | Readonly<{ ok: true }>
+  | Readonly<{ ok: true; cancelled?: boolean }>
   | Readonly<{
       ok: false;
       reason: "agent-crashed" | "timeout" | "no-output" | "unsupported-model";
@@ -113,6 +113,7 @@ export type DaemonTurnOrchestrator = Readonly<{
     mode: TurnPromptMode,
     position: TurnPositionContext,
   ) => Promise<OrchestratorResult>;
+  cancelTurn: () => Promise<boolean>;
   endSession: (reason?: string) => Promise<void>;
   resetSession: (reason?: string) => Promise<boolean>;
   hasActiveSession: () => boolean;
@@ -612,8 +613,10 @@ const consumePrompt = async (
       }
 
       if (event.type === "done") {
-        return sawOutput || event.reason === "cancelled"
-          ? { ok: true }
+        return event.reason === "cancelled"
+          ? { ok: true, cancelled: true }
+          : sawOutput
+            ? { ok: true }
           : noOutputFailure(deniedPermissions);
       }
     }
@@ -678,6 +681,11 @@ type ActiveSession = Readonly<{
   teachingSession: ActiveTeachingSessionRegistration;
 }>;
 
+type ActiveTurnCancellation = {
+  requested: boolean;
+  activeSession?: ActiveSession;
+};
+
 const mcpUrl = (baseUrl: string, token: string): string =>
   `${baseUrl.replace(/\/+$/, "")}/mcp/${encodeURIComponent(token)}`;
 
@@ -687,6 +695,7 @@ export const createDaemonTurnOrchestrator = (
   const env = options.env ?? process.env;
   const timeoutMs = options.timeoutMs ?? resolveTurnTimeoutMs(env);
   let activeSession: ActiveSession | undefined;
+  let activeTurnCancellation: ActiveTurnCancellation | undefined;
   let nextTurnNeedsResumeContext = true;
   let sequence = 1;
 
@@ -712,6 +721,30 @@ export const createDaemonTurnOrchestrator = (
     nextTurnNeedsResumeContext = true;
 
     return hadActiveSession;
+  };
+
+  const cancelTurn = async (): Promise<boolean> => {
+    const cancellation = activeTurnCancellation;
+    if (cancellation === undefined) {
+      return false;
+    }
+
+    if (cancellation.requested) {
+      return true;
+    }
+
+    cancellation.requested = true;
+    const active = cancellation.activeSession;
+    try {
+      if (active !== undefined) {
+        await active.adapter.cancel(active.session);
+      }
+    } catch (error) {
+      cancellation.requested = false;
+      throw error;
+    }
+
+    return true;
   };
 
   const ensureSession = async (): Promise<ActiveSession> => {
@@ -768,8 +801,20 @@ export const createDaemonTurnOrchestrator = (
     mode: TurnPromptMode,
     includeResumeContext: boolean,
     position: TurnPositionContext,
+    cancellation: ActiveTurnCancellation,
   ): Promise<OrchestratorResult> => {
     const active = await ensureSession();
+    cancellation.activeSession = active;
+    if (cancellation.requested) {
+      options.onAgentEvent({
+        courseId: options.courseId,
+        turn: turn.turn,
+        sequence: nextSequence(),
+        event: { type: "done", reason: "cancelled" },
+      });
+      delete cancellation.activeSession;
+      return { ok: true, cancelled: true };
+    }
     const webSearchEnabled =
       active.adapter.id === "claude-code" &&
       (options.getWebSearchEnabled?.() ?? false);
@@ -798,17 +843,28 @@ export const createDaemonTurnOrchestrator = (
     const attachments = turn.events.flatMap((event) =>
       event.type === "message" ? (event.attachments ?? []) : [],
     );
-    const result = await runPromptWithTimeout(
-      active.adapter,
-      active.session,
-      prompt,
-      attachments.length === 0 ? undefined : attachments,
-      options.courseId,
-      turn,
-      timeoutMs,
-      nextSequence,
-      options.onAgentEvent,
-    );
+    let result: PromptAttemptResult;
+    try {
+      result = await runPromptWithTimeout(
+        active.adapter,
+        active.session,
+        prompt,
+        attachments.length === 0 ? undefined : attachments,
+        options.courseId,
+        turn,
+        timeoutMs,
+        nextSequence,
+        options.onAgentEvent,
+      );
+    } finally {
+      if (cancellation.activeSession === active) {
+        delete cancellation.activeSession;
+      }
+    }
+
+    if (cancellation.requested) {
+      return { ok: true, cancelled: true };
+    }
 
     if ("timedOut" in result) {
       await endSession("timeout");
@@ -831,22 +887,43 @@ export const createDaemonTurnOrchestrator = (
     mode: TurnPromptMode,
     position: TurnPositionContext,
   ): Promise<OrchestratorResult> => {
-    const includeResumeContext = nextTurnNeedsResumeContext;
-    const first = await runAttempt(turn, mode, includeResumeContext, position);
+    const cancellation: ActiveTurnCancellation = { requested: false };
+    activeTurnCancellation = cancellation;
 
-    // Retrying an unsupported model would spawn a fresh session into the same
-    // rejection, so surface the failure immediately.
-    if (first.ok || first.reason === "timeout" || first.reason === "unsupported-model") {
-      nextTurnNeedsResumeContext = !first.ok;
-      return attemptFailureMessage(first);
+    try {
+      const includeResumeContext = nextTurnNeedsResumeContext;
+      const first = await runAttempt(
+        turn,
+        mode,
+        includeResumeContext,
+        position,
+        cancellation,
+      );
+
+      // Retrying an unsupported model would spawn a fresh session into the same
+      // rejection, so surface the failure immediately. A learner cancellation
+      // also ends this turn without replacing the still-warm session.
+      if (
+        first.ok ||
+        first.reason === "timeout" ||
+        first.reason === "unsupported-model"
+      ) {
+        nextTurnNeedsResumeContext = !first.ok;
+        return attemptFailureMessage(first);
+      }
+
+      const retry = await runAttempt(turn, mode, true, position, cancellation);
+      nextTurnNeedsResumeContext = !retry.ok;
+      return attemptFailureMessage(retry);
+    } finally {
+      if (activeTurnCancellation === cancellation) {
+        activeTurnCancellation = undefined;
+      }
     }
-
-    const retry = await runAttempt(turn, mode, true, position);
-    nextTurnNeedsResumeContext = !retry.ok;
-    return attemptFailureMessage(retry);
   };
 
   return {
+    cancelTurn,
     endSession,
     hasActiveSession: () => activeSession !== undefined,
     resetSession,

@@ -269,6 +269,15 @@ function Entry({
     return <TopicChangeDivider text={entry.text} />;
   }
 
+  if (kind === "turn-cancelled" && entry.role === "system") {
+    return (
+      <p className="flex items-center gap-1.5 text-xs text-muted-foreground/70">
+        <X className="size-3" />
+        Cancelled
+      </p>
+    );
+  }
+
   if (kind === "thinking" && entry.role === "agent" && "text" in entry) {
     return (
       <EntryShell label="Agent">

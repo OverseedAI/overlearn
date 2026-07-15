@@ -3423,6 +3423,129 @@ describe(`daemon contract (${runtime.name})`, () => {
   );
 
   contractTest(
+    "cancels a running turn, keeps partial output, and reuses the session",
+    async () => {
+      if (!(await ensureLocalhost())) {
+        return;
+      }
+
+      const daemon = await start({ scenario: "normal" });
+      const sse = await createSseClient(daemon.url, daemon.token);
+
+      try {
+        const course = await createCourse(daemon, {
+          title: "Cancellation Course",
+        });
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "Please stop this draft",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "text",
+          "partial agent text before cancellation",
+        );
+
+        const response = await authFetch(
+          daemon,
+          `/api/courses/${course.id}/cancel-turn`,
+          { method: "POST" },
+        );
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ ok: true, turn: 1 });
+
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 1 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done" &&
+            data["event"]["reason"] === "cancelled",
+          "cancelled turn terminal event",
+        );
+        await sse.waitFor(
+          "status",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["status"] === "waiting-for-agent",
+          "ready status after cancellation",
+        );
+
+        const cancelledState = await courseState(daemon, course.id);
+        const transcript = cancelledState["transcript"];
+        expect(Array.isArray(transcript)).toBe(true);
+        expect(transcript).toContainEqual(
+          expect.objectContaining({
+            role: "system",
+            kind: "turn-cancelled",
+            text: "Cancelled",
+            turn: 1,
+          }),
+        );
+        expect(
+          transcript.some(
+            (entry) =>
+              isRecord(entry) &&
+              entry["role"] === "agent" &&
+              entry["turn"] === 1 &&
+              typeof entry["text"] === "string" &&
+              entry["text"].length > 0,
+          ),
+        ).toBe(true);
+
+        await submitCourseMessage(
+          daemon.url,
+          daemon.token,
+          course.id,
+          "Try the corrected prompt",
+        );
+        await sse.waitFor(
+          "agent-stream",
+          (data) =>
+            isRecord(data) &&
+            data["courseId"] === course.id &&
+            data["turn"] === 2 &&
+            isRecord(data["event"]) &&
+            data["event"]["type"] === "done" &&
+            data["event"]["reason"] === "complete",
+          "retried turn completion",
+        );
+
+        const logs = await waitForLogEntries(
+          daemon.logPath,
+          (entries) =>
+            entries.filter((entry) => entry["event"] === "session/prompt")
+              .length >= 2,
+          "two prompt attempts",
+        );
+        expect(
+          logs.filter((entry) => entry["event"] === "session/new"),
+        ).toHaveLength(1);
+
+        const idle = await authFetch(
+          daemon,
+          `/api/courses/${course.id}/cancel-turn`,
+          { method: "POST" },
+        );
+        expect(idle.status).toBe(409);
+      } finally {
+        sse.close();
+      }
+    },
+    15_000,
+  );
+
+  contractTest(
     "replays buffered agent-stream events to clients that connect mid-turn",
     async () => {
       if (!(await ensureLocalhost())) {

@@ -235,6 +235,8 @@ export const api = {
       text,
       ...(attachments === undefined ? {} : { attachments }),
     }),
+  cancelTurn: (id: number) =>
+    post<{ ok: true; turn: number }>(`/api/courses/${id}/cancel-turn`),
   nav: (id: number, path: string, options: { cardId?: string } = {}) =>
     post<{ ok: true; turn?: number }>(`/api/courses/${id}/nav`, {
       path,
