@@ -50,7 +50,7 @@ Run the main checks:
 ```sh
 bun run typecheck
 bun run lint
-bun test src
+bun run test
 ```
 
 Run the contract suite against source:

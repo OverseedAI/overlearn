@@ -53,6 +53,7 @@ import {
   readFileAsBase64,
   validateAttachmentFile,
 } from "@/lib/attachments";
+import { readComposerDraft, writeComposerDraft } from "@/lib/composer-draft";
 import { useCourseStore } from "@/lib/course-store";
 import { cn } from "@/lib/utils";
 import type {
@@ -260,7 +261,7 @@ function Composer({
     error?: string;
   }>;
 
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => readComposerDraft(courseId));
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string>();
   const [sending, setSending] = useState(false);
@@ -277,6 +278,11 @@ function Composer({
     Readonly<{ text: string; attachments: ComposerAttachment[] }> | undefined
   >(undefined);
   const observedRunning = useRef(false);
+
+  const updateText = (value: string) => {
+    setText(value);
+    writeComposerDraft(courseId, value);
+  };
 
   useEffect(() => {
     setWebSearchEnabled(course.webSearchEnabled);
@@ -459,7 +465,7 @@ function Composer({
         text: value,
         attachments: [...attachments],
       };
-      setText("");
+      updateText("");
       setAttachments([]);
       setAttachmentError(undefined);
     } catch (error) {
@@ -482,7 +488,7 @@ function Composer({
       await api.cancelTurn(courseId);
       const submitted = lastSubmission.current;
       if (submitted !== undefined) {
-        setText(submitted.text);
+        updateText(submitted.text);
         setAttachments(submitted.attachments);
         setAttachmentError(undefined);
         lastSubmission.current = undefined;
@@ -573,7 +579,7 @@ function Composer({
           placeholder={placeholder}
           value={text}
           disabled={controlsDisabled}
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => updateText(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
@@ -1083,6 +1089,7 @@ export function CourseScreen() {
                 </p>
               ) : (
                 <Composer
+                  key={courseId}
                   courseId={courseId}
                   course={course}
                   harness={selectedHarness}
